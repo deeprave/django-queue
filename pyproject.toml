@@ -1,0 +1,41 @@
+[project]
+name = "django-queue"
+version = "0.9.0"
+description = "Implementation of message queues for django"
+readme = "README.md"
+license = { file = "LICENSE.md" }
+requires-python = ">=3.11"
+authors = [
+    { name = "David Nugent", email = "davidn@uniquode.io" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "django>=5.1.4",
+]
+
+[tool.ruff]
+namespace-packages = ["django_queue"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest-mock>=3.14.0",
+    "pytest>=8.3.4",
+    "testcontainers>=4.9.0",
+]
+redis = [
+    "redis>=5.2.1",
+]
+
+[tool.uv]
+default-groups = ["dev", "redis"]
+
+[build-system]
+requires = ["flit-core"]
+build-backend = "flit_core.buildapi"
