@@ -26,6 +26,20 @@ The public ASGI helper wraps the Django application returned by
 WebSocket scopes are delegated unchanged to the wrapped Django application.
 This keeps worker ownership with the ASGI server rather than Django app setup.
 
+Its public API is `django_queue.asgi.with_queue_worker`, a direct function
+wrapper rather than an application factory or configuration object:
+
+```python
+application = with_queue_worker(
+    get_asgi_application(),
+    handlers={"default": handle_entry},
+    queues=None,
+)
+```
+
+`queues` defaults to the configured Django queue registry. Callers can provide
+an explicit mapping when composing an isolated application or integration test.
+
 The wrapper is intentionally for Django's ASGI application, not a generic
 lifespan-composition framework. Supporting arbitrary nested applications that
 also consume lifespan events would require bidirectional event proxying and is

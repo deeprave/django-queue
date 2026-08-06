@@ -133,6 +133,44 @@ best-effort attempt to record a safe `QueuePersistenceError` failure outcome.
 If it cannot confirm either terminal outcome, the worker raises
 `QueuePersistenceError` rather than accepting further entries.
 
+### ASGI in-process worker
+
+For local, single-process use and integration tests, an ASGI application can
+explicitly run a worker through the ASGI lifespan protocol. The application,
+not `django-queue`, decides whether to apply this wrapper; for example, it can
+use an environment-derived Django setting in `asgi.py`.
+
+```python
+from django.conf import settings
+from django.core.asgi import get_asgi_application
+
+from django_queue.asgi import with_queue_worker
+
+
+async def process_request(entry):
+    return {"processed": entry.payload["request_id"]}
+
+
+application = get_asgi_application()
+if settings.ENABLE_LOCAL_QUEUE_WORKER:
+    application = with_queue_worker(
+        application,
+        handlers={"default": process_request},
+    )
+```
+
+`with_queue_worker()` starts one worker for each ASGI server process after
+lifespan startup and cooperatively stops it during lifespan shutdown. It logs a
+warning whenever it starts because an in-process worker is not supported for
+production use. Use an external `runqueues` worker with a shared backend such
+as Redis in production.
+
+The wrapper accepts an explicit queue mapping for integration tests. Pass the
+same `MemoryQueue` instance to the wrapper and to the component producing work
+to exercise a complete request-to-worker flow without Redis. That queue remains
+local to one ASGI process: it cannot be consumed by another process, container,
+or external `runqueues` worker.
+
 With all queues, the `get()`, `peek()` and `pull()` methods return the object.
 With priority queues the priority is only used with and relevant to `add()`.
 Identified entries have no priority parameter, so their worker dispatch remains
