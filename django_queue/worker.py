@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Protocol
 
 from django_queue.backends.base import BaseQueue
 from django_queue.backends.exceptions import QueueEmptyException
@@ -13,6 +14,12 @@ from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_val
 logger = logging.getLogger(__name__)
 
 QueueHandler = Callable[[QueueEntry], Awaitable[object]]
+
+
+class QueueLookup(Protocol):
+    """Queue service lookup used by a worker's registered aliases."""
+
+    def __getitem__(self, alias: str) -> BaseQueue: ...
 
 
 class QueuePersistenceError(RuntimeError):
@@ -24,7 +31,7 @@ class AsyncQueueWorker:
 
     def __init__(
         self,
-        queues: Mapping[str, BaseQueue],
+        queues: QueueLookup,
         handlers: Mapping[str, QueueHandler],
         *,
         idle_delay: float = 0.1,
