@@ -4,12 +4,13 @@ version = "0.9.0"
 description = "Implementation of message queues for Django"
 readme = "README.md"
 license = { file = "LICENSE.md" }
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 authors = [
     { name = "David Nugent", email = "davidn@uniquode.io" }
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "django>=5.1.4",
@@ -27,6 +28,7 @@ testpaths = ["tests"]
 dev = [
     "pytest-mock>=3.14.0",
     "pytest>=8.3.4",
+    "ruff>=0.16.1",
     "testcontainers>=4.9.0",
 ]
 redis = [

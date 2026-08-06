@@ -1,5 +1,6 @@
 import pytest
-from django_queue.backends import RedisQueueJson, QueueEncodingException
+
+from django_queue.backends import QueueEncodingException, RedisQueueJson
 
 
 @pytest.fixture
@@ -39,13 +40,13 @@ def test_peek_valid_json(redis_queue):
 
 
 def test_add_none_item(redis_queue):
-    redis_queue.add(None)  # noqa
+    redis_queue.add(None)
     assert redis_queue.size() == 0
 
 
 def test_add_invalid_json(redis_queue):
     with pytest.raises(QueueEncodingException):
-        redis_queue.add({1, 2, 3})  # noqa Sets cannot be JSON encoded
+        redis_queue.add({1, 2, 3})
 
 
 def test_add_str(redis_queue):

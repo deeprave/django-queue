@@ -1,15 +1,22 @@
 import os
+
 import pytest
+
+os.environ.setdefault("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
 
 try:
     import redis
-    from testcontainers.redis import RedisContainer
+    from docker.errors import DockerException
+    from testcontainers.community.redis import RedisContainer
 
 
     @pytest.fixture(scope="module")
     def redis_container():
-        with RedisContainer("redis:alpine") as redis_container:
-            yield redis_container
+        try:
+            with RedisContainer("redis:alpine") as container:
+                yield container
+        except DockerException as exc:
+            pytest.skip(f"Docker is unavailable for Redis integration tests: {exc}")
 
 
     @pytest.fixture(scope="module")

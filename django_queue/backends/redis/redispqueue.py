@@ -1,21 +1,20 @@
 try:
     import redis
 
-    from typing import Union, Dict, Tuple, AnyStr
+    from django_queue.backends.exceptions import QueueEmptyException, QueueFullException
 
-    from django_queue.backends.exceptions import QueueFullException, QueueEmptyException
-    from .redisqueue import RedisQueue, _encode, _decode
+    from .redisqueue import RedisQueue, _decode, _encode
 
 
     class RedisPriorityQueue(RedisQueue):
-        def __init__(self, redis_spec: Union[str, redis.Redis], options: Dict = None, **kwargs):
+        def __init__(self, redis_spec: str | redis.Redis, options: dict | None = None, **kwargs):
             super().__init__(redis_spec, options, **kwargs)
 
         @property
         def stack(self):
             return False
 
-        def add(self, *items: Tuple[int, AnyStr]):
+        def add(self, *items: tuple[int, str]):
             """
             Add one or more priority, item pairs to the priority queue.
             :param items:
@@ -53,9 +52,9 @@ try:
                 attempt -= 1
                 try:  # Attempt to get the highest-priority item normally
                     return self.get()
-                except QueueEmptyException as e:
+                except QueueEmptyException:
                     if timeout <= 0:
-                        raise e
+                        raise
                     if item := self._redis.blpop(self._queue_name, timeout=timeout):
                         return _decode(item[1], self._encoding)
             raise QueueEmptyException

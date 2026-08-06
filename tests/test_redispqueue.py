@@ -1,5 +1,10 @@
 import pytest
-from django_queue.backends import RedisPriorityQueue, QueueFullException, QueueEmptyException
+
+from django_queue.backends import (
+    QueueEmptyException,
+    QueueFullException,
+    RedisPriorityQueue,
+)
 
 
 @pytest.fixture
@@ -27,7 +32,7 @@ def test_capacity(redis_priority_queue):
     """
     Test the capacity of the priority queue.
     """
-    assert redis_priority_queue.capacity() == 5
+    assert redis_priority_queue.capacity == 5
 
 
 def test_add(redis_priority_queue):

@@ -2,6 +2,11 @@
 
 This is an implementation of message queues for Django.
 
+## Requirements
+
+`django-queue` requires Python 3.14 or later. Queue entry IDs use the
+standard-library UUIDv7 implementation introduced in Python 3.14.
+
 ## Message Queues
 
 What are message queues? In Django, message queues enable independent and decoupled communication between parts of an
@@ -65,7 +70,65 @@ from django_queue import queue
 
 Multiple values can be added in the one `add()` call if required.
 
-With all queues, the `get()`, `peek()` and `pull()` methods returns the object. With priority queues the priority is only used with and relevant to `add()`.
+### Identified queue entries
+
+The entry-oriented API is appropriate when a producer needs to poll the
+outcome of work processed later. Payloads and handler results must be
+JSON-serialisable. The queue generates the UUIDv7 identifier and owns all
+lifecycle timestamps.
+
+```python
+from django_queue import queue
+
+entry_id = queue.enqueue({"request_id": 42})
+entry = queue.get_entry(entry_id)
+
+assert entry.status == "queued"
+```
+
+An entry transitions through `queued`, `running`, and one terminal status:
+`succeeded`, `failed`, or `cancelled`. Failed entries expose only an exception
+type and safe message; the worker logs the traceback for diagnosis.
+
+### Asynchronous worker
+
+An application or management command explicitly owns the worker task. It must
+not be started from a request handler or Django app initialisation hook.
+
+```python
+import asyncio
+
+from django_queue import AsyncQueueWorker, queues
+
+
+async def process_request(entry):
+    return {"processed": entry.payload["request_id"]}
+
+
+worker = AsyncQueueWorker(
+    {"default": queues["default"]},
+    {"default": process_request},
+)
+asyncio.run(worker.run())
+```
+
+The worker dispatches one entry at a time and runs until cancelled. On
+cancellation it stops accepting new entries, gives an active handler its
+configured grace period, then cancels it if needed. Delivery is best effort:
+an unexpected process failure after dequeue and before the terminal outcome is
+stored can lose that entry. Claim/acknowledge and recovery are planned
+follow-up work.
+
+If a terminal outcome cannot be persisted, the worker logs the infrastructure
+failure and continues. When it can still read a `running` entry, it makes one
+best-effort attempt to record a safe `QueuePersistenceError` failure outcome.
+If it cannot confirm either terminal outcome, the worker raises
+`QueuePersistenceError` rather than accepting further entries.
+
+With all queues, the `get()`, `peek()` and `pull()` methods return the object.
+With priority queues the priority is only used with and relevant to `add()`.
+Identified entries have no priority parameter, so their worker dispatch remains
+FIFO until priority-aware entry enqueueing is introduced.
 
 ## Queue Interface
 
@@ -95,4 +158,3 @@ All queues conform to the following interface:
 - QueueEmptyException: operation (get, peek or timed out poll) accepted on an empty queue
 - QueueEncodingException: error occurred in encoding the item
 - QueueValueError: error occurred in decoding an item
-

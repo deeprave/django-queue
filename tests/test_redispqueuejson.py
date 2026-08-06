@@ -1,5 +1,10 @@
 import pytest
-from django_queue.backends import RedisPriorityQueueJson, QueueEncodingException, QueueEmptyException
+
+from django_queue.backends import (
+    QueueEmptyException,
+    QueueEncodingException,
+    RedisPriorityQueueJson,
+)
 
 
 @pytest.fixture
@@ -53,7 +58,7 @@ def test_peek_valid_json(redis_queue):
 
 def test_add_invalid_item_raise_exception(redis_queue):
     with pytest.raises(QueueEncodingException):
-        redis_queue.add((1, {"invalid"}))  # noqa
+        redis_queue.add((1, {"invalid"}))
 
 
 def test_get_empty_queue(redis_queue):
