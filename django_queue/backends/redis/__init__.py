@@ -1,13 +1,13 @@
-from .redisqueue import RedisQueue, RedisStack
 from .redispqueue import RedisPriorityQueue
-from .redisqueuejson import RedisQueueJson, RedisStackJson
 from .redispqueuejson import RedisPriorityQueueJson
+from .redisqueue import RedisQueue, RedisStack
+from .redisqueuejson import RedisQueueJson, RedisStackJson
 
 __all__ = (
-    "RedisQueue",
-    "RedisStack",
-    "RedisQueueJson",
-    "RedisStackJson",
     "RedisPriorityQueue",
     "RedisPriorityQueueJson",
+    "RedisQueue",
+    "RedisQueueJson",
+    "RedisStack",
+    "RedisStackJson",
 )

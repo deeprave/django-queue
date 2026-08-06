@@ -1,5 +1,10 @@
 import pytest
-from django_queue.backends import MemoryPriorityQueue, QueueFullException, QueueEmptyException
+
+from django_queue.backends import (
+    MemoryPriorityQueue,
+    QueueEmptyException,
+    QueueFullException,
+)
 
 
 @pytest.fixture

@@ -1,5 +1,6 @@
 import pytest
-from django_queue.backends import RedisQueue, QueueFullException, QueueEmptyException
+
+from django_queue.backends import QueueEmptyException, QueueFullException, RedisQueue
 
 
 @pytest.fixture
@@ -18,7 +19,7 @@ def test_init(redis_client):
 
 
 def test_capacity(redis_queue):
-    assert redis_queue.capacity() == 5
+    assert redis_queue.capacity == 5
 
 
 def test_add(redis_queue):
@@ -38,19 +39,19 @@ def test_get(redis_queue):
     assert item == "item1"
 
 
-def test_lifo_order(redis_queue):
+def test_fifo_order(redis_queue):
     redis_queue.add("item1", "item2", "item3")
-    assert redis_queue.get() == "item3"
-    assert redis_queue.get() == "item2"
     assert redis_queue.get() == "item1"
+    assert redis_queue.get() == "item2"
+    assert redis_queue.get() == "item3"
 
 
-def test_lifo_edge_case_empty_queue(redis_queue):
+def test_fifo_edge_case_empty_queue(redis_queue):
     with pytest.raises(QueueEmptyException):
         redis_queue.get()
 
 
-def test_lifo_with_one_item(redis_queue):
+def test_fifo_with_one_item(redis_queue):
     redis_queue.add("only_item")
     assert redis_queue.get() == "only_item"
     with pytest.raises(QueueEmptyException):

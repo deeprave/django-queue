@@ -1,10 +1,12 @@
-from typing import Dict
-
 from django.utils.connection import BaseConnectionHandler, ConnectionProxy
 from django.utils.module_loading import import_string
 
 from .backends import InvalidQueueBackendError
+from .entries import QueueEntry, QueueEntryStatus
 from .signals import queue_created
+from .worker import AsyncQueueWorker
+
+__all__ = ("AsyncQueueWorker", "QueueEntry", "QueueEntryStatus", "queue", "queues")
 
 
 DEFAULT_QUEUE_ALIAS = "default"
@@ -15,7 +17,7 @@ class QueueHandler(BaseConnectionHandler):
     exception_class = InvalidQueueBackendError
 
     def create_connection(self, alias: str):
-        params: Dict = self.settings[alias].copy()
+        params: dict = self.settings[alias].copy()
         params.setdefault("queue_name", alias)
         backend = params.pop("BACKEND")
         location = params.pop("LOCATION", "")

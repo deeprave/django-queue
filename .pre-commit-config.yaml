@@ -1,13 +1,12 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 repos:
-
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v6.0.0
     hooks:
-#      - id: no-commit-to-branch
-#        args: ['--branch', 'main']
-#        exclude: '^main$'
+      - id: no-commit-to-branch
+        args: ["--branch", "main"]
+        exclude: "^main$"
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-yaml
@@ -17,23 +16,28 @@ repos:
       - id: requirements-txt-fixer
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.3
+    rev: v0.15.14
     hooks:
       - id: ruff
         args:
           - --fix
           - --line-length=120
 
+  - repo: https://github.com/deeprave/osvcheck
+    rev: v1.2.2
+    hooks:
+      - id: osvcheck
+
   - repo: local
     hooks:
       - id: pytest
         name: pytest
-        entry: pytest
+        entry: uv run pytest -Walways -Werror
         language: system
         types: [python]
         pass_filenames: false
 
   - repo: https://github.com/abravalheri/validate-pyproject
-    rev: v0.23
+    rev: v0.25
     hooks:
       - id: validate-pyproject
