@@ -30,12 +30,12 @@ class QueueHandler(BaseConnectionHandler):
         if settings is None:
             settings = getattr(django_settings, self.settings_name, {})
         if not isinstance(settings, Mapping):
-            raise InvalidQueueBackendError("QUEUES must be a mapping of queue aliases to configurations")
+            raise InvalidQueueBackendError(f"{self.settings_name} must be a mapping of queue aliases to configurations")
 
         configured_queues = {}
         for alias, options in settings.items():
             if not isinstance(alias, str) or not alias:
-                raise InvalidQueueBackendError("Queue aliases must be non-empty strings")
+                raise InvalidQueueBackendError(f"Queue alias {alias!r} must be a non-empty string")
             if not isinstance(options, Mapping):
                 raise InvalidQueueBackendError(f"Queue alias '{alias}' must use a mapping configuration")
             backend = options.get("BACKEND")

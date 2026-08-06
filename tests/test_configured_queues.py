@@ -52,8 +52,8 @@ class TestConfiguredQueueInitialization:
         ("settings", "message"),
         [
             ("not a configuration mapping", "QUEUES must be a mapping"),
-            ({0: {"BACKEND": "django_queue.backends.MemoryQueue"}}, "aliases"),
-            ({"": {"BACKEND": "django_queue.backends.MemoryQueue"}}, "aliases"),
+            ({0: {"BACKEND": "django_queue.backends.MemoryQueue"}}, "alias 0"),
+            ({"": {"BACKEND": "django_queue.backends.MemoryQueue"}}, "alias ''"),
             ({"requests": {}}, "requests.*BACKEND"),
             ({"requests": {"BACKEND": ""}}, "requests.*BACKEND"),
             ({"requests": {"BACKEND": 42}}, "requests.*BACKEND"),
@@ -73,6 +73,15 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(settings)
 
         with pytest.raises(InvalidQueueBackendError, match=message):
+            django_queue.initialise_queues(handler)
+
+    def test_invalid_settings_message_uses_the_handler_settings_name(self):
+        class CustomQueueHandler(django_queue.QueueHandler):
+            settings_name = "CUSTOM_QUEUES"
+
+        handler = CustomQueueHandler("not a configuration mapping")
+
+        with pytest.raises(InvalidQueueBackendError, match="CUSTOM_QUEUES must be a mapping"):
             django_queue.initialise_queues(handler)
 
     @pytest.mark.parametrize(
