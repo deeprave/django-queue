@@ -4,13 +4,13 @@
 
 ## Goals / Non-Goals
 
-**Goals:** Validate settings and idempotently initialize queue services.
+**Goals:** Validate settings and idempotently initialise queue services.
 
 **Non-Goals:** Starting workers or consuming queue data in `ready()`.
 
 ## Decisions
 
-`DjangoQueueConfig.ready()` invokes an idempotent registry initializer. It validates every alias and constructs cached service objects. Worker execution is reserved for `runqueues`.
+`DjangoQueueConfig.ready()` invokes an idempotent registry initialiser. It validates every alias and constructs cached service objects. Worker execution is reserved for `runqueues`.
 
 ## Risks / Trade-offs
 

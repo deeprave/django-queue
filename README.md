@@ -46,6 +46,14 @@ The above configures the queue backend to be redis, storing FIFO data in JSON fo
 
 To implement a stack (FILO), the `django_queue.backends.RedisStackJson` can be used instead, or a `"stack": True` option added to the options.
 
+All aliases are validated and initialised when Django starts. Application code
+can retrieve a configured queue through `queues["alias"]`; initialisation only
+constructs queue services and never starts a worker.
+
+Configured in-memory queues are local to the resolving process and thread, so
+they are not a shared broker. Use Redis when producers and consumers must share
+work across threads, processes, containers, or external workers.
+
 ## Usage
 
 Within an application, data is added to the queue by using the `add` method:
@@ -153,7 +161,8 @@ All queues conform to the following interface:
 
 #### Exceptions
 
-- InvalidQueueBackendError: this indicates an issue with the Django QUEUES configuration.
+- InvalidQueueBackendError: an `ImproperlyConfigured` error indicating an issue
+  with the Django `QUEUES` configuration.
 - QueueFullException: operation (addition) attempted on a queue that has reached capacity
 - QueueEmptyException: operation (get, peek or timed out poll) accepted on an empty queue
 - QueueEncodingException: error occurred in encoding the item
