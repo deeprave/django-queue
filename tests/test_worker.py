@@ -164,6 +164,46 @@ class TestAsyncQueueWorker:
 
         assert queue.get_entry(entry_id).status is QueueEntryStatus.CANCELLED
 
+    def test_cancellation_completes_when_a_handler_ignores_cancellation(self):
+        asyncio.run(self._cancellation_completes_when_a_handler_ignores_cancellation())
+
+    async def _cancellation_completes_when_a_handler_ignores_cancellation(self):
+        queue = MemoryQueue(queue_name="requests")
+        entry_id = queue.enqueue("work")
+        started = asyncio.Event()
+        cancellation_ignored = asyncio.Event()
+        release = asyncio.Event()
+        handler_finished = asyncio.Event()
+
+        async def handle(entry):
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancellation_ignored.set()
+                await release.wait()
+            finally:
+                handler_finished.set()
+
+        worker = AsyncQueueWorker(
+            {"requests": queue},
+            {"requests": handle},
+            idle_delay=0.001,
+            cancellation_grace_period=0.001,
+        )
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+            await asyncio.wait_for(cancellation_ignored.wait(), timeout=1)
+        finally:
+            release.set()
+            await asyncio.wait_for(handler_finished.wait(), timeout=1)
+
+        assert queue.get_entry(entry_id).status is QueueEntryStatus.CANCELLED
+
     def test_cancellation_records_a_handler_failure_within_its_grace_period(self):
         asyncio.run(self._cancellation_records_a_handler_failure_within_its_grace_period())
 

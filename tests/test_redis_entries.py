@@ -46,6 +46,12 @@ class TestRedisQueueEntries:
         assert redis_entry_queue.dequeue_entry().id == first_id
         assert redis_entry_queue.dequeue_entry().id == latest_id
 
+    def test_dequeues_entries_with_the_configured_encoding(self, redis_client):
+        queue = RedisQueue(redis_client, queue_name=f"entry-encoding-{uuid4().hex}", encoding="utf-16")
+        entry_id = queue.enqueue("work")
+
+        assert queue.dequeue_entry().id == entry_id
+
     def test_records_redis_timed_lifecycle_outcomes(self, redis_entry_queue):
         entry_id = redis_entry_queue.enqueue("work")
 

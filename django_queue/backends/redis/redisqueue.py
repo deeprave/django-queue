@@ -89,7 +89,7 @@ try:
             validate_json_value(payload)
             entry = QueueEntry.create(queue=self._queue_name, payload=payload, queued_at=self._clock.now())
             self._store_entry(entry)
-            self.push(self._entry_pending_name, str(entry.id))
+            self.push(self._entry_pending_name, _encode(str(entry.id), self._encoding))
             return entry.id
 
         def get_entry(self, entry_id: uuid.UUID) -> QueueEntry:

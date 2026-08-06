@@ -77,18 +77,25 @@ class AsyncQueueWorker:
             result = await asyncio.wait_for(asyncio.shield(handler_task), self._cancellation_grace_period)
         except TimeoutError:
             handler_task.cancel()
-            try:
-                result = await handler_task
-            except asyncio.CancelledError:
-                await self._record_terminal(queue, entry, queue.mark_cancelled)
-            except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
-                await self._record_failure(queue, entry, exc)
-            else:
-                await self._record_result(queue, entry, result)
+            handler_task.add_done_callback(lambda task: self._log_late_handler_outcome(entry, task))
+            await self._record_terminal(queue, entry, queue.mark_cancelled)
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
             await self._record_failure(queue, entry, exc)
         else:
             await self._record_result(queue, entry, result)
+
+    @staticmethod
+    def _log_late_handler_outcome(entry: QueueEntry, task: asyncio.Task[object]) -> None:
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error(
+                "Queue handler failed after cancellation for entry %s",
+                entry.id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def _record_result(self, queue: BaseQueue, entry: QueueEntry, result: object) -> None:
         try:

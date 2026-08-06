@@ -125,7 +125,7 @@ best-effort attempt to record a safe `QueuePersistenceError` failure outcome.
 If it cannot confirm either terminal outcome, the worker raises
 `QueuePersistenceError` rather than accepting further entries.
 
-With all queues, the `get()`, `peek()` and `pull()` methods returns the object.
+With all queues, the `get()`, `peek()` and `pull()` methods return the object.
 With priority queues the priority is only used with and relevant to `add()`.
 Identified entries have no priority parameter, so their worker dispatch remains
 FIFO until priority-aware entry enqueueing is introduced.
