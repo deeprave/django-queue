@@ -4,17 +4,17 @@ Named queues must be a validated Django service registry before application code
 
 ## What Changes
 
-- Initialize and validate all `QUEUES` settings during Django app setup.
+- Initialise and validate all `QUEUES` settings during Django app setup.
 - Expose configured queues through the existing registry without starting workers.
 
 ## Capabilities
 
 ### New Capabilities
-- `configured-queue-registry`: Initialize named `QUEUES` services at Django startup.
+- `configured-queue-registry`: Initialise named `QUEUES` services at Django startup.
 
 ### Modified Capabilities
 None.
 
 ## Impact
 
-Updates Django app configuration and queue connection initialization.
+Updates Django app configuration and queue connection initialisation.

@@ -1,8 +1,11 @@
-class QueueException(BaseException):
+from django.core.exceptions import ImproperlyConfigured
+
+
+class QueueException(Exception):
     pass
 
 
-class InvalidQueueBackendError(QueueException):
+class InvalidQueueBackendError(ImproperlyConfigured, QueueException):
     pass
 
 
