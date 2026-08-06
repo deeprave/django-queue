@@ -4,7 +4,6 @@ import logging
 import pytest
 
 import django_queue
-import django_queue.asgi as queue_asgi
 from django_queue.apps import DjangoQueueConfig
 from django_queue.asgi import with_queue_worker
 from django_queue.backends import MemoryQueue
@@ -32,7 +31,6 @@ class TestQueueWorkerASGI:
             }
         )
         monkeypatch.setattr(django_queue, "queues", configured_queues)
-        monkeypatch.setattr(queue_asgi, "configured_queues", configured_queues)
         DjangoQueueConfig("django_queue", django_queue).ready()
         queue = configured_queues["requests"]
         entry_id = queue.enqueue({"request_id": 42})
@@ -145,9 +143,7 @@ class TestQueueWorkerASGI:
             messages.append(message)
 
         caplog.set_level(logging.ERROR, logger="django_queue.asgi")
-        monkeypatch.setattr(
-            queue_asgi, "configured_queues", django_queue.QueueHandler({})
-        )
+        monkeypatch.setattr(django_queue, "queues", django_queue.QueueHandler({}))
         await with_queue_worker(application, handlers={"missing": lambda entry: None})(
             {"type": "lifespan"}, receive, send
         )
@@ -159,6 +155,36 @@ class TestQueueWorkerASGI:
             }
         ]
         assert "missing" in caplog.text
+
+    def test_reports_safe_startup_failure_for_an_unexpected_initial_message(self):
+        asyncio.run(
+            self._reports_safe_startup_failure_for_an_unexpected_initial_message()
+        )
+
+    async def _reports_safe_startup_failure_for_an_unexpected_initial_message(self):
+        messages = []
+
+        async def application(scope, receive, send):
+            raise AssertionError(
+                f"Wrapped application received unexpected scope: {scope['type']}"
+            )
+
+        async def receive():
+            return {"type": "lifespan.unknown"}
+
+        async def send(message):
+            messages.append(message)
+
+        await with_queue_worker(application, handlers={}, queues={})(
+            {"type": "lifespan"}, receive, send
+        )
+
+        assert messages == [
+            {
+                "type": "lifespan.startup.failed",
+                "message": "Unable to start queue worker",
+            }
+        ]
 
     def test_reports_safe_startup_failure_when_queue_lookup_raises(self, caplog):
         asyncio.run(self._reports_safe_startup_failure_when_queue_lookup_raises(caplog))

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 
-from django_queue import queues as configured_queues
+import django_queue
 from django_queue.worker import AsyncQueueWorker, QueueLookup
 from django_queue.worker import QueueHandler as QueueEntryHandler
 
@@ -25,7 +25,7 @@ def with_queue_worker(
     queues: QueueLookup | None = None,
 ) -> ASGIApplication:
     """Wrap a Django ASGI application with an explicitly configured queue worker."""
-    worker_queues = configured_queues if queues is None else queues
+    worker_queues = django_queue.queues if queues is None else queues
 
     async def wrapped(scope: ASGIMessage, receive: ASGIReceive, send: ASGISend) -> None:
         if scope["type"] != "lifespan":
@@ -34,6 +34,12 @@ def with_queue_worker(
 
         startup_message = await receive()
         if startup_message["type"] != "lifespan.startup":
+            await send(
+                {
+                    "type": "lifespan.startup.failed",
+                    "message": "Unable to start queue worker",
+                }
+            )
             return
         try:
             worker = AsyncQueueWorker(worker_queues, handlers)
