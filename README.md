@@ -53,6 +53,40 @@ Configured in-memory queues are local to the resolving process and thread, so
 they are not a shared broker. Use Redis when producers and consumers must share
 work across threads, processes, containers, or external workers.
 
+### Queue type extensions
+
+Each alias may optionally choose the concrete worker and entry types it uses:
+
+```python
+QUEUES = {
+    "requests": {
+        "BACKEND": "django_queue.backends.RedisQueue",
+        "LOCATION": "redis://redis:6379/12",
+        "HANDLER": "myproject.queue_handlers.process_request",
+        "WORKER": "myproject.workers.RequestWorker",
+        "ENTRY_CLASS": "myproject.entries.RequestEntry",
+    },
+}
+```
+
+`WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import
+path. They default to `AsyncQueueWorker` and `QueueEntry`, respectively.
+Workers must subclass `AsyncQueueWorker` and use its normal queue-lookup and
+handler-mapping constructor. Entry classes must subclass `QueueEntry`; any
+additional persisted fields must remain JSON-serialisable and implement
+compatible `create`, `to_dict`, and `from_dict` methods. Django validates and
+imports entry types during queue configuration and worker types during
+`runqueues` startup. A worker is constructed only when its queue first becomes
+active; an entry only when it is enqueued, restored, or updated.
+
+Custom queue backends that support identified entry dispatch must implement
+`has_pending_entries()`, returning whether `dequeue_entry()` can immediately
+return an entry. To support local ASGI activation, they must also call
+`send_entry_enqueued()` after durably enqueueing an entry. Built-in backends
+expose `queue_name`, their stable entry namespace, which local ASGI enqueue
+observation uses to match entries to an
+alias.
+
 ## Usage
 
 Within an application, data is added to the queue by using the `add` method:
@@ -196,11 +230,13 @@ if settings.ENABLE_LOCAL_QUEUE_WORKER:
     )
 ```
 
-`with_queue_worker()` starts one worker for each ASGI server process after
-lifespan startup and cooperatively stops it during lifespan shutdown. It logs a
-warning whenever it starts because an in-process worker is not supported for
-production use. Use an external `runqueues` worker with a shared backend such
-as Redis in production.
+`with_queue_worker()` observes entries enqueued by that ASGI process after
+lifespan startup and starts one configured worker for each alias only when that
+alias first receives entry work. It cooperatively stops active workers during
+lifespan shutdown. The observation is deliberately process-local: another
+process cannot wake this worker. It logs a warning whenever it starts because
+an in-process worker is not supported for production use. Use an external
+`runqueues` worker with a shared backend such as Redis in production.
 
 The wrapper accepts an explicit queue mapping for integration tests. Pass the
 same `MemoryQueue` instance to the wrapper and to the component producing work
@@ -236,13 +272,15 @@ Start it as its own service or container command:
 python manage.py runqueues
 ```
 
-`runqueues` creates one `AsyncQueueWorker` for each configured `HANDLER` and
-runs until it receives `SIGINT` or `SIGTERM`. It reports each alias at startup,
-then cooperatively stops all active workers on shutdown. Queue definitions
-without `HANDLER` remain available to application code but are not dispatched;
-when no handlers are configured, the command reports this and exits
-successfully. A worker failure is logged while other workers remain active; the
-command exits non-zero only if a failure leaves no workers running.
+`runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero
+on a configuration error, then waits to create each configured worker until that
+alias has pending entry work. It reports the configured handler count at startup
+and each alias as its worker begins. Once started, a worker runs until it
+receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers.
+Queue definitions without `HANDLER` remain available to application code but are
+not dispatched; when no handlers are configured, the command reports this and
+exits successfully. A worker failure is logged while the remaining queues stay
+watched; the command exits non-zero only when no configured queue is left.
 
 With all queues, the `get()`, `peek()` and `pull()` methods return the object.
 With priority queues the priority is only used with and relevant to `add()`.
@@ -257,6 +295,7 @@ All queues conform to the following interface:
 
 - stack: returns True if the queue is a stack (LIFO) otherwise it is FIFO or priority based
 - capacity: returns the queue capacity, 0 for unlimited
+- queue_name: the stable entry namespace when the backend exposes one
 
 #### Methods
 
@@ -268,6 +307,9 @@ All queues conform to the following interface:
 - is_empty(): returns true if there are no items currently in the queue.
 - clear(): remove all items from the queue.
 - close(): closes and destroys the queue.
+- has_pending_entries(): returns whether `dequeue_entry()` can return an entry.
+- enqueue(): custom entry-capable backends must call `send_entry_enqueued()`
+  after durable enqueue when local ASGI activation is required.
 - the queue itself can be used in the context of a boolean: True if there are items in the queue else False.
 
 #### Exceptions

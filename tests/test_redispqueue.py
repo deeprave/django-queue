@@ -26,7 +26,7 @@ def test_init(redis_client):
     queue = RedisPriorityQueue(redis_client, queue_name="test_priority_queue")
     assert queue._redis is not None
     assert queue._redis.ping() is True
-    assert queue._queue_name == "test_priority_queue"
+    assert queue.queue_name == "test_priority_queue"
     assert queue._maxsize == 0  # Unlimited size by default
 
 
@@ -84,7 +84,7 @@ def test_poll_blocking(redis_priority_queue, mocker):
     mocker.patch.object(
         redis_priority_queue._redis,
         "blpop",
-        return_value=(redis_priority_queue._queue_name, b"blocked_item"),
+        return_value=(redis_priority_queue.queue_name, b"blocked_item"),
     )
     redis_priority_queue.add((10, "item1"))
     assert (

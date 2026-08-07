@@ -13,6 +13,7 @@ try:
     )
     from django_queue.clock import RedisQueueClock
     from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
+    from django_queue.signals import send_entry_enqueued
 
     def _encode(item: str, encoding: str) -> bytes:
         try:
@@ -98,24 +99,28 @@ try:
 
         def enqueue(self, payload) -> uuid.UUID:
             validate_json_value(payload)
-            entry = QueueEntry.create(
+            entry = self.entry_class.create(
                 queue=self._queue_name, payload=payload, queued_at=self._clock.now()
             )
             self._store_entry(entry)
             self.push(self._entry_pending_name, _encode(str(entry.id), self._encoding))
+            send_entry_enqueued(self, entry=entry)
             return entry.id
 
         def get_entry(self, entry_id: uuid.UUID) -> QueueEntry:
             raw_entry = self._redis.get(self._entry_key(entry_id))
             if raw_entry is None:
                 raise QueueEmptyException
-            return QueueEntry.from_dict(json.loads(raw_entry))
+            return self.entry_class.from_dict(json.loads(raw_entry))
 
         def dequeue_entry(self) -> QueueEntry:
             raw_entry_id = self.pop(self._entry_pending_name)
             if raw_entry_id is None:
                 raise QueueEmptyException
             return self.get_entry(uuid.UUID(_decode(raw_entry_id, self._encoding)))
+
+        def has_pending_entries(self) -> bool:
+            return bool(self._redis.llen(self._entry_pending_name))
 
         def mark_running(self, entry_id: uuid.UUID) -> QueueEntry:
             return self._replace_entry(

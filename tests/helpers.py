@@ -1,7 +1,53 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
+from django_queue.entries import QueueEntry
+
 FIXED_UUID7 = UUID("0198babb-3bce-7f81-8c43-3c1d99f475a9")
+
+
+@dataclass(frozen=True, slots=True)
+class CustomQueueEntry(QueueEntry):
+    kind: str = "unset"
+
+    @classmethod
+    def create(
+        cls, *, queue: str, payload: Any, queued_at: datetime | None = None
+    ) -> CustomQueueEntry:
+        entry = QueueEntry.create(queue=queue, payload=payload, queued_at=queued_at)
+        return cls(
+            id=entry.id,
+            queue=entry.queue,
+            status=entry.status,
+            queued_at=entry.queued_at,
+            dispatched_at=entry.dispatched_at,
+            finished_at=entry.finished_at,
+            payload=entry.payload,
+            result=entry.result,
+            error=entry.error,
+            kind="task",
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**QueueEntry.to_dict(self), "kind": self.kind}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> CustomQueueEntry:
+        entry = QueueEntry.from_dict(value)
+        return cls(
+            id=entry.id,
+            queue=entry.queue,
+            status=entry.status,
+            queued_at=entry.queued_at,
+            dispatched_at=entry.dispatched_at,
+            finished_at=entry.finished_at,
+            payload=entry.payload,
+            result=entry.result,
+            error=entry.error,
+            kind=value["kind"],
+        )
 
 
 class FixedClock:

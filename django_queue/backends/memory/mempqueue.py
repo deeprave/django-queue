@@ -58,6 +58,7 @@ class MemoryPriorityQueue(BaseQueue):
     enqueue = MemoryQueue.enqueue
     get_entry = MemoryQueue.get_entry
     dequeue_entry = MemoryQueue.dequeue_entry
+    has_pending_entries = MemoryQueue.has_pending_entries
     mark_running = MemoryQueue.mark_running
     mark_succeeded = MemoryQueue.mark_succeeded
     mark_failed = MemoryQueue.mark_failed

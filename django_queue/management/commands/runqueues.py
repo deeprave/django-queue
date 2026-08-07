@@ -7,18 +7,25 @@ import inspect
 import logging
 import signal
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import cast
 
 from django.core.management.base import BaseCommand, CommandError
 from django.utils.module_loading import import_string
 
 import django_queue
-from django_queue.worker import AsyncQueueWorker
+from django_queue.backends.base import BaseQueue
+from django_queue.backends.exceptions import InvalidQueueBackendError
 from django_queue.worker import QueueHandler as QueueEntryHandler
 
 logger = logging.getLogger(__name__)
 
-ConfiguredWorker = tuple[str, AsyncQueueWorker]
+
+@dataclass(frozen=True)
+class ConfiguredWorkerActivation:
+    alias: str
+    queue: BaseQueue
+    handler: QueueEntryHandler
 
 
 class Command(BaseCommand):
@@ -27,32 +34,37 @@ class Command(BaseCommand):
     help = "Run workers for queues configured with HANDLER."
 
     def handle(self, *args, **options) -> None:
-        workers = self._create_workers()
-        if not workers:
+        activations = self._create_workers()
+        if not activations:
             self.stdout.write("No queue handlers configured.")
             return
 
-        self.stdout.write(f"Starting {len(workers)} queue handlers.")
-        asyncio.run(self._run_workers(workers))
+        self.stdout.write(f"Starting {len(activations)} queue handlers.")
+        asyncio.run(self._run_configured_workers(activations))
 
-    def _create_workers(self) -> list[ConfiguredWorker]:
-        queues = django_queue.initialise_queues()
-        configured_handlers = [
-            (alias, options["HANDLER"])
-            for alias, options in queues.settings.items()
-            if "HANDLER" in options
-        ]
-        handlers = [
-            (alias, self._load_handler(alias, handler_path))
-            for alias, handler_path in configured_handlers
-        ]
-        return [
-            (
-                alias,
-                AsyncQueueWorker({alias: queues[alias]}, {alias: handler}),
-            )
-            for alias, handler in handlers
-        ]
+    def _create_workers(self) -> list[ConfiguredWorkerActivation]:
+        try:
+            queues = django_queue.initialise_queues()
+            configured_handlers = [
+                (alias, options["HANDLER"])
+                for alias, options in queues.settings.items()
+                if "HANDLER" in options
+            ]
+            activations = [
+                ConfiguredWorkerActivation(
+                    alias,
+                    queues[alias],
+                    self._load_handler(alias, handler_path),
+                )
+                for alias, handler_path in configured_handlers
+            ]
+            # Resolve every worker class up front so a misconfigured alias fails
+            # here rather than when its queue first receives work.
+            for activation in activations:
+                activation.queue.resolve_worker_class(activation.alias)
+        except InvalidQueueBackendError as exc:
+            raise CommandError(str(exc)) from exc
+        return activations
 
     @staticmethod
     def _load_handler(alias: str, handler_path: object) -> QueueEntryHandler:
@@ -72,10 +84,31 @@ class Command(BaseCommand):
             )
         return cast(QueueEntryHandler, handler)
 
-    async def _run_workers(
+    async def _run_configured_workers(
         self,
-        workers: Sequence[ConfiguredWorker],
+        activations: Sequence[ConfiguredWorkerActivation],
         shutdown_event: asyncio.Event | None = None,
+    ) -> None:
+        tasks = {
+            asyncio.create_task(
+                self._activate_worker(activation),
+                name=f"runqueues:activate:{activation.alias}",
+            ): activation.alias
+            for activation in activations
+        }
+        await self._supervise_workers(tasks, shutdown_event)
+
+    async def _activate_worker(self, activation: ConfiguredWorkerActivation) -> None:
+        while not await asyncio.to_thread(activation.queue.has_pending_entries):
+            await asyncio.sleep(0.1)
+        worker = activation.queue.create_worker(activation.alias, activation.handler)
+        self.stdout.write(f"Started queue handler for {activation.alias}.")
+        await worker.run()
+
+    async def _supervise_workers(
+        self,
+        tasks: dict[asyncio.Task[None], str],
+        shutdown_event: asyncio.Event | None,
     ) -> None:
         shutdown_event = asyncio.Event() if shutdown_event is None else shutdown_event
         loop = asyncio.get_running_loop()
@@ -93,14 +126,7 @@ class Command(BaseCommand):
                 installed_signals.append(event_signal)
 
         shutdown_task = asyncio.create_task(shutdown_event.wait())
-        tasks: dict[asyncio.Task[None], str] = {}
         try:
-            for alias, worker in workers:
-                self.stdout.write(f"Started queue handler for {alias}.")
-                tasks[asyncio.create_task(worker.run(), name=f"runqueues:{alias}")] = (
-                    alias
-                )
-
             while tasks:
                 done, _ = await asyncio.wait(
                     [shutdown_task, *tasks], return_when=asyncio.FIRST_COMPLETED

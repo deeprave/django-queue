@@ -10,7 +10,10 @@ from django.core.management.base import CommandError
 
 import django_queue
 from django_queue.backends import MemoryQueue
-from django_queue.management.commands.runqueues import Command
+from django_queue.management.commands.runqueues import (
+    Command,
+    ConfiguredWorkerActivation,
+)
 from django_queue.worker import AsyncQueueWorker
 
 
@@ -30,6 +33,21 @@ def synchronous_handler(entry):
     return entry.payload
 
 
+class TrackingWorker(AsyncQueueWorker):
+    instances = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).instances += 1
+        super().__init__(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def reset_tracking_worker_instances():
+    TrackingWorker.instances = 0
+    yield
+    TrackingWorker.instances = 0
+
+
 class TestRunQueuesCommand:
     def test_exits_successfully_when_no_queue_handlers_are_configured(
         self, monkeypatch
@@ -41,44 +59,65 @@ class TestRunQueuesCommand:
 
         assert output.getvalue() == "No queue handlers configured.\n"
 
-    def test_starts_one_worker_for_each_configured_handler(self, monkeypatch):
+    def test_starts_workers_only_when_configured_queues_have_entries(self, monkeypatch):
+        asyncio.run(
+            self._starts_workers_only_when_configured_queues_have_entries(monkeypatch)
+        )
+
+    async def _starts_workers_only_when_configured_queues_have_entries(
+        self, monkeypatch
+    ):
         queues = django_queue.QueueHandler(
             {
                 "first": {
                     "BACKEND": "django_queue.backends.MemoryQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
+                    "WORKER": "tests.test_runqueues.TrackingWorker",
                 },
                 "second": {
                     "BACKEND": "django_queue.backends.MemoryQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
+                    "WORKER": "tests.test_runqueues.TrackingWorker",
                 },
             }
         )
         monkeypatch.setattr(django_queue, "queues", queues)
-        first_id = queues["first"].enqueue("first")
-        second_id = queues["second"].enqueue("second")
         output = StringIO()
         command = Command(stdout=output)
+        shutdown = asyncio.Event()
 
-        async def run_workers(workers):
-            tasks = [asyncio.create_task(worker.run()) for _, worker in workers]
-            while any(
-                queues[name].get_entry(entry_id).result is None
-                for name, entry_id in zip(queues, (first_id, second_id), strict=True)
-            ):
-                await asyncio.sleep(0.001)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        activations = command._create_workers()
+        assert TrackingWorker.instances == 0
 
-        monkeypatch.setattr(command, "_run_workers", run_workers)
-        command.handle()
+        task = asyncio.create_task(
+            command._run_configured_workers(activations, shutdown)
+        )
+        await asyncio.sleep(0)
+        assert TrackingWorker.instances == 0
+
+        first_id = queues["first"].enqueue("first")
+        second_id = queues["second"].enqueue("second")
+        await asyncio.wait_for(
+            self._wait_until(
+                lambda: all(
+                    queues[name].get_entry(entry_id).result is not None
+                    for name, entry_id in (("first", first_id), ("second", second_id))
+                )
+            ),
+            timeout=1,
+        )
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=1)
 
         assert queues["first"].get_entry(first_id).result == {"handled": "first"}
         assert queues["second"].get_entry(second_id).result == {"handled": "second"}
-        assert output.getvalue() == "Starting 2 queue handlers.\n"
+        assert TrackingWorker.instances == 2
+        assert set(output.getvalue().splitlines()) == {
+            "Started queue handler for first.",
+            "Started queue handler for second.",
+        }
 
     def test_reports_each_queue_alias_as_its_worker_starts(self, monkeypatch):
         asyncio.run(self._reports_each_queue_alias_as_its_worker_starts(monkeypatch))
@@ -104,15 +143,19 @@ class TestRunQueuesCommand:
         shutdown = asyncio.Event()
 
         task = asyncio.create_task(
-            command._run_workers(command._create_workers(), shutdown)
+            command._run_configured_workers(command._create_workers(), shutdown)
         )
-        await asyncio.sleep(0)
+        queues["first"].enqueue("first")
+        await asyncio.wait_for(
+            self._wait_until(
+                lambda: output.getvalue() == "Started queue handler for first.\n"
+            ),
+            timeout=1,
+        )
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
 
-        assert output.getvalue() == (
-            "Started queue handler for first.\nStarted queue handler for second.\n"
-        )
+        assert output.getvalue() == "Started queue handler for first.\n"
 
     def test_rejects_an_invalid_handler_path_before_starting_workers(self, monkeypatch):
         queues = django_queue.QueueHandler(
@@ -128,6 +171,58 @@ class TestRunQueuesCommand:
 
         with pytest.raises(CommandError, match="default.*HANDLER"):
             Command().handle()
+
+    def test_rejects_an_invalid_worker_before_starting_workers(self, monkeypatch):
+        queues = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "HANDLER": "tests.test_runqueues.handle_entry",
+                    "WORKER": "tests.test_runqueues.handle_entry",
+                    "LOCATION": "",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", queues)
+
+        with pytest.raises(CommandError, match="default.*WORKER"):
+            Command().handle()
+
+    def test_rejects_an_invalid_entry_class_before_starting_workers(self, monkeypatch):
+        queues = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "HANDLER": "tests.test_runqueues.handle_entry",
+                    "ENTRY_CLASS": "tests.test_runqueues.handle_entry",
+                    "LOCATION": "",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", queues)
+
+        with pytest.raises(CommandError, match="default.*ENTRY_CLASS"):
+            Command().handle()
+
+    def test_does_not_construct_a_worker_while_validating_configuration(
+        self, monkeypatch
+    ):
+        queues = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "HANDLER": "tests.test_runqueues.handle_entry",
+                    "WORKER": "tests.test_runqueues.TrackingWorker",
+                    "LOCATION": "",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", queues)
+
+        activations = Command()._create_workers()
+
+        assert len(activations) == 1
+        assert TrackingWorker.instances == 0
 
     def test_rejects_a_non_asynchronous_handler_before_starting_workers(
         self, monkeypatch
@@ -158,30 +253,30 @@ class TestRunQueuesCommand:
         )
         monkeypatch.setattr(django_queue, "queues", queues)
 
-        workers = Command()._create_workers()
+        activations = Command()._create_workers()
 
-        assert len(workers) == 1
+        assert len(activations) == 1
+        assert activations[0].queue.resolve_worker_class("default") is AsyncQueueWorker
 
     def test_continues_healthy_workers_after_another_worker_fails(self, caplog):
         asyncio.run(self._continues_healthy_workers_after_another_worker_fails(caplog))
 
     async def _continues_healthy_workers_after_another_worker_fails(self, caplog):
         shutdown = asyncio.Event()
-        healthy_worker = AsyncQueueWorker(
-            {"healthy": MemoryQueue(queue_name="healthy")},
-            {"healthy": handle_entry},
-        )
+        healthy_queue = MemoryQueue(queue_name="healthy")
+        healthy_queue.enqueue("healthy")
         failed_queue = ExplodingQueue(queue_name="failed")
-        failed_worker = AsyncQueueWorker(
-            {"failed": failed_queue},
-            {"failed": handle_entry},
-        )
+        failed_queue.enqueue("failed")
         caplog.set_level(
             logging.ERROR, logger="django_queue.management.commands.runqueues"
         )
         task = asyncio.create_task(
-            Command()._run_workers(
-                [("healthy", healthy_worker), ("failed", failed_worker)], shutdown
+            Command()._run_configured_workers(
+                [
+                    ConfiguredWorkerActivation("healthy", healthy_queue, handle_entry),
+                    ConfiguredWorkerActivation("failed", failed_queue, handle_entry),
+                ],
+                shutdown,
             )
         )
 
@@ -196,12 +291,58 @@ class TestRunQueuesCommand:
         )
 
         assert task.done() is False
-        assert healthy_worker.running is True
         assert "Queue worker for failed stopped unexpectedly" in caplog.text
 
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
-        assert healthy_worker.running is False
+
+    def test_keeps_watching_an_idle_queue_after_another_worker_fails(self, caplog):
+        asyncio.run(
+            self._keeps_watching_an_idle_queue_after_another_worker_fails(caplog)
+        )
+
+    async def _keeps_watching_an_idle_queue_after_another_worker_fails(self, caplog):
+        shutdown = asyncio.Event()
+        idle_queue = MemoryQueue(queue_name="idle")
+        failed_queue = ExplodingQueue(queue_name="failed")
+        failed_queue.enqueue("failed")
+        caplog.set_level(
+            logging.ERROR, logger="django_queue.management.commands.runqueues"
+        )
+        task = asyncio.create_task(
+            Command()._run_configured_workers(
+                [
+                    ConfiguredWorkerActivation("idle", idle_queue, handle_entry),
+                    ConfiguredWorkerActivation("failed", failed_queue, handle_entry),
+                ],
+                shutdown,
+            )
+        )
+
+        await asyncio.wait_for(
+            self._wait_until(
+                lambda: "Queue worker for failed stopped unexpectedly" in caplog.text
+            ),
+            timeout=1,
+        )
+
+        # The idle queue never activated, so it has no worker - but it is still
+        # configured and still being watched, and must not be torn down.
+        assert task.done() is False
+
+        idle_queue.enqueue("idle work")
+        await asyncio.wait_for(
+            self._wait_until(
+                lambda: (
+                    idle_queue.get_entry(next(iter(idle_queue._entries))).result
+                    is not None
+                )
+            ),
+            timeout=1,
+        )
+
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=1)
 
     @staticmethod
     async def _wait_until(condition: Callable[[], bool]) -> None:
@@ -212,18 +353,12 @@ class TestRunQueuesCommand:
         asyncio.run(self._exits_when_the_last_active_worker_fails())
 
     async def _exits_when_the_last_active_worker_fails(self):
-        first_worker = AsyncQueueWorker(
-            {"first": ExplodingQueue(queue_name="first")},
-            {"first": handle_entry},
-        )
-        second_worker = AsyncQueueWorker(
-            {"second": ExplodingQueue(queue_name="second")},
-            {"second": handle_entry},
-        )
+        queue = ExplodingQueue(queue_name="default")
+        queue.enqueue("work")
 
         with pytest.raises(RuntimeError, match="backend failed"):
-            await Command()._run_workers(
-                [("first", first_worker), ("second", second_worker)]
+            await Command()._run_configured_workers(
+                [ConfiguredWorkerActivation("default", queue, handle_entry)]
             )
 
     def test_shutdown_request_cancels_and_awaits_workers(self):
@@ -241,9 +376,11 @@ class TestRunQueuesCommand:
             return "done"
 
         queue.enqueue("work")
-        worker = AsyncQueueWorker({"default": queue}, {"default": handler})
         task = asyncio.create_task(
-            Command()._run_workers([("default", worker)], shutdown)
+            Command()._run_configured_workers(
+                [ConfiguredWorkerActivation("default", queue, handler)],
+                shutdown,
+            )
         )
         await asyncio.wait_for(started.wait(), timeout=1)
         shutdown.set()
@@ -252,7 +389,6 @@ class TestRunQueuesCommand:
         assert task.done() is False
         release.set()
         await asyncio.wait_for(task, timeout=1)
-        assert worker.running is False
 
     def test_runs_when_the_event_loop_does_not_support_signal_handlers(
         self, monkeypatch, caplog
@@ -278,7 +414,7 @@ class TestRunQueuesCommand:
             logging.WARNING, logger="django_queue.management.commands.runqueues"
         )
 
-        await Command()._run_workers([], shutdown)
+        await Command()._run_configured_workers([], shutdown)
 
         assert "Signal handler support is unavailable" in caplog.text
 
@@ -306,7 +442,7 @@ class TestRunQueuesCommand:
         monkeypatch.setattr(loop, "add_signal_handler", add_signal_handler)
         monkeypatch.setattr(loop, "remove_signal_handler", remove_signal_handler)
 
-        await Command()._run_workers([], shutdown)
+        await Command()._run_configured_workers([], shutdown)
 
         assert installed == [signal.SIGINT]
         assert removed == [signal.SIGINT]

@@ -14,7 +14,7 @@ def test_init(redis_client):
     queue = RedisQueue(redis_client, queue_name="test_queue")
     assert queue._redis is not None
     assert queue._redis.ping() is True
-    assert queue._queue_name == "test_queue"
+    assert queue.queue_name == "test_queue"
     assert queue._maxsize == 0
 
 

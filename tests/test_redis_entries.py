@@ -10,6 +10,7 @@ from django_queue.backends import (
 )
 from django_queue.backends.exceptions import QueueEmptyException
 from django_queue.entries import QueueEntryStatus
+from tests.helpers import CustomQueueEntry
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ class TestRedisQueueEntries:
 
         entry = redis_entry_queue.get_entry(entry_id)
         assert entry.id == entry_id
-        assert entry.queue == redis_entry_queue._queue_name
+        assert entry.queue == redis_entry_queue.queue_name
         assert entry.status is QueueEntryStatus.QUEUED
         assert entry.payload == {"request_id": 42}
         assert redis_entry_queue.get() == "raw-value"
@@ -67,6 +68,21 @@ class TestRedisQueueEntries:
         assert completed.status is QueueEntryStatus.SUCCEEDED
         assert completed.finished_at is not None
         assert completed.result == {"ok": True}
+
+    def test_uses_its_configured_entry_subclass_for_lifecycle_operations(
+        self, redis_entry_queue
+    ):
+        redis_entry_queue.entry_class = CustomQueueEntry
+
+        entry_id = redis_entry_queue.enqueue("work")
+        queued = redis_entry_queue.get_entry(entry_id)
+        running = redis_entry_queue.mark_running(entry_id)
+        completed = redis_entry_queue.mark_succeeded(entry_id, "done")
+
+        assert isinstance(queued, CustomQueueEntry)
+        assert isinstance(running, CustomQueueEntry)
+        assert isinstance(completed, CustomQueueEntry)
+        assert completed.kind == "task"
 
 
 @pytest.mark.parametrize(

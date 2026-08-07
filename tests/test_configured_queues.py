@@ -5,6 +5,8 @@ import django_queue
 from django_queue.apps import DjangoQueueConfig
 from django_queue.backends import InvalidQueueBackendError, MemoryQueue
 from django_queue.backends.exceptions import QueueException
+from django_queue.entries import QueueEntry
+from django_queue.worker import AsyncQueueWorker
 
 
 class AttributeErrorBackend:
@@ -20,7 +22,38 @@ class ValueErrorBackend:
 class HandlerMetadataBackend(MemoryQueue):
     def __init__(self, location, options):
         assert "HANDLER" not in options
+        assert "WORKER" not in options
+        assert "ENTRY_CLASS" not in options
         super().__init__(location, options)
+
+
+class TrackingWorker(AsyncQueueWorker):
+    instances = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).instances += 1
+        super().__init__(*args, **kwargs)
+
+
+class TrackingEntry(QueueEntry):
+    instances = 0
+
+    def __post_init__(self):
+        type(self).instances += 1
+        super().__post_init__()
+
+
+async def no_op_handler(entry):
+    return None
+
+
+@pytest.fixture(autouse=True)
+def reset_tracking_extension_instances():
+    TrackingWorker.instances = 0
+    TrackingEntry.instances = 0
+    yield
+    TrackingWorker.instances = 0
+    TrackingEntry.instances = 0
 
 
 class TestConfiguredQueueInitialization:
@@ -148,3 +181,75 @@ class TestConfiguredQueueInitialization:
             handler.settings["default"]["HANDLER"]
             == "tests.test_runqueues.handle_entry"
         )
+
+    @pytest.mark.parametrize(
+        ("worker", "entry_class"),
+        [
+            (TrackingWorker, TrackingEntry),
+            (
+                "tests.test_configured_queues.TrackingWorker",
+                "tests.test_configured_queues.TrackingEntry",
+            ),
+        ],
+        ids=["class-objects", "dotted-paths"],
+    )
+    def test_preserves_worker_extension_until_queue_activation(
+        self, worker, entry_class
+    ):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "tests.test_configured_queues.HandlerMetadataBackend",
+                    "WORKER": worker,
+                    "ENTRY_CLASS": entry_class,
+                    "LOCATION": "",
+                }
+            }
+        )
+
+        django_queue.initialise_queues(handler)
+
+        assert handler.settings["default"]["WORKER"] is worker
+        assert handler.settings["default"]["ENTRY_CLASS"] is entry_class
+        assert handler["default"].worker_class is worker
+        handler["default"].create_worker("default", no_op_handler)
+        assert TrackingWorker.instances == 1
+        assert handler["default"].entry_class is TrackingEntry
+        assert TrackingEntry.instances == 0
+
+    @pytest.mark.parametrize(
+        ("setting", "value", "message"),
+        [
+            ("WORKER", "tests.test_configured_queues.TrackingEntry", "WORKER"),
+            (
+                "ENTRY_CLASS",
+                "tests.test_configured_queues.TrackingWorker",
+                "ENTRY_CLASS",
+            ),
+            ("WORKER", "tests.test_configured_queues.UnknownWorker", "WORKER"),
+            ("ENTRY_CLASS", "tests.test_configured_queues.UnknownEntry", "ENTRY_CLASS"),
+        ],
+        ids=[
+            "entry-as-worker",
+            "worker-as-entry",
+            "missing-worker-path",
+            "missing-entry-path",
+        ],
+    )
+    def test_rejects_invalid_queue_type_extensions(self, setting, value, message):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    setting: value,
+                }
+            }
+        )
+
+        if setting == "WORKER":
+            django_queue.initialise_queues(handler)
+            with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
+                handler["default"].create_worker("default", no_op_handler)
+        else:
+            with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
+                django_queue.initialise_queues(handler)
