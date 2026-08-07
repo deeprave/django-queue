@@ -1,11 +1,12 @@
-from dataclasses import FrozenInstanceError, replace
+import json
+from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
 from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
-from tests.helpers import FIXED_UUID7
+from tests.helpers import FIXED_UUID7, CustomQueueEntry
 
 
 class TestQueueEntry:
@@ -65,6 +66,54 @@ class TestQueueEntry:
         restored = QueueEntry.from_dict(entry.to_dict())
 
         assert restored == entry
+
+    def test_round_trips_a_field_declared_by_a_subclass(self):
+        entry = CustomQueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.SUCCEEDED,
+            queued_at=datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
+            dispatched_at=datetime(2026, 8, 6, 12, 1, tzinfo=UTC),
+            finished_at=datetime(2026, 8, 6, 12, 2, tzinfo=UTC),
+            payload=["source", 3],
+            result={"accepted": True},
+            error=None,
+            kind="reconciliation",
+        )
+
+        stored = entry.to_dict()
+        restored = CustomQueueEntry.from_dict(json.loads(json.dumps(stored)))
+
+        # Asserted against a non-default value: a dropped field would otherwise
+        # be masked by the subclass default on restore.
+        assert stored["kind"] == "reconciliation"
+        assert restored == entry
+
+    def test_rejects_a_non_json_field_declared_by_a_subclass(self):
+        @dataclass(frozen=True, slots=True)
+        class ScheduledEntry(QueueEntry):
+            scheduled_at: datetime | None = None
+
+        with pytest.raises(TypeError, match="JSON-serialisable"):
+            ScheduledEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
+                dispatched_at=None,
+                finished_at=None,
+                payload=None,
+                result=None,
+                error=None,
+                scheduled_at=datetime(2026, 8, 7, tzinfo=UTC),
+            )
+
+    def test_restores_a_subclass_field_absent_from_the_record(self):
+        entry = CustomQueueEntry.create(queue="requests", payload=None)
+        stored = entry.to_dict()
+        del stored["kind"]
+
+        assert CustomQueueEntry.from_dict(stored).kind == "task"
 
     def test_is_immutable(self):
         entry = QueueEntry.create(queue="requests", payload=None)

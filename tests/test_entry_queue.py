@@ -5,7 +5,8 @@ import pytest
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue, MemoryStack
 from django_queue.backends.exceptions import QueueEmptyException
 from django_queue.entries import QueueEntryStatus
-from tests.helpers import FixedClock
+from django_queue.signals import entry_enqueued
+from tests.helpers import CustomQueueEntry, FixedClock
 
 
 @pytest.fixture
@@ -14,6 +15,18 @@ def queue():
 
 
 class TestMemoryQueueEntries:
+    def test_enqueue_survives_a_failing_entry_observer(self, queue):
+        def failing_receiver(sender, **kwargs):
+            raise RuntimeError("observer failed")
+
+        entry_enqueued.connect(failing_receiver, weak=False)
+        try:
+            entry_id = queue.enqueue("work")
+        finally:
+            entry_enqueued.disconnect(failing_receiver)
+
+        assert queue.get_entry(entry_id).payload == "work"
+
     def test_enqueue_returns_an_id_and_persists_queued_entry(self, queue):
         entry_id = queue.enqueue({"request_id": 42})
 
@@ -76,6 +89,19 @@ class TestMemoryQueueEntries:
 
         assert cancelled.status is QueueEntryStatus.CANCELLED
         assert cancelled.finished_at == datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+
+    def test_uses_its_configured_entry_subclass_for_lifecycle_operations(self, queue):
+        queue.entry_class = CustomQueueEntry
+
+        entry_id = queue.enqueue("work")
+        queued = queue.get_entry(entry_id)
+        running = queue.mark_running(entry_id)
+        completed = queue.mark_succeeded(entry_id, "done")
+
+        assert isinstance(queued, CustomQueueEntry)
+        assert isinstance(running, CustomQueueEntry)
+        assert isinstance(completed, CustomQueueEntry)
+        assert completed.kind == "task"
 
 
 def test_memory_priority_queue_supports_identified_entries():

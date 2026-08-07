@@ -4,6 +4,7 @@ from uuid import UUID
 
 from django_queue.clock import LocalQueueClock, QueueClock
 from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
+from django_queue.signals import send_entry_enqueued
 
 from ..base import BaseQueue
 from ..exceptions import QueueEmptyException, QueueFullException
@@ -65,11 +66,12 @@ class MemoryQueue(BaseQueue):
 
     def enqueue(self, payload) -> UUID:
         validate_json_value(payload)
-        entry = QueueEntry.create(
+        entry = self.entry_class.create(
             queue=self._queue_name, payload=payload, queued_at=self._clock.now()
         )
         self._entries[entry.id] = entry
         self._pending_entries.put_nowait(entry.id)
+        send_entry_enqueued(self, entry=entry)
         return entry.id
 
     def get_entry(self, entry_id: UUID) -> QueueEntry:
@@ -83,6 +85,9 @@ class MemoryQueue(BaseQueue):
             return self.get_entry(self._pending_entries.get_nowait())
         except queue.Empty as exc:
             raise QueueEmptyException from exc
+
+    def has_pending_entries(self) -> bool:
+        return not self._pending_entries.empty()
 
     def mark_running(self, entry_id: UUID) -> QueueEntry:
         return self._replace_entry(

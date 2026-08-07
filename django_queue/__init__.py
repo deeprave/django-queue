@@ -50,7 +50,13 @@ class QueueHandler(BaseConnectionHandler):
                 raise InvalidQueueBackendError(
                     f"Queue alias '{alias}' must define a non-empty BACKEND string"
                 )
-            configured_queues[alias] = dict(options)
+            configured_options = dict(options)
+            # Validate now so a bad entry class fails before any backend is built,
+            # but leave the configured value in place so settings stay faithful.
+            _resolve_extension_class(
+                alias, "ENTRY_CLASS", configured_options.get("ENTRY_CLASS"), QueueEntry
+            )
+            configured_queues[alias] = configured_options
         return configured_queues
 
     def create_connection(self, alias: str):
@@ -59,6 +65,10 @@ class QueueHandler(BaseConnectionHandler):
         backend = params.pop("BACKEND")
         location = params.pop("LOCATION", "")
         params.pop("HANDLER", None)
+        worker_class = params.pop("WORKER", None)
+        entry_class = _resolve_extension_class(
+            alias, "ENTRY_CLASS", params.pop("ENTRY_CLASS", None), QueueEntry
+        )
         try:
             backend_cls = import_string(backend)
         except ImportError as e:
@@ -71,6 +81,9 @@ class QueueHandler(BaseConnectionHandler):
             raise InvalidQueueBackendError(
                 f"Queue alias '{alias}' has invalid backend options: {exc}"
             ) from exc
+        queue.entry_class = entry_class
+        if worker_class is not None:
+            queue.worker_class = worker_class
         queue_created.send(self, name=params.get("queue_name", alias), instance=queue)
         return queue
 
@@ -90,3 +103,26 @@ def initialise_queues(queue_handler: QueueHandler | None = None) -> QueueHandler
 
 def close_queues(**kwargs):
     queues.close_all()
+
+
+def _resolve_extension_class(
+    alias: str, name: str, value: object, base_class: type
+) -> type:
+    if value is None:
+        return base_class
+    if isinstance(value, str):
+        if not value:
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' {name} must be a class or non-empty dotted path"
+            )
+        try:
+            value = import_string(value)
+        except ImportError as exc:
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' {name} could not be imported: {exc}"
+            ) from exc
+    if not isinstance(value, type) or not issubclass(value, base_class):
+        raise InvalidQueueBackendError(
+            f"Queue alias '{alias}' {name} must be a {base_class.__name__} subclass"
+        )
+    return value

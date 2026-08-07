@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -40,6 +41,34 @@ class QueueEntryStatus(StrEnum):
                 return frozenset()
 
 
+_WIRE_DECODERS: Mapping[str, Callable[[Any], Any]] = {
+    "id": uuid.UUID,
+    "status": QueueEntryStatus,
+    "queued_at": datetime.fromisoformat,
+    "dispatched_at": datetime.fromisoformat,
+    "finished_at": datetime.fromisoformat,
+}
+
+
+def _encode_wire_value(name: str, value: Any) -> Any:
+    """Render a field value in its JSON-compatible durable form."""
+    if name not in _WIRE_DECODERS or value is None:
+        return value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, StrEnum):
+        return value.value
+    return value.isoformat()
+
+
+def _decode_wire_value(name: str, value: Any) -> Any:
+    """Restore a field value from its durable form."""
+    decoder = _WIRE_DECODERS.get(name)
+    if decoder is None or value is None:
+        return value
+    return decoder(value)
+
+
 def validate_json_value(value: Any) -> None:
     """Raise ``TypeError`` unless *value* can be stored in the JSON wire format."""
     try:
@@ -69,8 +98,12 @@ class QueueEntry:
             raise ValueError("Queue entry IDs must be UUIDv7 values")
         if not self.queue:
             raise ValueError("Queue entry queue names must not be empty")
-        for value in (self.payload, self.result, self.error):
-            validate_json_value(value)
+        for field in fields(self):
+            # A field either has a wire conversion or is stored as-is, in which
+            # case it must already be JSON-safe. That covers the payload and any
+            # field a subclass declares.
+            if field.name not in _WIRE_DECODERS:
+                validate_json_value(getattr(self, field.name))
 
     @classmethod
     def create(
@@ -92,34 +125,17 @@ class QueueEntry:
     def to_dict(self) -> dict[str, Any]:
         """Return the complete JSON-compatible durable representation."""
         return {
-            "id": str(self.id),
-            "queue": self.queue,
-            "status": self.status.value,
-            "queued_at": self.queued_at.isoformat(),
-            "dispatched_at": self.dispatched_at.isoformat()
-            if self.dispatched_at
-            else None,
-            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
-            "payload": self.payload,
-            "result": self.result,
-            "error": self.error,
+            field.name: _encode_wire_value(field.name, getattr(self, field.name))
+            for field in fields(self)
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> QueueEntry:
         """Rebuild an entry from its JSON-decoded durable representation."""
         return cls(
-            id=uuid.UUID(value["id"]),
-            queue=value["queue"],
-            status=QueueEntryStatus(value["status"]),
-            queued_at=datetime.fromisoformat(value["queued_at"]),
-            dispatched_at=datetime.fromisoformat(value["dispatched_at"])
-            if value["dispatched_at"]
-            else None,
-            finished_at=datetime.fromisoformat(value["finished_at"])
-            if value["finished_at"]
-            else None,
-            payload=value["payload"],
-            result=value["result"],
-            error=value["error"],
+            **{
+                field.name: _decode_wire_value(field.name, value[field.name])
+                for field in fields(cls)
+                if field.init and field.name in value
+            }
         )

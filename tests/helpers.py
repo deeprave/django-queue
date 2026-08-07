@@ -1,7 +1,17 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from django_queue.entries import QueueEntry
+
 FIXED_UUID7 = UUID("0198babb-3bce-7f81-8c43-3c1d99f475a9")
+
+
+@dataclass(frozen=True, slots=True)
+class CustomQueueEntry(QueueEntry):
+    """An entry subclass adding one field and nothing else."""
+
+    kind: str = "task"
 
 
 class FixedClock:

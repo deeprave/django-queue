@@ -14,7 +14,7 @@ def test_init(redis_client):
     stack = RedisStack(redis_client, queue_name="test_stack")
     assert stack._redis is not None
     assert stack._redis.ping() is True
-    assert stack._queue_name == "test_stack"
+    assert stack.queue_name == "test_stack"
     assert stack._maxsize == 0
     assert stack.stack
 
