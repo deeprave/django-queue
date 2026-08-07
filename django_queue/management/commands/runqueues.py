@@ -80,8 +80,17 @@ class Command(BaseCommand):
         shutdown_event = asyncio.Event() if shutdown_event is None else shutdown_event
         loop = asyncio.get_running_loop()
         signals = (signal.SIGINT, signal.SIGTERM)
+        installed_signals = []
         for event_signal in signals:
-            loop.add_signal_handler(event_signal, shutdown_event.set)
+            try:
+                loop.add_signal_handler(event_signal, shutdown_event.set)
+            except NotImplementedError, RuntimeError:
+                logger.warning(
+                    "Signal handler support is unavailable; worker shutdown relies on task cancellation."
+                )
+                break
+            else:
+                installed_signals.append(event_signal)
 
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         tasks: dict[asyncio.Task[None], str] = {}
@@ -109,7 +118,7 @@ class Command(BaseCommand):
                         exc_info=(type(error), error, error.__traceback__),
                     )
         finally:
-            for event_signal in signals:
+            for event_signal in installed_signals:
                 loop.remove_signal_handler(event_signal)
             shutdown_task.cancel()
             for task in tasks:

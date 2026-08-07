@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 import threading
 from collections.abc import Callable
 from io import StringIO
@@ -252,6 +253,63 @@ class TestRunQueuesCommand:
         release.set()
         await asyncio.wait_for(task, timeout=1)
         assert worker.running is False
+
+    def test_runs_when_the_event_loop_does_not_support_signal_handlers(
+        self, monkeypatch, caplog
+    ):
+        asyncio.run(
+            self._runs_when_the_event_loop_does_not_support_signal_handlers(
+                monkeypatch, caplog
+            )
+        )
+
+    async def _runs_when_the_event_loop_does_not_support_signal_handlers(
+        self, monkeypatch, caplog
+    ):
+        loop = asyncio.get_running_loop()
+        shutdown = asyncio.Event()
+        shutdown.set()
+
+        def unsupported_signal_handler(*args):
+            raise NotImplementedError
+
+        monkeypatch.setattr(loop, "add_signal_handler", unsupported_signal_handler)
+        caplog.set_level(
+            logging.WARNING, logger="django_queue.management.commands.runqueues"
+        )
+
+        await Command()._run_workers([], shutdown)
+
+        assert "Signal handler support is unavailable" in caplog.text
+
+    def test_removes_only_the_signal_handlers_that_were_installed(self, monkeypatch):
+        asyncio.run(
+            self._removes_only_the_signal_handlers_that_were_installed(monkeypatch)
+        )
+
+    async def _removes_only_the_signal_handlers_that_were_installed(self, monkeypatch):
+        loop = asyncio.get_running_loop()
+        shutdown = asyncio.Event()
+        shutdown.set()
+        installed = []
+        removed = []
+
+        def add_signal_handler(event_signal, callback):
+            if event_signal is signal.SIGTERM:
+                raise NotImplementedError
+            installed.append(event_signal)
+
+        def remove_signal_handler(event_signal):
+            removed.append(event_signal)
+            return True
+
+        monkeypatch.setattr(loop, "add_signal_handler", add_signal_handler)
+        monkeypatch.setattr(loop, "remove_signal_handler", remove_signal_handler)
+
+        await Command()._run_workers([], shutdown)
+
+        assert installed == [signal.SIGINT]
+        assert removed == [signal.SIGINT]
 
 
 class ExplodingQueue(MemoryQueue):
