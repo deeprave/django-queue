@@ -2,6 +2,7 @@ try:
     import json
     import uuid
     from dataclasses import replace
+    from typing import Any
 
     import redis
 
@@ -21,7 +22,9 @@ try:
         except UnicodeEncodeError as e:
             raise QueueEncodingException from e
 
-    def _decode(item: bytes, encoding: str) -> str:
+    # redis-py's return types depend on the client's decode_responses setting,
+    # which it cannot express statically, so this boundary accepts what it yields.
+    def _decode(item: Any, encoding: str) -> str:
         try:
             return item.decode(encoding)
         except UnicodeDecodeError as e:
@@ -57,7 +60,10 @@ try:
         def capacity(self):
             return self._maxsize
 
-        def add(self, *items: str):
+        # The raw-item API is heterogeneous across this family: JSON variants
+        # exchange dicts and priority variants (priority, item) tuples. Leaf
+        # classes carry the precise annotations.
+        def add(self, *items):
             if items:
                 current_size = self.size()
                 if self._maxsize != 0 and current_size + len(items) > self._maxsize:
@@ -71,13 +77,18 @@ try:
                     ),
                 )
 
-        def get(self) -> str:
+        def get(self):
             if self.size() == 0:
                 raise QueueEmptyException
             return _decode(self.pop(self._queue_name), self._encoding)
 
-        def poll(self) -> str:
-            return _decode(self.bpop([self._queue_name], 0)[1], self._encoding)
+        def poll(self):
+            # A zero timeout blocks indefinitely, so this should not return
+            # empty-handed; guard rather than subscript a possible None.
+            item = self.bpop([self._queue_name], 0)
+            if not item:
+                raise QueueEmptyException
+            return _decode(item[1], self._encoding)
 
         def peek(self):
             if self.size() == 0:

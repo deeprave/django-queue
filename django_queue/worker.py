@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from django_queue.backends.base import BaseQueue
@@ -24,13 +24,17 @@ WORKER_EVENT_MESSAGES: Mapping[str, str] = {
     "stopped": "Queue worker stopped",
 }
 
-QueueHandler = Callable[[QueueEntry], Awaitable[object]]
+# A coroutine rather than any awaitable: the worker schedules handlers with
+# asyncio.create_task, and runqueues already rejects non-coroutine handlers.
+QueueHandler = Callable[[QueueEntry], Coroutine[Any, Any, object]]
 
 
 class QueueLookup(Protocol):
     """Queue service lookup used by a worker's registered aliases."""
 
-    def __getitem__(self, alias: str) -> BaseQueue: ...
+    # Positional-only: subscripting never passes the key by keyword, and a plain
+    # dict would not otherwise satisfy this protocol.
+    def __getitem__(self, alias: str, /) -> BaseQueue: ...
 
 
 class QueuePersistenceError(RuntimeError):

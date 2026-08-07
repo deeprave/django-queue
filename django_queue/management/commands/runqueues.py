@@ -133,7 +133,10 @@ class Command(BaseCommand):
                 )
                 if shutdown_task in done:
                     return
-                for task in done:
+                # Select from the supervised workers rather than iterating
+                # `done`, which also carries the shutdown task. Copied because
+                # the loop mutates `tasks`.
+                for task in [worker for worker in tasks if worker in done]:
                     alias = tasks.pop(task)
                     error = _task_error(task, alias)
                     if not tasks:

@@ -18,6 +18,10 @@ runs:
       shell: bash
       run: uv sync ${{ inputs.sync-args }}
 
+    - name: Check types
+      shell: bash
+      run: uv run ty check
+
     - name: Run the tests
       shell: bash
       run: uv run pytest

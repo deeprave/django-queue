@@ -5,13 +5,13 @@ try:
 
     from .redisqueue import RedisQueue
 
-    def _encode(item: dict) -> str:
+    def _encode(item: dict | str) -> str:
         try:
             return json.dumps(item)
         except TypeError as e:
             raise QueueEncodingException from e
 
-    def _decode(item: str) -> dict:
+    def _decode(item: dict | str) -> dict | str:
         try:
             return item if isinstance(item, dict) else json.loads(item)
         except (json.JSONDecodeError, TypeError) as e:

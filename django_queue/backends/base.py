@@ -17,11 +17,15 @@ if TYPE_CHECKING:
 class BaseQueue(ABC):
     entry_class: type[QueueEntry] = QueueEntry
     worker_class: type[AsyncQueueWorker] | str = "django_queue.worker.AsyncQueueWorker"
-    _queue_name: str | None = None
+    _queue_name: str = ""
 
     @property
-    def queue_name(self) -> str | None:
-        """Return the stable entry namespace this queue writes under."""
+    def queue_name(self) -> str:
+        """Return the stable entry namespace this queue writes under.
+
+        Empty when a backend never set one; entry creation rejects that, so an
+        entry-capable backend must supply a name.
+        """
         return self._queue_name
 
     def resolve_worker_class(self, alias: str) -> type[AsyncQueueWorker]:

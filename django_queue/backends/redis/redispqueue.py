@@ -15,7 +15,7 @@ try:
         def stack(self):
             return False
 
-        def add(self, *items: tuple[int, str]):
+        def add(self, *items):
             """
             Add one or more priority, item pairs to the priority queue.
             :param items:
@@ -33,7 +33,7 @@ try:
                     nx=True,
                 )
 
-        def get(self) -> str:
+        def get(self):
             """
             Get and remove the next item from the priority queue.
             :return: The item with the lowest priority.
@@ -45,7 +45,7 @@ try:
                 return _decode(item[0], self._encoding)
             raise QueueEmptyException
 
-        def poll(self, timeout: int = 0, retries: int = 10) -> str:
+        def poll(self, timeout: int = 0, retries: int = 10):
             """
             Retrieves the next item from the queue without removing it (peek).
             :return: The item with the lowest priority.
@@ -64,7 +64,7 @@ try:
                         return _decode(item[1], self._encoding)
             raise QueueEmptyException
 
-        def peek(self) -> str:
+        def peek(self):
             """
             Retrieve (but don't remove) the highest-priority item from the priority queue.
             :return: The item with the highest priority.

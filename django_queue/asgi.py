@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Callable, Coroutine, Iterable, Mapping
+from typing import Any
 
 import django_queue
 from django_queue.signals import entry_enqueued
@@ -14,9 +15,11 @@ from django_queue.worker import QueueLookup
 logger = logging.getLogger(__name__)
 
 ASGIMessage = dict[str, object]
-ASGIReceive = Callable[[], Awaitable[ASGIMessage]]
-ASGISend = Callable[[ASGIMessage], Awaitable[None]]
-ASGIApplication = Callable[[ASGIMessage, ASGIReceive, ASGISend], Awaitable[None]]
+ASGIReceive = Callable[[], Coroutine[Any, Any, ASGIMessage]]
+ASGISend = Callable[[ASGIMessage], Coroutine[Any, Any, None]]
+ASGIApplication = Callable[
+    [ASGIMessage, ASGIReceive, ASGISend], Coroutine[Any, Any, None]
+]
 
 
 def with_queue_worker(
