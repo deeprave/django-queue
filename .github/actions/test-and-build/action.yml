@@ -18,9 +18,14 @@ runs:
       shell: bash
       run: uv sync ${{ inputs.sync-args }}
 
-    - name: Check types
+    # Runs every hook from .pre-commit-config.yaml, so the local and CI gates
+    # cannot drift. Skips the branch guard, which only means anything locally,
+    # and pytest, which has its own step below.
+    - name: Run pre-commit checks
       shell: bash
-      run: uv run ty check
+      env:
+        SKIP: no-commit-to-branch,pytest
+      run: uv run pre-commit run --all-files --show-diff-on-failure
 
     - name: Run the tests
       shell: bash
