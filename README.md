@@ -39,7 +39,6 @@ QUEUES = {
         "maxsize": 64,
     },
 }
-
 ```
 
 The above configures the queue backend to be redis, storing FIFO data in JSON format.
@@ -170,6 +169,42 @@ same `MemoryQueue` instance to the wrapper and to the component producing work
 to exercise a complete request-to-worker flow without Redis. That queue remains
 local to one ASGI process: it cannot be consumed by another process, container,
 or external `runqueues` worker.
+
+### External `runqueues` worker
+
+For production, run queue processing as a separate Django process and use a
+shared backend such as Redis. Declare an asynchronous handler on each queue
+that the process should dispatch:
+
+```python
+# settings.py
+QUEUES = {
+    "requests": {
+        "BACKEND": "django_queue.backends.RedisQueueJson",
+        "LOCATION": "redis://redis:6379/12",
+        "HANDLER": "myproject.queue_handlers.process_request",
+    },
+}
+
+
+# myproject/queue_handlers.py
+async def process_request(entry):
+    return {"processed": entry.payload["request_id"]}
+```
+
+Start it as its own service or container command:
+
+```console
+python manage.py runqueues
+```
+
+`runqueues` creates one `AsyncQueueWorker` for each configured `HANDLER` and
+runs until it receives `SIGINT` or `SIGTERM`. It reports each alias at startup,
+then cooperatively stops all active workers on shutdown. Queue definitions
+without `HANDLER` remain available to application code but are not dispatched;
+when no handlers are configured, the command reports this and exits
+successfully. A worker failure is logged while other workers remain active; the
+command exits non-zero only if a failure leaves no workers running.
 
 With all queues, the `get()`, `peek()` and `pull()` methods return the object.
 With priority queues the priority is only used with and relevant to `add()`.

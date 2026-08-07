@@ -17,6 +17,12 @@ class ValueErrorBackend:
         raise ValueError("invalid option")
 
 
+class HandlerMetadataBackend(MemoryQueue):
+    def __init__(self, location, options):
+        assert "HANDLER" not in options
+        super().__init__(location, options)
+
+
 class TestConfiguredQueueInitialization:
     def test_invalid_backend_errors_are_queue_and_django_configuration_errors(self):
         assert issubclass(QueueException, Exception)
@@ -81,18 +87,28 @@ class TestConfiguredQueueInitialization:
 
         handler = CustomQueueHandler("not a configuration mapping")
 
-        with pytest.raises(InvalidQueueBackendError, match="CUSTOM_QUEUES must be a mapping"):
+        with pytest.raises(
+            InvalidQueueBackendError, match="CUSTOM_QUEUES must be a mapping"
+        ):
             django_queue.initialise_queues(handler)
 
     @pytest.mark.parametrize(
         ("backend", "message"),
         [
-            ("tests.test_configured_queues.AttributeErrorBackend", "default.*invalid location"),
-            ("tests.test_configured_queues.ValueErrorBackend", "default.*invalid option"),
+            (
+                "tests.test_configured_queues.AttributeErrorBackend",
+                "default.*invalid location",
+            ),
+            (
+                "tests.test_configured_queues.ValueErrorBackend",
+                "default.*invalid option",
+            ),
         ],
         ids=["attribute-error", "value-error"],
     )
-    def test_wraps_backend_configuration_errors_with_the_queue_alias(self, backend, message):
+    def test_wraps_backend_configuration_errors_with_the_queue_alias(
+        self, backend, message
+    ):
         handler = django_queue.QueueHandler({"default": {"BACKEND": backend}})
 
         with pytest.raises(InvalidQueueBackendError, match=message):
@@ -113,3 +129,22 @@ class TestConfiguredQueueInitialization:
         config.ready()
 
         assert isinstance(handler["default"], MemoryQueue)
+
+    def test_preserves_handler_metadata_without_passing_it_to_the_backend(self):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "tests.test_configured_queues.HandlerMetadataBackend",
+                    "HANDLER": "tests.test_runqueues.handle_entry",
+                    "LOCATION": "",
+                }
+            }
+        )
+
+        django_queue.initialise_queues(handler)
+
+        assert isinstance(handler["default"], HandlerMetadataBackend)
+        assert (
+            handler.settings["default"]["HANDLER"]
+            == "tests.test_runqueues.handle_entry"
+        )

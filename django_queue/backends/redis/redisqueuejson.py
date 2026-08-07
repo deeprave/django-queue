@@ -5,20 +5,17 @@ try:
 
     from .redisqueue import RedisQueue
 
-
     def _encode(item: dict) -> str:
         try:
             return json.dumps(item)
         except TypeError as e:
             raise QueueEncodingException from e
 
-
     def _decode(item: str) -> dict:
         try:
             return item if isinstance(item, dict) else json.loads(item)
         except (json.JSONDecodeError, TypeError) as e:
             raise QueueEncodingException from e
-
 
     class RedisQueueJson(RedisQueue):
         def add(self, *items: dict | str) -> None:
@@ -32,7 +29,6 @@ try:
 
         def peek(self) -> dict | str:
             return _decode(super().peek())
-
 
     class RedisStackJson(RedisQueueJson):
         def __init__(self, redis_spec, options: dict | None = None, **kwargs):

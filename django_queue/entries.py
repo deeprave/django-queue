@@ -26,9 +26,17 @@ class QueueEntryStatus(StrEnum):
                 return frozenset({QueueEntryStatus.RUNNING})
             case QueueEntryStatus.RUNNING:
                 return frozenset(
-                    {QueueEntryStatus.SUCCEEDED, QueueEntryStatus.FAILED, QueueEntryStatus.CANCELLED}
+                    {
+                        QueueEntryStatus.SUCCEEDED,
+                        QueueEntryStatus.FAILED,
+                        QueueEntryStatus.CANCELLED,
+                    }
                 )
-            case QueueEntryStatus.SUCCEEDED | QueueEntryStatus.FAILED | QueueEntryStatus.CANCELLED:
+            case (
+                QueueEntryStatus.SUCCEEDED
+                | QueueEntryStatus.FAILED
+                | QueueEntryStatus.CANCELLED
+            ):
                 return frozenset()
 
 
@@ -65,7 +73,9 @@ class QueueEntry:
             validate_json_value(value)
 
     @classmethod
-    def create(cls, *, queue: str, payload: Any, queued_at: datetime | None = None) -> QueueEntry:
+    def create(
+        cls, *, queue: str, payload: Any, queued_at: datetime | None = None
+    ) -> QueueEntry:
         """Create a newly queued entry with a queue-owned UUIDv7 and timestamp."""
         return cls(
             id=uuid.uuid7(),
@@ -86,7 +96,9 @@ class QueueEntry:
             "queue": self.queue,
             "status": self.status.value,
             "queued_at": self.queued_at.isoformat(),
-            "dispatched_at": self.dispatched_at.isoformat() if self.dispatched_at else None,
+            "dispatched_at": self.dispatched_at.isoformat()
+            if self.dispatched_at
+            else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "payload": self.payload,
             "result": self.result,
@@ -101,8 +113,12 @@ class QueueEntry:
             queue=value["queue"],
             status=QueueEntryStatus(value["status"]),
             queued_at=datetime.fromisoformat(value["queued_at"]),
-            dispatched_at=datetime.fromisoformat(value["dispatched_at"]) if value["dispatched_at"] else None,
-            finished_at=datetime.fromisoformat(value["finished_at"]) if value["finished_at"] else None,
+            dispatched_at=datetime.fromisoformat(value["dispatched_at"])
+            if value["dispatched_at"]
+            else None,
+            finished_at=datetime.fromisoformat(value["finished_at"])
+            if value["finished_at"]
+            else None,
             payload=value["payload"],
             result=value["result"],
             error=value["error"],

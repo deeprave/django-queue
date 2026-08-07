@@ -18,7 +18,9 @@ def redis_entry_queue(redis_client):
 
 
 class TestRedisQueueEntries:
-    def test_persists_an_identified_entry_separately_from_raw_queue_values(self, redis_entry_queue):
+    def test_persists_an_identified_entry_separately_from_raw_queue_values(
+        self, redis_entry_queue
+    ):
         redis_entry_queue.add("raw-value")
 
         entry_id = redis_entry_queue.enqueue({"request_id": 42})
@@ -47,7 +49,9 @@ class TestRedisQueueEntries:
         assert redis_entry_queue.dequeue_entry().id == latest_id
 
     def test_dequeues_entries_with_the_configured_encoding(self, redis_client):
-        queue = RedisQueue(redis_client, queue_name=f"entry-encoding-{uuid4().hex}", encoding="utf-16")
+        queue = RedisQueue(
+            redis_client, queue_name=f"entry-encoding-{uuid4().hex}", encoding="utf-16"
+        )
         entry_id = queue.enqueue("work")
 
         assert queue.dequeue_entry().id == entry_id
@@ -87,7 +91,9 @@ def test_redis_queue_variants_support_identified_entries(redis_client, queue_typ
     [(RedisQueue, "first"), (RedisStack, "latest")],
     ids=["queue-fifo", "stack-lifo"],
 )
-def test_redis_entry_dispatch_order_matches_queue_variant(redis_client, queue_type, expected_first_payload):
+def test_redis_entry_dispatch_order_matches_queue_variant(
+    redis_client, queue_type, expected_first_payload
+):
     queue = queue_type(redis_client, queue_name=f"entry-order-{uuid4().hex}")
     queue.enqueue("first")
     queue.enqueue("latest")

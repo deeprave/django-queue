@@ -12,7 +12,9 @@ def redis_priority_queue(redis_client):
     """
     Fixture to set up and clean up a RedisPriorityQueue instance.
     """
-    queue = RedisPriorityQueue(redis_client, queue_name="test_priority_queue", maxsize=5)
+    queue = RedisPriorityQueue(
+        redis_client, queue_name="test_priority_queue", maxsize=5
+    )
     queue.clear()
     return queue
 
@@ -47,7 +49,9 @@ def test_add_overflow(redis_priority_queue):
     """
     Test adding more items than the maximum size should raise QueueFullException.
     """
-    redis_priority_queue.add((10, "item1"), (20, "item2"), (30, "item3"), (40, "item4"), (50, "item5"))
+    redis_priority_queue.add(
+        (10, "item1"), (20, "item2"), (30, "item3"), (40, "item4"), (50, "item5")
+    )
     with pytest.raises(QueueFullException):
         redis_priority_queue.add((60, "item6"))
 
@@ -56,7 +60,9 @@ def test_get_maintains_priority_order(redis_priority_queue):
     """
     Test `get()` retrieves items in order of priority (highest first).
     """
-    redis_priority_queue.add((-100, "low_priority"), (0, "medium_priority"), (100, "high_priority"))
+    redis_priority_queue.add(
+        (-100, "low_priority"), (0, "medium_priority"), (100, "high_priority")
+    )
     assert redis_priority_queue.get() == "high_priority"
     assert redis_priority_queue.get() == "medium_priority"
     assert redis_priority_queue.get() == "low_priority"
@@ -76,11 +82,17 @@ def test_poll_blocking(redis_priority_queue, mocker):
     """
     # Mock Redis' blpop response
     mocker.patch.object(
-        redis_priority_queue._redis, "blpop", return_value=(redis_priority_queue._queue_name, b"blocked_item")
+        redis_priority_queue._redis,
+        "blpop",
+        return_value=(redis_priority_queue._queue_name, b"blocked_item"),
     )
     redis_priority_queue.add((10, "item1"))
-    assert redis_priority_queue.poll(timeout=5) == "item1"  # Retrieve existing item first
-    assert redis_priority_queue.poll(timeout=5) == "blocked_item"  # Block and retrieve added item
+    assert (
+        redis_priority_queue.poll(timeout=5) == "item1"
+    )  # Retrieve existing item first
+    assert (
+        redis_priority_queue.poll(timeout=5) == "blocked_item"
+    )  # Block and retrieve added item
 
 
 def test_poll_timeout(redis_priority_queue):
@@ -142,7 +154,9 @@ def test_negative_priority(redis_priority_queue):
     """
     Test handling of negative priority values.
     """
-    redis_priority_queue.add((-50, "negative_priority"), (100, "high_priority"), (0, "neutral_priority"))
+    redis_priority_queue.add(
+        (-50, "negative_priority"), (100, "high_priority"), (0, "neutral_priority")
+    )
     assert redis_priority_queue.get() == "high_priority"  # Highest priority first
     assert redis_priority_queue.get() == "neutral_priority"  # Neutral priority
     assert redis_priority_queue.get() == "negative_priority"  # Lowest priority

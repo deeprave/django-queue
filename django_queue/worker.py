@@ -61,7 +61,9 @@ class AsyncQueueWorker:
         finally:
             self.running = False
 
-    async def _dispatch(self, queue: BaseQueue, handler: QueueHandler, entry: QueueEntry) -> None:
+    async def _dispatch(
+        self, queue: BaseQueue, handler: QueueHandler, entry: QueueEntry
+    ) -> None:
         await asyncio.to_thread(queue.mark_running, entry.id)
         handler_task = asyncio.create_task(handler(entry))
         try:
@@ -81,10 +83,14 @@ class AsyncQueueWorker:
         handler_task: asyncio.Task[object],
     ) -> None:
         try:
-            result = await asyncio.wait_for(asyncio.shield(handler_task), self._cancellation_grace_period)
+            result = await asyncio.wait_for(
+                asyncio.shield(handler_task), self._cancellation_grace_period
+            )
         except TimeoutError:
             handler_task.cancel()
-            handler_task.add_done_callback(lambda task: self._log_late_handler_outcome(entry, task))
+            handler_task.add_done_callback(
+                lambda task: self._log_late_handler_outcome(entry, task)
+            )
             await self._record_terminal(queue, entry, queue.mark_cancelled)
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
             await self._record_failure(queue, entry, exc)
@@ -92,7 +98,9 @@ class AsyncQueueWorker:
             await self._record_result(queue, entry, result)
 
     @staticmethod
-    def _log_late_handler_outcome(entry: QueueEntry, task: asyncio.Task[object]) -> None:
+    def _log_late_handler_outcome(
+        entry: QueueEntry, task: asyncio.Task[object]
+    ) -> None:
         try:
             error = task.exception()
         except asyncio.CancelledError:
@@ -104,7 +112,9 @@ class AsyncQueueWorker:
                 exc_info=(type(error), error, error.__traceback__),
             )
 
-    async def _record_result(self, queue: BaseQueue, entry: QueueEntry, result: object) -> None:
+    async def _record_result(
+        self, queue: BaseQueue, entry: QueueEntry, result: object
+    ) -> None:
         try:
             validate_json_value(result)
         except TypeError as exc:
@@ -112,23 +122,35 @@ class AsyncQueueWorker:
         else:
             await self._record_terminal(queue, entry, queue.mark_succeeded, result)
 
-    async def _record_failure(self, queue: BaseQueue, entry: QueueEntry, error: Exception) -> None:
+    async def _record_failure(
+        self, queue: BaseQueue, entry: QueueEntry, error: Exception
+    ) -> None:
         logger.exception("Queue handler failed for entry %s", entry.id)
         await self._record_terminal(queue, entry, queue.mark_failed, error)
 
-    async def _record_terminal(self, queue: BaseQueue, entry: QueueEntry, update: Callable, *args) -> None:
+    async def _record_terminal(
+        self, queue: BaseQueue, entry: QueueEntry, update: Callable, *args
+    ) -> None:
         try:
             await asyncio.to_thread(update, entry.id, *args)
         except Exception as exc:
-            logger.exception("Unable to record terminal queue outcome for entry %s", entry.id)
+            logger.exception(
+                "Unable to record terminal queue outcome for entry %s", entry.id
+            )
             if not await self._record_persistence_failure(queue, entry):
-                raise QueuePersistenceError("Unable to persist terminal queue outcome") from exc
+                raise QueuePersistenceError(
+                    "Unable to persist terminal queue outcome"
+                ) from exc
 
-    async def _record_persistence_failure(self, queue: BaseQueue, entry: QueueEntry) -> bool:
+    async def _record_persistence_failure(
+        self, queue: BaseQueue, entry: QueueEntry
+    ) -> bool:
         try:
             current_entry = await asyncio.to_thread(queue.get_entry, entry.id)
         except Exception:
-            logger.exception("Unable to inspect queue entry %s after a persistence failure", entry.id)
+            logger.exception(
+                "Unable to inspect queue entry %s after a persistence failure", entry.id
+            )
             return False
         if current_entry.status is not QueueEntryStatus.RUNNING:
             return True
@@ -139,6 +161,8 @@ class AsyncQueueWorker:
                 QueuePersistenceError("Unable to persist terminal queue outcome"),
             )
         except Exception:
-            logger.exception("Unable to record persistence failure for entry %s", entry.id)
+            logger.exception(
+                "Unable to record persistence failure for entry %s", entry.id
+            )
             return False
         return True

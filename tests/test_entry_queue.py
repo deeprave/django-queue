@@ -25,7 +25,9 @@ class TestMemoryQueueEntries:
         assert entry.queued_at == datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
         assert entry.payload == {"request_id": 42}
 
-    def test_dequeue_removes_the_entry_from_pending_work_but_retains_its_record(self, queue):
+    def test_dequeue_removes_the_entry_from_pending_work_but_retains_its_record(
+        self, queue
+    ):
         entry_id = queue.enqueue("work")
 
         entry = queue.dequeue_entry()

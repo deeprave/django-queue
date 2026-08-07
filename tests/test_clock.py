@@ -53,7 +53,9 @@ class TestRedisQueueClock:
 
     def test_serialises_concurrent_initial_calibration(self):
         redis = BlockingRedisTime()
-        clock = RedisQueueClock(redis, utcnow=lambda: datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC))
+        clock = RedisQueueClock(
+            redis, utcnow=lambda: datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC)
+        )
 
         first = threading.Thread(target=clock.now)
         first.start()
@@ -71,7 +73,9 @@ class TestRedisQueueClock:
 
     def test_rejects_initial_redis_time_that_drifts_more_than_three_minutes(self):
         redis = FakeRedisTime((1_785_800_181, 0))
-        clock = RedisQueueClock(redis, utcnow=lambda: datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC))
+        clock = RedisQueueClock(
+            redis, utcnow=lambda: datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC)
+        )
 
         with pytest.raises(QueueClockError, match="drift"):
             clock.now()
@@ -82,7 +86,9 @@ class TestRedisQueueClock:
         with pytest.raises(QueueClockError, match="unavailable"):
             clock.now()
 
-    def test_retains_the_last_good_offset_after_a_background_redis_refresh_failure(self):
+    def test_retains_the_last_good_offset_after_a_background_redis_refresh_failure(
+        self,
+    ):
         redis = FailingRefreshRedis()
         monotonic = FakeMonotonic(100.0)
         utcnow = FakeUtcNow(datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC))
