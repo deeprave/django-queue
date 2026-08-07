@@ -50,23 +50,19 @@ _WIRE_DECODERS: Mapping[str, Callable[[Any], Any]] = {
 }
 
 
-def _encode_wire_value(value: Any) -> Any:
+def _encode_wire_value(name: str, value: Any) -> Any:
     """Render a field value in its JSON-compatible durable form."""
+    if name not in _WIRE_DECODERS or value is None:
+        return value
     if isinstance(value, uuid.UUID):
         return str(value)
     if isinstance(value, StrEnum):
         return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
+    return value.isoformat()
 
 
 def _decode_wire_value(name: str, value: Any) -> Any:
-    """Restore a field value from its durable form.
-
-    Only the base entry's non-JSON fields need decoding; fields added by an
-    entry subclass are JSON-safe by contract and round-trip untouched.
-    """
+    """Restore a field value from its durable form."""
     decoder = _WIRE_DECODERS.get(name)
     if decoder is None or value is None:
         return value
@@ -102,8 +98,12 @@ class QueueEntry:
             raise ValueError("Queue entry IDs must be UUIDv7 values")
         if not self.queue:
             raise ValueError("Queue entry queue names must not be empty")
-        for value in (self.payload, self.result, self.error):
-            validate_json_value(value)
+        for field in fields(self):
+            # A field either has a wire conversion or is stored as-is, in which
+            # case it must already be JSON-safe. That covers the payload and any
+            # field a subclass declares.
+            if field.name not in _WIRE_DECODERS:
+                validate_json_value(getattr(self, field.name))
 
     @classmethod
     def create(
@@ -125,7 +125,7 @@ class QueueEntry:
     def to_dict(self) -> dict[str, Any]:
         """Return the complete JSON-compatible durable representation."""
         return {
-            field.name: _encode_wire_value(getattr(self, field.name))
+            field.name: _encode_wire_value(field.name, getattr(self, field.name))
             for field in fields(self)
         }
 
@@ -136,5 +136,6 @@ class QueueEntry:
             **{
                 field.name: _decode_wire_value(field.name, value[field.name])
                 for field in fields(cls)
+                if field.init and field.name in value
             }
         )

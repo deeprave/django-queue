@@ -1,5 +1,5 @@
 import json
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -88,6 +88,32 @@ class TestQueueEntry:
         # be masked by the subclass default on restore.
         assert stored["kind"] == "reconciliation"
         assert restored == entry
+
+    def test_rejects_a_non_json_field_declared_by_a_subclass(self):
+        @dataclass(frozen=True, slots=True)
+        class ScheduledEntry(QueueEntry):
+            scheduled_at: datetime | None = None
+
+        with pytest.raises(TypeError, match="JSON-serialisable"):
+            ScheduledEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
+                dispatched_at=None,
+                finished_at=None,
+                payload=None,
+                result=None,
+                error=None,
+                scheduled_at=datetime(2026, 8, 7, tzinfo=UTC),
+            )
+
+    def test_restores_a_subclass_field_absent_from_the_record(self):
+        entry = CustomQueueEntry.create(queue="requests", payload=None)
+        stored = entry.to_dict()
+        del stored["kind"]
+
+        assert CustomQueueEntry.from_dict(stored).kind == "task"
 
     def test_is_immutable(self):
         entry = QueueEntry.create(queue="requests", payload=None)
