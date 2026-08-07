@@ -61,8 +61,10 @@ lifecycle retain common cancellation, observability, and error semantics.
 resolved class on a common internal entry-factory boundary, then use it only to
 create and restore entries. A task entry can therefore add JSON-safe metadata
 while inheriting the standard ID, queue, status, timestamp, payload, result,
-and error contract. Entry subclasses remain responsible for extending their
-wire conversion coherently.
+and error contract. The base entry serialises and restores by iterating its
+dataclass fields, so a subclass persists its own fields by declaring them; only
+the base entry's non-JSON fields need decoding, and JSON-safe subclass fields
+round-trip untouched.
 
 ### Worker activation follows queue activity
 

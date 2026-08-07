@@ -72,9 +72,10 @@ QUEUES = {
 `WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import
 path. They default to `AsyncQueueWorker` and `QueueEntry`, respectively.
 Workers must subclass `AsyncQueueWorker` and use its normal queue-lookup and
-handler-mapping constructor. Entry classes must subclass `QueueEntry`; any
-additional persisted fields must remain JSON-serialisable and implement
-compatible `create`, `to_dict`, and `from_dict` methods. Django validates and
+handler-mapping constructor. Entry classes must subclass `QueueEntry` and
+declare any additional fields as a frozen dataclass; those fields must be
+JSON-serialisable, and are persisted and restored without further work. Django
+validates and
 imports entry types during queue configuration and worker types during
 `runqueues` startup. A worker is constructed only when its queue first becomes
 active; an entry only when it is enqueued, restored, or updated.
