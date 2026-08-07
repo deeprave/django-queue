@@ -5,9 +5,10 @@ try:
 
     from .redisqueue import RedisQueue, _decode, _encode
 
-
     class RedisPriorityQueue(RedisQueue):
-        def __init__(self, redis_spec: str | redis.Redis, options: dict | None = None, **kwargs):
+        def __init__(
+            self, redis_spec: str | redis.Redis, options: dict | None = None, **kwargs
+        ):
             super().__init__(redis_spec, options, **kwargs)
 
         @property
@@ -26,7 +27,11 @@ try:
                 priority, value = item
                 if self._maxsize != 0 and self.size() >= self._maxsize:
                     raise QueueFullException
-                self._redis.zadd(self._queue_name, {_encode(value, self._encoding): priority}, nx=True)
+                self._redis.zadd(
+                    self._queue_name,
+                    {_encode(value, self._encoding): priority},
+                    nx=True,
+                )
 
         def get(self) -> str:
             """

@@ -14,13 +14,11 @@ try:
     from django_queue.clock import RedisQueueClock
     from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
 
-
     def _encode(item: str, encoding: str) -> bytes:
         try:
             return item.encode(encoding)
         except UnicodeEncodeError as e:
             raise QueueEncodingException from e
-
 
     def _decode(item: bytes, encoding: str) -> str:
         try:
@@ -28,14 +26,16 @@ try:
         except UnicodeDecodeError as e:
             raise QueueEncodingException from e
 
-
     def random_queue_name() -> str:
         return f"queue_{uuid.uuid4().hex}"
 
-
     class RedisQueue(BaseQueue):
         def __init__(self, redis_spec, options: dict | None = None, **kwargs):
-            self._redis = redis.from_url(redis_spec) if isinstance(redis_spec, str) else redis_spec
+            self._redis = (
+                redis.from_url(redis_spec)
+                if isinstance(redis_spec, str)
+                else redis_spec
+            )
             options = {} if options is None else options
             options |= kwargs
             self._queue_name = options.get("queue_name", random_queue_name())
@@ -61,7 +61,14 @@ try:
                 current_size = self.size()
                 if self._maxsize != 0 and current_size + len(items) > self._maxsize:
                     raise QueueFullException
-                self.push(self._queue_name, *(_encode(item, self._encoding) for item in items if item is not None))
+                self.push(
+                    self._queue_name,
+                    *(
+                        _encode(item, self._encoding)
+                        for item in items
+                        if item is not None
+                    ),
+                )
 
         def get(self) -> str:
             if self.size() == 0:
@@ -75,9 +82,13 @@ try:
             if self.size() == 0:
                 raise QueueEmptyException
             if self._stack:  # LIFO: Peek last (rightmost) item
-                return _decode(self._redis.lrange(self._queue_name, -1, -1)[0], self._encoding)
+                return _decode(
+                    self._redis.lrange(self._queue_name, -1, -1)[0], self._encoding
+                )
             else:  # FIFO: Peek first (leftmost) item
-                return _decode(self._redis.lrange(self._queue_name, 0, 0)[0], self._encoding)
+                return _decode(
+                    self._redis.lrange(self._queue_name, 0, 0)[0], self._encoding
+                )
 
         def size(self):
             return self._redis.llen(self._queue_name)
@@ -87,7 +98,9 @@ try:
 
         def enqueue(self, payload) -> uuid.UUID:
             validate_json_value(payload)
-            entry = QueueEntry.create(queue=self._queue_name, payload=payload, queued_at=self._clock.now())
+            entry = QueueEntry.create(
+                queue=self._queue_name, payload=payload, queued_at=self._clock.now()
+            )
             self._store_entry(entry)
             self.push(self._entry_pending_name, _encode(str(entry.id), self._encoding))
             return entry.id
@@ -105,7 +118,11 @@ try:
             return self.get_entry(uuid.UUID(_decode(raw_entry_id, self._encoding)))
 
         def mark_running(self, entry_id: uuid.UUID) -> QueueEntry:
-            return self._replace_entry(entry_id, status=QueueEntryStatus.RUNNING, dispatched_at=self._clock.now())
+            return self._replace_entry(
+                entry_id,
+                status=QueueEntryStatus.RUNNING,
+                dispatched_at=self._clock.now(),
+            )
 
         def mark_succeeded(self, entry_id: uuid.UUID, result) -> QueueEntry:
             validate_json_value(result)
@@ -138,16 +155,19 @@ try:
         def _store_entry(self, entry: QueueEntry) -> None:
             self._redis.set(self._entry_key(entry.id), json.dumps(entry.to_dict()))
 
-        def _replace_entry(self, entry_id: uuid.UUID, *, status: QueueEntryStatus, **changes) -> QueueEntry:
+        def _replace_entry(
+            self, entry_id: uuid.UUID, *, status: QueueEntryStatus, **changes
+        ) -> QueueEntry:
             if not isinstance(status, QueueEntryStatus):
                 raise TypeError("Queue entry status must be a QueueEntryStatus")
             previous_entry = self.get_entry(entry_id)
             if status not in previous_entry.status.next_state():
-                raise ValueError(f"Cannot transition queue entry from {previous_entry.status} to {status}")
+                raise ValueError(
+                    f"Cannot transition queue entry from {previous_entry.status} to {status}"
+                )
             entry = replace(previous_entry, status=status, **changes)
             self._store_entry(entry)
             return entry
-
 
     class RedisStack(RedisQueue):
         def __init__(self, redis_spec, options: dict | None = None, **kwargs):

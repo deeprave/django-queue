@@ -15,7 +15,9 @@ class MemoryQueue(BaseQueue):
         options |= kwargs
         self._maxsize = options.pop("maxsize", 0)
         self._stack = bool(options.pop("stack", False))
-        self._queue = (queue.LifoQueue if self._stack else queue.Queue)(maxsize=self._maxsize)
+        self._queue = (queue.LifoQueue if self._stack else queue.Queue)(
+            maxsize=self._maxsize
+        )
         self._queue_name = options.pop("queue_name", "default")
         self._clock: QueueClock = options.pop("clock", LocalQueueClock())
         self._entries: dict[UUID, QueueEntry] = {}
@@ -63,7 +65,9 @@ class MemoryQueue(BaseQueue):
 
     def enqueue(self, payload) -> UUID:
         validate_json_value(payload)
-        entry = QueueEntry.create(queue=self._queue_name, payload=payload, queued_at=self._clock.now())
+        entry = QueueEntry.create(
+            queue=self._queue_name, payload=payload, queued_at=self._clock.now()
+        )
         self._entries[entry.id] = entry
         self._pending_entries.put_nowait(entry.id)
         return entry.id
@@ -81,7 +85,9 @@ class MemoryQueue(BaseQueue):
             raise QueueEmptyException from exc
 
     def mark_running(self, entry_id: UUID) -> QueueEntry:
-        return self._replace_entry(entry_id, status=QueueEntryStatus.RUNNING, dispatched_at=self._clock.now())
+        return self._replace_entry(
+            entry_id, status=QueueEntryStatus.RUNNING, dispatched_at=self._clock.now()
+        )
 
     def mark_succeeded(self, entry_id: UUID, result) -> QueueEntry:
         validate_json_value(result)
@@ -108,12 +114,16 @@ class MemoryQueue(BaseQueue):
             finished_at=self._clock.now(),
         )
 
-    def _replace_entry(self, entry_id: UUID, *, status: QueueEntryStatus, **changes) -> QueueEntry:
+    def _replace_entry(
+        self, entry_id: UUID, *, status: QueueEntryStatus, **changes
+    ) -> QueueEntry:
         if not isinstance(status, QueueEntryStatus):
             raise TypeError("Queue entry status must be a QueueEntryStatus")
         previous_entry = self.get_entry(entry_id)
         if status not in previous_entry.status.next_state():
-            raise ValueError(f"Cannot transition queue entry from {previous_entry.status} to {status}")
+            raise ValueError(
+                f"Cannot transition queue entry from {previous_entry.status} to {status}"
+            )
         entry = replace(previous_entry, status=status, **changes)
         self._entries[entry_id] = entry
         return entry

@@ -19,7 +19,9 @@ class TestAsyncQueueWorker:
         async def handle(entry):
             raise AssertionError("An empty queue must not dispatch a handler")
 
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": handle}, idle_delay=0.001)
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
         task = asyncio.create_task(worker.run())
         await asyncio.sleep(0.01)
 
@@ -40,7 +42,9 @@ class TestAsyncQueueWorker:
         async def handle(entry):
             raise AssertionError("The queue is empty")
 
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": handle}, idle_delay=0.001)
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
         worker_task = asyncio.create_task(worker.run())
         await asyncio.wait_for(asyncio.to_thread(queue.dequeue_started.wait), timeout=1)
         progress = asyncio.Event()
@@ -65,7 +69,9 @@ class TestAsyncQueueWorker:
             handled.set()
             return {"processed": entry.payload["request_id"]}
 
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": handle}, idle_delay=0.001)
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
         task = asyncio.create_task(worker.run())
         await asyncio.wait_for(handled.wait(), timeout=1)
         task.cancel()
@@ -94,7 +100,9 @@ class TestAsyncQueueWorker:
             handled.set()
             return "done"
 
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": handle}, idle_delay=0.001)
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
         task = asyncio.create_task(worker.run())
         await asyncio.wait_for(handled.wait(), timeout=1)
         task.cancel()
@@ -103,13 +111,22 @@ class TestAsyncQueueWorker:
         except asyncio.CancelledError:
             pass
 
-        assert queue.get_entry(failed_id).error == {"type": "ValueError", "message": "bad request"}
+        assert queue.get_entry(failed_id).error == {
+            "type": "ValueError",
+            "message": "bad request",
+        }
         assert queue.get_entry(succeeded_id).result == "done"
 
-    def test_cancellation_allows_an_active_handler_to_finish_within_its_grace_period(self):
-        asyncio.run(self._cancellation_allows_an_active_handler_to_finish_within_its_grace_period())
+    def test_cancellation_allows_an_active_handler_to_finish_within_its_grace_period(
+        self,
+    ):
+        asyncio.run(
+            self._cancellation_allows_an_active_handler_to_finish_within_its_grace_period()
+        )
 
-    async def _cancellation_allows_an_active_handler_to_finish_within_its_grace_period(self):
+    async def _cancellation_allows_an_active_handler_to_finish_within_its_grace_period(
+        self,
+    ):
         queue = MemoryQueue(queue_name="requests")
         entry_id = queue.enqueue("work")
         started = asyncio.Event()
@@ -205,7 +222,9 @@ class TestAsyncQueueWorker:
         assert queue.get_entry(entry_id).status is QueueEntryStatus.CANCELLED
 
     def test_cancellation_records_a_handler_failure_within_its_grace_period(self):
-        asyncio.run(self._cancellation_records_a_handler_failure_within_its_grace_period())
+        asyncio.run(
+            self._cancellation_records_a_handler_failure_within_its_grace_period()
+        )
 
     async def _cancellation_records_a_handler_failure_within_its_grace_period(self):
         queue = MemoryQueue(queue_name="requests")
@@ -231,21 +250,34 @@ class TestAsyncQueueWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert queue.get_entry(entry_id).error == {"type": "ValueError", "message": "shutdown failure"}
+        assert queue.get_entry(entry_id).error == {
+            "type": "ValueError",
+            "message": "shutdown failure",
+        }
 
-    def test_cancellation_during_success_persistence_does_not_repeat_the_transition(self):
-        asyncio.run(self._cancellation_during_success_persistence_does_not_repeat_the_transition())
+    def test_cancellation_during_success_persistence_does_not_repeat_the_transition(
+        self,
+    ):
+        asyncio.run(
+            self._cancellation_during_success_persistence_does_not_repeat_the_transition()
+        )
 
-    async def _cancellation_during_success_persistence_does_not_repeat_the_transition(self):
+    async def _cancellation_during_success_persistence_does_not_repeat_the_transition(
+        self,
+    ):
         queue = BlockingSuccessQueue(queue_name="requests")
         entry_id = queue.enqueue("work")
 
         async def handle(entry):
             return "done"
 
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": handle}, idle_delay=0.001)
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
         task = asyncio.create_task(worker.run())
-        await asyncio.wait_for(asyncio.to_thread(queue.persistence_started.wait), timeout=1)
+        await asyncio.wait_for(
+            asyncio.to_thread(queue.persistence_started.wait), timeout=1
+        )
         task.cancel()
         queue.persistence_release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -264,7 +296,9 @@ class TestAsyncQueueWorker:
         async def handle(entry):
             return object()
 
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": handle}, idle_delay=0.001)
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
         task = asyncio.create_task(worker.run())
         await self._wait_for_status(queue, entry_id, QueueEntryStatus.FAILED)
         task.cancel()
@@ -283,9 +317,14 @@ class TestAsyncQueueWorker:
         queue = FailingTerminalQueue(queue_name="requests")
         failed_id = queue.enqueue("first")
         succeeded_id = queue.enqueue("second")
-        worker = AsyncQueueWorker({"requests": queue}, {"requests": lambda entry: self._complete(entry)})
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": lambda entry: self._complete(entry)}
+        )
         task = asyncio.create_task(worker.run())
-        await asyncio.wait_for(self._wait_for_status(queue, succeeded_id, QueueEntryStatus.SUCCEEDED), timeout=1)
+        await asyncio.wait_for(
+            self._wait_for_status(queue, succeeded_id, QueueEntryStatus.SUCCEEDED),
+            timeout=1,
+        )
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -297,7 +336,9 @@ class TestAsyncQueueWorker:
         assert "Unable to record terminal queue outcome" in caplog.text
 
     def test_stops_when_a_terminal_persistence_failure_cannot_be_recorded(self):
-        asyncio.run(self._stops_when_a_terminal_persistence_failure_cannot_be_recorded())
+        asyncio.run(
+            self._stops_when_a_terminal_persistence_failure_cannot_be_recorded()
+        )
 
     async def _stops_when_a_terminal_persistence_failure_cannot_be_recorded(self):
         queue = UnrecoverableTerminalQueue(queue_name="requests")
@@ -311,7 +352,9 @@ class TestAsyncQueueWorker:
 
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle})
 
-        with pytest.raises(QueuePersistenceError, match="Unable to persist terminal queue outcome"):
+        with pytest.raises(
+            QueuePersistenceError, match="Unable to persist terminal queue outcome"
+        ):
             await worker.run()
 
         assert handled_payloads == ["first"]

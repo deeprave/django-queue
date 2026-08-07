@@ -23,7 +23,9 @@ def test_add_multiple_items_to_queue(priority_queue):
 
 
 def test_add_to_full_queue_raises_exception(priority_queue):
-    priority_queue.add((1, "item1"), (2, "item2"), (3, "item3"), (4, "item4"), (5, "item5"))
+    priority_queue.add(
+        (1, "item1"), (2, "item2"), (3, "item3"), (4, "item4"), (5, "item5")
+    )
     with pytest.raises(QueueFullException):
         priority_queue.add((6, "item6"))
 
@@ -67,7 +69,9 @@ def test_queue_capacity(priority_queue):
 
 
 def test_priority_ordering(priority_queue):
-    priority_queue.add((100, "high_priority"), (-100, "low_priority"), (0, "medium_priority"))
+    priority_queue.add(
+        (100, "high_priority"), (-100, "low_priority"), (0, "medium_priority")
+    )
     assert priority_queue.get() == "high_priority"
     assert priority_queue.get() == "medium_priority"
     assert priority_queue.get() == "low_priority"

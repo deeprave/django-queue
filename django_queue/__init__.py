@@ -30,17 +30,25 @@ class QueueHandler(BaseConnectionHandler):
         if settings is None:
             settings = getattr(django_settings, self.settings_name, {})
         if not isinstance(settings, Mapping):
-            raise InvalidQueueBackendError(f"{self.settings_name} must be a mapping of queue aliases to configurations")
+            raise InvalidQueueBackendError(
+                f"{self.settings_name} must be a mapping of queue aliases to configurations"
+            )
 
         configured_queues = {}
         for alias, options in settings.items():
             if not isinstance(alias, str) or not alias:
-                raise InvalidQueueBackendError(f"Queue alias {alias!r} must be a non-empty string")
+                raise InvalidQueueBackendError(
+                    f"Queue alias {alias!r} must be a non-empty string"
+                )
             if not isinstance(options, Mapping):
-                raise InvalidQueueBackendError(f"Queue alias '{alias}' must use a mapping configuration")
+                raise InvalidQueueBackendError(
+                    f"Queue alias '{alias}' must use a mapping configuration"
+                )
             backend = options.get("BACKEND")
             if not isinstance(backend, str) or not backend:
-                raise InvalidQueueBackendError(f"Queue alias '{alias}' must define a non-empty BACKEND string")
+                raise InvalidQueueBackendError(
+                    f"Queue alias '{alias}' must define a non-empty BACKEND string"
+                )
             configured_queues[alias] = dict(options)
         return configured_queues
 
@@ -49,14 +57,19 @@ class QueueHandler(BaseConnectionHandler):
         params.setdefault("queue_name", alias)
         backend = params.pop("BACKEND")
         location = params.pop("LOCATION", "")
+        params.pop("HANDLER", None)
         try:
             backend_cls = import_string(backend)
         except ImportError as e:
-            raise InvalidQueueBackendError(f"Queue alias '{alias}' could not find backend '{backend}': {e}") from e
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' could not find backend '{backend}': {e}"
+            ) from e
         try:
             queue = backend_cls(location, params)
         except (AttributeError, TypeError, ValueError) as exc:
-            raise InvalidQueueBackendError(f"Queue alias '{alias}' has invalid backend options: {exc}") from exc
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' has invalid backend options: {exc}"
+            ) from exc
         queue_created.send(self, name=params.get("queue_name", alias), instance=queue)
         return queue
 

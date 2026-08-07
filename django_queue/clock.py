@@ -79,10 +79,14 @@ class RedisQueueClock:
         except Exception as exc:
             raise QueueClockError("Redis TIME is unavailable") from exc
 
-        redis_time = datetime.fromtimestamp(seconds, UTC).replace(microsecond=microseconds)
+        redis_time = datetime.fromtimestamp(seconds, UTC).replace(
+            microsecond=microseconds
+        )
         offset = redis_time - local_time
         if abs(offset.total_seconds()) > MAX_CLOCK_DRIFT_SECONDS:
-            raise QueueClockError("Redis and local UTC clocks exceed the maximum permitted drift")
+            raise QueueClockError(
+                "Redis and local UTC clocks exceed the maximum permitted drift"
+            )
         return offset, self._monotonic()
 
     def _set_calibration(self, calibration: tuple[timedelta, float]) -> None:
@@ -92,7 +96,10 @@ class RedisQueueClock:
         try:
             calibration = self._read_calibration()
         except QueueClockError as exc:
-            logger.warning("Unable to refresh Redis queue time; retaining the last known offset", exc_info=exc)
+            logger.warning(
+                "Unable to refresh Redis queue time; retaining the last known offset",
+                exc_info=exc,
+            )
             with self._lock:
                 self._refreshing = False
         else:
