@@ -132,6 +132,44 @@ best-effort attempt to record a safe `QueuePersistenceError` failure outcome.
 If it cannot confirm either terminal outcome, the worker raises
 `QueuePersistenceError` rather than accepting further entries.
 
+### Worker observability
+
+Each `AsyncQueueWorker` has a generated UUIDv7 identity and exposes a frozen,
+process-local `snapshot`. It reports the current run state, registered queue
+aliases, active queue name and entry ID, total dispatches, and confirmed persisted
+terminal outcomes:
+
+```python
+from django_queue import WorkerSnapshot
+
+snapshot: WorkerSnapshot = worker.snapshot
+health = {
+    "worker_id": str(snapshot.worker_id),
+    "running": snapshot.running,
+    "queue": snapshot.active_queue_name,
+    "succeeded": snapshot.succeeded_count,
+}
+```
+
+The worker emits INFO lifecycle records with `queue_worker_event` set to
+`started`, `dispatch_started`, `terminal_recorded`, or `stopped`. Their
+structured fields are prefixed with `queue_worker_` and include the same worker
+ID, running state, registered queue aliases, active queue name and entry ID,
+start time, dispatch count, and outcome counters as the snapshot. Counters advance
+only after the corresponding terminal entry state has been confirmed in the
+backend.
+
+`started_at` is local UTC process metadata; queue-entry timestamps remain owned
+by their queue clock. Read snapshots from the worker's event loop for a
+consistent observation; they do not coordinate cross-thread reads. A shutdown
+can interrupt the worker's acknowledgement of an in-flight terminal write, so
+the final snapshot records only terminal outcomes the worker observed before it
+stopped.
+
+Snapshots and log records are local to the worker process. Collect logs or add
+an exporter in application infrastructure to aggregate multiple `runqueues` or
+web processes; this package does not provide distributed liveness or metrics.
+
 ### ASGI in-process worker
 
 For local, single-process use and integration tests, an ASGI application can

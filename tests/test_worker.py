@@ -1,15 +1,152 @@
 import asyncio
+import logging
 import threading
 import time
+from dataclasses import FrozenInstanceError
+from datetime import UTC
 
 import pytest
 
+from django_queue import WorkerSnapshot
 from django_queue.backends import MemoryQueue
 from django_queue.entries import QueueEntryStatus
-from django_queue.worker import AsyncQueueWorker, QueuePersistenceError
+from django_queue.worker import (
+    AsyncQueueWorker,
+    QueuePersistenceError,
+)
 
 
 class TestAsyncQueueWorker:
+    def test_exposes_an_immutable_initial_snapshot(self):
+        worker = AsyncQueueWorker({}, {})
+
+        snapshot = worker.snapshot
+
+        assert isinstance(snapshot, WorkerSnapshot)
+        assert snapshot.worker_id.version == 7
+        assert snapshot.running is False
+        assert snapshot.started_at is None
+        assert snapshot.active_entry_id is None
+        assert snapshot.active_queue_name is None
+        assert snapshot.queue_names == ()
+        assert snapshot.dispatch_count == 0
+        assert snapshot.succeeded_count == 0
+        assert snapshot.failed_count == 0
+        assert snapshot.cancelled_count == 0
+        with pytest.raises(FrozenInstanceError):
+            snapshot.running = True
+        with pytest.raises(AttributeError):
+            worker.running = True
+
+    def test_snapshot_lists_registered_queue_aliases_in_registration_order(self):
+        first_queue = MemoryQueue(queue_name="first")
+        second_queue = MemoryQueue(queue_name="second")
+
+        async def handle(entry):
+            return entry.payload
+
+        worker = AsyncQueueWorker(
+            {"first": first_queue, "second": second_queue},
+            {"first": handle, "second": handle},
+        )
+
+        assert worker.snapshot.queue_names == ("first", "second")
+
+    def test_snapshot_tracks_a_confirmed_successful_outcome(self):
+        asyncio.run(self._snapshot_tracks_a_confirmed_successful_outcome())
+
+    async def _snapshot_tracks_a_confirmed_successful_outcome(self):
+        queue = MemoryQueue(queue_name="requests")
+        entry_id = queue.enqueue("work")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(entry):
+            started.set()
+            await release.wait()
+            return entry.payload
+
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        snapshot = worker.snapshot
+        assert snapshot.running is True
+        assert snapshot.started_at is not None
+        assert snapshot.started_at.tzinfo is UTC
+        assert snapshot.active_entry_id == entry_id
+        assert snapshot.active_queue_name == "requests"
+        assert snapshot.queue_names == ("requests",)
+        assert snapshot.dispatch_count == 1
+        assert snapshot.succeeded_count == 0
+
+        release.set()
+        await self._wait_for_snapshot_count(worker, "succeeded_count", 1)
+
+        snapshot = worker.snapshot
+        assert snapshot.active_entry_id is None
+        assert snapshot.active_queue_name is None
+        assert snapshot.succeeded_count == 1
+        assert snapshot.failed_count == 0
+        assert snapshot.cancelled_count == 0
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert worker.snapshot.running is False
+
+    def test_logs_snapshot_derived_lifecycle_records(self, caplog):
+        asyncio.run(self._logs_snapshot_derived_lifecycle_records(caplog))
+
+    async def _logs_snapshot_derived_lifecycle_records(self, caplog):
+        caplog.set_level(logging.INFO, logger="django_queue.worker")
+        queue = MemoryQueue(queue_name="requests")
+        entry_id = queue.enqueue("work")
+        handled = asyncio.Event()
+
+        async def handle(entry):
+            handled.set()
+            return entry.payload
+
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(handled.wait(), timeout=1)
+        await self._wait_for_snapshot_count(worker, "succeeded_count", 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        records = [
+            record for record in caplog.records if hasattr(record, "queue_worker_event")
+        ]
+        assert [record.queue_worker_event for record in records] == [
+            "started",
+            "dispatch_started",
+            "terminal_recorded",
+            "stopped",
+        ]
+        assert [record.getMessage() for record in records] == [
+            "Queue worker started",
+            "Queue worker began dispatching an entry",
+            "Queue worker recorded a terminal outcome",
+            "Queue worker stopped",
+        ]
+        assert all(
+            record.queue_worker_id == str(worker.snapshot.worker_id)
+            for record in records
+        )
+        assert records[1].queue_worker_active_entry_id == str(entry_id)
+        assert records[1].queue_worker_active_queue_name == "requests"
+        assert records[1].queue_worker_queue_names == ("requests",)
+        assert records[2].queue_worker_active_entry_id is None
+        assert records[2].queue_worker_active_queue_name is None
+        assert records[2].queue_worker_succeeded_count == 1
+        assert records[-1].queue_worker_running is False
+
     def test_idle_worker_runs_until_cancelled_without_dispatching(self):
         asyncio.run(self._idle_worker_runs_until_cancelled_without_dispatching())
 
@@ -116,6 +253,10 @@ class TestAsyncQueueWorker:
             "message": "bad request",
         }
         assert queue.get_entry(succeeded_id).result == "done"
+        assert worker.snapshot.dispatch_count == 2
+        assert worker.snapshot.succeeded_count == 1
+        assert worker.snapshot.failed_count == 1
+        assert worker.snapshot.cancelled_count == 0
 
     def test_cancellation_allows_an_active_handler_to_finish_within_its_grace_period(
         self,
@@ -180,6 +321,9 @@ class TestAsyncQueueWorker:
             await task
 
         assert queue.get_entry(entry_id).status is QueueEntryStatus.CANCELLED
+        assert worker.snapshot.running is False
+        assert worker.snapshot.active_entry_id is None
+        assert worker.snapshot.cancelled_count == 1
 
     def test_cancellation_completes_when_a_handler_ignores_cancellation(self):
         asyncio.run(self._cancellation_completes_when_a_handler_ignores_cancellation())
@@ -333,14 +477,20 @@ class TestAsyncQueueWorker:
             "type": "QueuePersistenceError",
             "message": "Unable to persist terminal queue outcome",
         }
+        assert worker.snapshot.dispatch_count == 2
+        assert worker.snapshot.succeeded_count == 1
+        assert worker.snapshot.failed_count == 1
         assert "Unable to record terminal queue outcome" in caplog.text
 
-    def test_stops_when_a_terminal_persistence_failure_cannot_be_recorded(self):
+    def test_stops_when_a_terminal_persistence_failure_cannot_be_recorded(self, caplog):
         asyncio.run(
-            self._stops_when_a_terminal_persistence_failure_cannot_be_recorded()
+            self._stops_when_a_terminal_persistence_failure_cannot_be_recorded(caplog)
         )
 
-    async def _stops_when_a_terminal_persistence_failure_cannot_be_recorded(self):
+    async def _stops_when_a_terminal_persistence_failure_cannot_be_recorded(
+        self, caplog
+    ):
+        caplog.set_level(logging.INFO, logger="django_queue.worker")
         queue = UnrecoverableTerminalQueue(queue_name="requests")
         queue.enqueue("first")
         queue.enqueue("second")
@@ -358,6 +508,17 @@ class TestAsyncQueueWorker:
             await worker.run()
 
         assert handled_payloads == ["first"]
+        assert worker.snapshot.running is False
+        assert worker.snapshot.active_entry_id is None
+        assert worker.snapshot.dispatch_count == 1
+        assert worker.snapshot.succeeded_count == 0
+        assert worker.snapshot.failed_count == 0
+        assert worker.snapshot.cancelled_count == 0
+        assert [
+            record.queue_worker_event
+            for record in caplog.records
+            if hasattr(record, "queue_worker_event")
+        ] == ["started", "dispatch_started", "stopped"]
 
     async def _complete(self, entry):
         return entry.payload
@@ -365,6 +526,11 @@ class TestAsyncQueueWorker:
     async def _wait_for_status(self, queue, entry_id, status):
         while queue.get_entry(entry_id).status is not status:
             await asyncio.sleep(0.001)
+
+    async def _wait_for_snapshot_count(self, worker, name, expected):
+        async with asyncio.timeout(1):
+            while getattr(worker.snapshot, name) != expected:
+                await asyncio.sleep(0.001)
 
 
 class SlowEmptyQueue(MemoryQueue):

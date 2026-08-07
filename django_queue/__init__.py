@@ -7,12 +7,13 @@ from django.utils.module_loading import import_string
 from .backends import InvalidQueueBackendError
 from .entries import QueueEntry, QueueEntryStatus
 from .signals import queue_created
-from .worker import AsyncQueueWorker
+from .worker import AsyncQueueWorker, WorkerSnapshot
 
 __all__ = (
     "AsyncQueueWorker",
     "QueueEntry",
     "QueueEntryStatus",
+    "WorkerSnapshot",
     "initialise_queues",
     "queue",
     "queues",
