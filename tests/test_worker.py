@@ -460,13 +460,16 @@ class TestAsyncQueueWorker:
     async def _logs_a_terminal_persistence_failure_and_continues(self, caplog):
         queue = FailingTerminalQueue(queue_name="requests")
         failed_id = queue.enqueue("first")
-        succeeded_id = queue.enqueue("second")
+        queue.enqueue("second")
         worker = AsyncQueueWorker(
             {"requests": queue}, {"requests": lambda entry: self._complete(entry)}
         )
         task = asyncio.create_task(worker.run())
+        # Wait on the worker's own counter, not the backend status: the status
+        # flips inside the persistence thread before the worker resumes to
+        # record the outcome, so cancelling on the status would race that.
         await asyncio.wait_for(
-            self._wait_for_status(queue, succeeded_id, QueueEntryStatus.SUCCEEDED),
+            self._wait_for_snapshot_count(worker, "succeeded_count", 1),
             timeout=1,
         )
         task.cancel()

@@ -9,6 +9,7 @@ import django_queue
 from django_queue.apps import DjangoQueueConfig
 from django_queue.asgi import with_queue_worker
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue
+from django_queue.entries import QueueEntryStatus
 from django_queue.worker import AsyncQueueWorker
 
 
@@ -314,12 +315,10 @@ class TestQueueWorkerASGI:
         DjangoQueueConfig("django_queue", django_queue).ready()
         queue = configured_queues["requests"]
         entry_id = queue.enqueue({"request_id": 42})
-        handled = asyncio.Event()
         shutdown = asyncio.Event()
         messages = []
 
         async def handle(entry):
-            handled.set()
             return {"processed": entry.payload["request_id"]}
 
         async def application(scope, receive, send):
@@ -342,7 +341,15 @@ class TestQueueWorkerASGI:
                 {"type": "lifespan"}, receive, send
             )
         )
-        await asyncio.wait_for(handled.wait(), timeout=1)
+        # Shut down only once the worker has recorded the entry's outcome: a
+        # shutdown may interrupt an in-flight terminal write, so triggering it
+        # mid-dispatch would race the very result this asserts.
+        await asyncio.wait_for(
+            _wait_until(
+                lambda: queue.get_entry(entry_id).status is QueueEntryStatus.SUCCEEDED
+            ),
+            timeout=1,
+        )
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
 
