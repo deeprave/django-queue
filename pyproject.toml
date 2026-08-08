@@ -45,8 +45,3 @@ build-backend = "flit_core.buildapi"
 
 [tool.ty.src]
 include = ["django_queue"]
-
-[tool.ty.rules]
-# redis-py's own stubs type command arguments narrowly (bytes | str | memoryview);
-# calls that are correct at runtime do not match its overloads.
-no-matching-overload = "ignore"

@@ -3,15 +3,124 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Lock, Thread
-from typing import Protocol
+from typing import Protocol, overload
 
 MAX_CLOCK_DRIFT_SECONDS = 180
+MICROSECONDS_PER_SECOND = 1_000_000
+_SECONDS_PER_DAY = 86_400
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ClockTime:
+    """An instant, as whole seconds and microseconds since the Unix epoch.
+
+    Durations are plain counts of seconds; this type is only ever a point in
+    time. It does not coerce to a number, so an instant cannot silently stand
+    in for a duration — reach for `to_timestamp()` where a number is wanted.
+    """
+
+    seconds: int
+    microseconds: int = 0
+
+    def __post_init__(self) -> None:
+        for name in ("seconds", "microseconds"):
+            # `type(...) is int` rather than isinstance: bool is an int, and a
+            # flag standing in for a component is exactly the confusion this
+            # type exists to catch.
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"Clock time {name} must be a whole number")
+        if not 0 <= self.microseconds < MICROSECONDS_PER_SECOND:
+            raise ValueError(
+                "Clock time microseconds must be at least 0 and less than "
+                f"{MICROSECONDS_PER_SECOND}"
+            )
+        if self.seconds < 0:
+            raise ValueError("Clock time cannot describe an instant before the epoch")
+
+    @classmethod
+    def from_timeval(cls, seconds: int, microseconds: int) -> ClockTime:
+        """Build from the second and microsecond pair a Redis TIME reply gives."""
+        return cls(seconds, microseconds)
+
+    @classmethod
+    def from_timestamp(cls, timestamp: float) -> ClockTime:
+        """Build from a count of seconds since the epoch."""
+        if type(timestamp) not in (int, float):
+            raise TypeError("Clock time timestamp must be a whole number of seconds")
+        if not math.isfinite(timestamp):
+            raise ValueError("Clock time requires a finite count of seconds")
+        if timestamp < 0:
+            raise ValueError("Clock time cannot describe an instant before the epoch")
+        seconds = int(timestamp)
+        microseconds = round((timestamp - seconds) * MICROSECONDS_PER_SECOND)
+        if microseconds == MICROSECONDS_PER_SECOND:
+            seconds, microseconds = seconds + 1, 0
+        return cls(seconds, microseconds)
+
+    @classmethod
+    def from_datetime(cls, moment: datetime) -> ClockTime:
+        """Build from a timezone-aware datetime; a naive one names no instant.
+
+        Read through a timedelta rather than a float timestamp, so the exact
+        microseconds a datetime already carries survive at any magnitude.
+        """
+        if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
+            raise ValueError("Clock time requires a timezone-aware datetime")
+        elapsed = moment - _EPOCH
+        seconds = elapsed.days * _SECONDS_PER_DAY + elapsed.seconds
+        if seconds < 0:
+            raise ValueError("Clock time cannot describe an instant before the epoch")
+        return cls(seconds, elapsed.microseconds)
+
+    def to_timestamp(self) -> float:
+        """Render as a count of seconds since the epoch, the durable form."""
+        return self.seconds + self.microseconds / MICROSECONDS_PER_SECOND
+
+    def to_datetime(self) -> datetime:
+        """Render as an aware UTC datetime, for calendar behaviour."""
+        return datetime.fromtimestamp(self.seconds, UTC).replace(
+            microsecond=self.microseconds
+        )
+
+    def _total_microseconds(self) -> int:
+        return self.seconds * MICROSECONDS_PER_SECOND + self.microseconds
+
+    def __add__(self, duration: float) -> ClockTime:
+        """Shift by a count of seconds, yielding another instant."""
+        if type(duration) not in (int, float):
+            return NotImplemented
+        if not math.isfinite(duration):
+            raise ValueError("Clock time requires a finite duration in seconds")
+        total = self._total_microseconds() + round(duration * MICROSECONDS_PER_SECOND)
+        if total < 0:
+            raise ValueError("Clock time cannot describe an instant before the epoch")
+        return type(self)(*divmod(total, MICROSECONDS_PER_SECOND))
+
+    __radd__ = __add__
+
+    @overload
+    def __sub__(self, other: ClockTime) -> float: ...
+
+    @overload
+    def __sub__(self, other: float) -> ClockTime: ...
+
+    def __sub__(self, other: ClockTime | float) -> float | ClockTime:
+        """Measure against another instant, or shift back by a count of seconds."""
+        if isinstance(other, ClockTime):
+            elapsed = self._total_microseconds() - other._total_microseconds()
+            return elapsed / MICROSECONDS_PER_SECOND
+        if type(other) not in (int, float):
+            return NotImplemented
+        return self + -other
 
 
 class QueueClock(Protocol):

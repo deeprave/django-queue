@@ -1,7 +1,11 @@
 try:
     import redis
 
-    from django_queue.backends.exceptions import QueueEmptyException, QueueFullException
+    from django_queue.backends.exceptions import (
+        QueueEmptyException,
+        QueueEncodingException,
+        QueueFullException,
+    )
 
     from .redisqueue import RedisQueue, _decode, _encode
 
@@ -36,13 +40,25 @@ try:
         def get(self):
             """
             Get and remove the next item from the priority queue.
-            :return: The item with the lowest priority.
+            :return: The item with the highest priority.
             Raises QueueEmptyException if the queue is empty.
             """
-            # Retrieve the lowest-priority item
+            # Retrieve the highest-priority item
             if item := self._redis.zrevrange(self._queue_name, 0, 0, withscores=False):
-                self._redis.zrem(self._queue_name, item[0])
-                return _decode(item[0], self._encoding)
+                # Without withscores the reply is a flat list of members, but
+                # redis-py's stubs do not overload on that, so narrow before
+                # handing the member back to Redis. The accepted types match
+                # `_decode` and zrem's own signature. With a bytes client, pass
+                # the member rather than a decoded copy: it must match what was
+                # stored, and self._encoding need not be the connection's.
+                # `peek` needs no guard, since `_decode` accepts object.
+                member = item[0]
+                if not isinstance(member, bytes | bytearray | memoryview | str):
+                    raise QueueEncodingException(
+                        f"Queue value must be text or bytes, not {type(member).__name__}"
+                    )
+                self._redis.zrem(self._queue_name, member)
+                return _decode(member, self._encoding)
             raise QueueEmptyException
 
         def poll(self, timeout: int = 0, retries: int = 10):

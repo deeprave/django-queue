@@ -8,8 +8,9 @@
   `ClockTime`, replacing the datetime and timedelta calibration arithmetic with
   instant and duration operations, leaving the refresh interval, drift tolerance
   and failure behaviour unchanged.
-- [ ] 1.3 Give `FixedClock` a fixed `ClockTime`, and add a shared constant for it
-  beside `FIXED_UUID7`.
+- [ ] 1.3 Change the `FixedClock` test helper to take and return a `ClockTime`
+  rather than a `datetime`, and add a shared constant for its default beside
+  `FIXED_UUID7`.
 
 ## 2. Entries hold and store instants
 

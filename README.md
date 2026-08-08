@@ -112,6 +112,49 @@ from django_queue import queue
 
 Multiple values can be added in the one `add()` call if required.
 
+### Instants
+
+`ClockTime` is how this package names a point in time: an immutable value
+holding whole seconds and microseconds since the Unix epoch. It exists so an
+instant and a duration cannot be confused — a duration stays a plain count of
+seconds.
+
+```python
+from datetime import UTC, datetime
+
+from django_queue import ClockTime
+
+moment = datetime(2026, 8, 3, 23, 33, 20, 250_000, tzinfo=UTC)
+
+instant = ClockTime.from_timestamp(1785800000.25)  # a count of seconds
+instant = ClockTime.from_timeval(1785800000, 250_000)  # a Redis TIME pair
+instant = ClockTime.from_datetime(moment)  # a timezone-aware datetime
+
+instant.to_timestamp()  # 1785800000.25, the durable form
+instant.to_datetime()  # an aware UTC datetime, for calendar work
+```
+
+Instants compare and order chronologically. Subtracting one from another gives
+the seconds between them, and adding or subtracting a count of seconds gives
+another instant, with the duration on either side:
+
+```python
+elapsed = finished - started  # a float count of seconds
+later = started + 600.0  # a ClockTime
+same = 600.0 + started  # the order of operands does not matter
+started + finished  # TypeError: adding two instants means nothing
+```
+
+Construction rejects anything that cannot describe an instant. A component of
+the wrong type raises `TypeError` — including a `bool`, which is an integer in
+Python but not a moment. A microsecond component outside `[0, 1000000)`, a naive
+datetime, a count of seconds that is NaN or infinite, or a time before the epoch
+raises `ValueError`. The epoch is a floor on arithmetic too: shifting back past
+it fails rather than yielding a negative time.
+
+An instant does not convert to a number implicitly. `float(instant)` raises, and
+so does `json.dumps` on one, so a caller that wants a number asks for it.
+
 ### Identified queue entries
 
 The entry-oriented API is appropriate when a producer needs to poll the

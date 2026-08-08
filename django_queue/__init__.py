@@ -5,12 +5,14 @@ from django.utils.connection import BaseConnectionHandler, ConnectionProxy
 from django.utils.module_loading import import_string
 
 from .backends import InvalidQueueBackendError
+from .clock import ClockTime
 from .entries import QueueEntry, QueueEntryStatus
 from .signals import queue_created
 from .worker import AsyncQueueWorker, WorkerSnapshot
 
 __all__ = (
     "AsyncQueueWorker",
+    "ClockTime",
     "QueueEntry",
     "QueueEntryStatus",
     "WorkerSnapshot",
