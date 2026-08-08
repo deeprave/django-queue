@@ -3,10 +3,11 @@
 ### Requirement: Resolve a per-entry execution budget
 The system SHALL resolve one execution budget for every dispatched entry, in
 precedence order: the worker's configured override, then the budget carried on
-the entry, then the queue's configured default, then 600 seconds. A resolved
-budget MUST be a positive number of seconds; the system SHALL reject a
-non-positive or non-numeric budget with an alias-specific configuration error
-before it is applied. There SHALL be no value meaning "unbounded".
+the entry, then the queue's configured default, then 600 seconds. A budget MUST
+be a positive number of seconds, wherever it was supplied from. The system SHALL
+reject a budget that is not a number with a type error and one that is not
+positive with a value error, at the point it is supplied rather than when it is
+applied. There SHALL be no value meaning "unbounded".
 
 #### Scenario: Fall back to the built-in default
 - **WHEN** a worker dispatches an entry whose queue, entry, and worker all
@@ -23,10 +24,15 @@ before it is applied. There SHALL be no value meaning "unbounded".
   carries its own budget
 - **THEN** the worker enforces its override
 
-#### Scenario: Reject an invalid budget
-- **WHEN** a queue, entry, or worker specifies a budget that is not a positive
-  number of seconds
-- **THEN** the system raises a configuration error identifying the queue alias
+#### Scenario: Reject a budget that is not a number
+- **WHEN** a queue setting, an `enqueue` call, or a worker override supplies a
+  budget that is not a number
+- **THEN** the system raises a type error naming the offending value
+
+#### Scenario: Reject a budget that is not positive
+- **WHEN** a queue setting, an `enqueue` call, or a worker override supplies a
+  numeric budget that is zero or negative
+- **THEN** the system raises a value error naming the offending value
 
 ### Requirement: Accept a budget when enqueueing an entry
 The entry-oriented enqueue operation SHALL accept an optional `timeout` keyword

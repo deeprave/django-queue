@@ -30,6 +30,7 @@ dev = [
     "pytest>=8.3.4",
     "ruff>=0.16.1",
     "testcontainers>=4.9.0",
+    "ty>=0.0.69",
 ]
 redis = [
     "redis>=5.2.1",
@@ -41,3 +42,11 @@ default-groups = ["dev", "redis"]
 [build-system]
 requires = ["flit-core"]
 build-backend = "flit_core.buildapi"
+
+[tool.ty.src]
+include = ["django_queue"]
+
+[tool.ty.rules]
+# redis-py's own stubs type command arguments narrowly (bytes | str | memoryview);
+# calls that are correct at runtime do not match its overloads.
+no-matching-overload = "ignore"

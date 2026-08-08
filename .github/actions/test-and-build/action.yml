@@ -18,6 +18,30 @@ runs:
       shell: bash
       run: uv sync ${{ inputs.sync-args }}
 
+    # Mirrors the pre-commit hooks, invoked directly so CI does not depend on
+    # pre-commit itself. Keep in step with .pre-commit-config.yaml.
+    - name: Lint
+      shell: bash
+      run: uv run ruff check
+
+    - name: Check formatting
+      shell: bash
+      run: uv run ruff format --check
+
+    - name: Check types
+      shell: bash
+      run: uv run ty check
+
+    # Run ephemerally, as their pre-commit hooks do: neither is imported by the
+    # package, so neither belongs in the project environment.
+    - name: Audit dependencies
+      shell: bash
+      run: uvx osvcheck
+
+    - name: Validate pyproject
+      shell: bash
+      run: uvx validate-pyproject pyproject.toml
+
     - name: Run the tests
       shell: bash
       run: uv run pytest
