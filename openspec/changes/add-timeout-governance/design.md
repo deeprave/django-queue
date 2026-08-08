@@ -31,7 +31,10 @@ below is new code.
 - Bounding anything other than handler execution — backend calls, the activation
   poll, and the ASGI lifespan keep their current behaviour.
 - Wall-clock deadlines or scheduling ("run before T"); this is an execution
-  budget measured from dispatch.
+  budget measured from dispatch on the event loop's monotonic clock, so it is
+  unaffected by wall-clock skew and by how instants are represented.
+- Changing how instants are represented or where a worker's recorded time comes
+  from; `adopt-clock-time` settles both, and this change adds only durations.
 - Cross-process enforcement. A worker enforces the budget for entries it is
   dispatching; recovering entries abandoned by a dead worker is
   `add-redis-lease-recovery`.
@@ -76,88 +79,6 @@ durable record, and is available to whichever worker dispatches it.
 the item-oriented API: it stores raw values, creates no entry, and is never
 dispatched to a handler, so it has nothing to which a budget could apply and
 gains no keyword.
-
-### One time representation everywhere: float epoch seconds
-
-Entries currently persist `queued_at`, `dispatched_at` and `finished_at` as ISO
-strings while holding `datetime` in memory, and a worker times itself on local
-UTC. Three representations and two conversion boundaries, none of which the
-authoritative source uses: Redis `TIME` returns epoch seconds and microseconds
-as integers.
-
-Every instant in the system becomes a float count of seconds since the Unix
-epoch — the representation Python itself uses for `time.time()` and
-`datetime.timestamp()`. Not just on the wire: the clock protocol returns it,
-entries hold it, the worker snapshot reports it, structured logs carry it, and
-it is what the public API hands back.
-
-The point is the consistency rather than the format. A single representation end
-to end means no conversion boundary to get wrong, and conversion boundaries are
-where this codebase has already produced defects. Epoch is absolute, so there is
-no zone to record or resolve. The value is numerically ordered, which an ISO
-string is not usefully: expiring claims and retention sweeps need to compare
-stored times against a bound, and Redis sorted-set scores are themselves IEEE
-doubles, so a stored float is a sort score with no conversion at all.
-
-Precision is adequate and was measured, not assumed. Adjacent doubles near the
-present are about 238 nanoseconds apart, comfortably finer than the microsecond
-resolution Redis reports, and `datetime.timestamp()` round-tripped 200,000
-random microsecond values without a single mismatch.
-
-Callers wanting a `datetime` or a formatted string convert at the edge —
-`datetime.fromtimestamp(entry.queued_at, UTC)` — which is deliberately their
-concern, not a second internal representation.
-
-Integer epoch microseconds were considered. They are exactly representable and
-avoid float equality, but they are not what Python's own time API returns, they
-would need a unit-bearing field name to be unambiguous, and they buy nothing
-here that the measured precision does not already provide.
-
-### The representation is a named type, not a bare float
-
-`float` says nothing about what a value means. An instant, a duration, and a
-drift tolerance are all floats, and once they are all bare floats nothing stops
-one being passed where another belongs.
-
-A `ClockTime` alias is declared in `django_queue.clock`, beside the protocol that
-produces it, and annotates every instant in the system: what a clock returns, the
-entry's lifecycle fields, the worker's run start time, and anything a snapshot or
-log record reports. Declaring it once gives the meaning a single home to be
-documented and changed in, and makes an instant recognisable at every use site
-without tracing back to where the value came from.
-
-It is deliberately not applied to durations. The execution budget, the
-cancellation grace period, and the clock's refresh interval and drift tolerance
-are all counts of seconds rather than points in time, and giving them the same
-name as an instant would defeat the distinction the type exists to draw.
-
-The alias is documentation for readers and type checkers rather than a runtime
-guard, which is what is wanted here: clarity and consistency, without wrapping
-every timestamp in an object the queue would then have to serialise.
-
-### A worker times itself on its queue's clock
-
-`add-worker-observability` sources the worker's run start time from local UTC
-while entries are timestamped by their queue's clock, on the grounds that a
-generic worker may serve several queues with independent clocks. That premise
-does not hold: the package builds every worker through `BaseQueue.create_worker`
-with a single alias, so a worker always has exactly one queue and one clock
-available to it.
-
-The variance has a cost. `RedisQueueClock` accepts up to 180 seconds of
-Redis-to-local skew before it refuses to calibrate, so any elapsed time spanning
-the two bases — how long after starting a worker picked up its first entry, for
-one — can be wrong by that much, and an entry's `dispatched_at` can precede the
-`started_at` of the very worker that dispatched it.
-
-A worker therefore takes a clock, defaulting to `LocalQueueClock`, and
-`create_worker` supplies its queue's. `BaseQueue` gains a public `clock`
-accessor over the private attribute both backends already hold, mirroring
-`queue_name`. A caller constructing a worker across several queues still chooses
-the basis explicitly rather than silently getting a third one.
-
-This governs recorded timestamps only. The execution budget is enforced on the
-event loop's monotonic clock and is unaffected by wall-clock skew.
 
 ### `asyncio.timeout` provides the extendable deadline
 
@@ -209,7 +130,3 @@ budget bounds silence, not total runtime.
   handler's own idempotency remains its responsibility.
 - [`mark_timed_out` is another backend-contract addition] → Unavoidable for a
   new terminal status, and there is no external backend to break.
-- [Reversing the observability change's local-UTC decision] → That change
-  archives first, so this one modifies its requirement rather than contradicting
-  it. Its design records the original reasoning and is left as the record of what
-  was decided then; the correction belongs here, where the premise is re-examined.

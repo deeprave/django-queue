@@ -6,12 +6,13 @@ immutable snapshot of its running state, run start time, active entry ID, active
 queue name, registered queue aliases, dispatch count, and terminal outcome
 counters for succeeded, failed, cancelled, and timed-out entries. A
 terminal-outcome counter MUST advance only after the worker has confirmed the
-corresponding entry state was persisted. The run start time SHALL come from the
-worker's clock, which defaults to local time and is supplied by the queue when
-the queue creates the worker, so that a worker's recorded time and the
-timestamps of the entries it dispatches share one basis. It SHALL be reported as
-a float count of seconds since the Unix epoch, in snapshots and in structured
-log records alike, matching the representation used for entry timestamps.
+corresponding entry state was persisted.
+
+The run start time SHALL come from the worker's clock, which defaults to local
+time and is supplied by the queue when the queue creates the worker, so that a
+worker's recorded time and the timestamps of the entries it dispatches share one
+basis. It SHALL be reported as a `ClockTime`, in snapshots and in structured log
+records alike, matching the representation used for entry timestamps.
 
 #### Scenario: Inspect a running worker
 - **WHEN** an operator reads a worker snapshot during dispatch
@@ -35,3 +36,8 @@ log records alike, matching the representation used for entry timestamps.
 - **THEN** the worker's run start time and the entry's `dispatched_at` come from
   that same queue clock, and the run start time never follows the dispatch time
   of an entry the worker dispatched
+
+#### Scenario: Count a timeout separately from a cancellation
+- **WHEN** a worker abandons a handler that exceeded its execution budget
+- **THEN** its next snapshot increments the timed-out counter and leaves the
+  cancelled counter unchanged

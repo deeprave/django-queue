@@ -1,0 +1,50 @@
+## Why
+
+`add-clock-time` defines an instant but nothing uses it. Entries still persist
+ISO strings and hold `datetime`, clocks still report `datetime`, and a worker
+still times itself on local UTC while its entries are timestamped by the queue's
+clock — so elapsed time spanning the two is unsound within the 180 seconds of
+skew the Redis clock tolerates.
+
+## What Changes
+
+- **BREAKING** Report and hold every instant as a `ClockTime`: the clock
+  protocol returns one, entry lifecycle fields hold one, and the worker snapshot
+  and its structured log records report one.
+- **BREAKING** Store instants as a float count of seconds since the epoch,
+  replacing the ISO strings entries persist today.
+- Build a Redis-aligned instant from the second and microsecond integers the
+  server reports, without an intermediate datetime or string, and express its
+  calibration offset as a count of seconds.
+- Expose a queue's clock, and give a worker a clock that defaults to local time
+  and is supplied by the queue that creates it, so a worker's run start time and
+  the entries it dispatches share one basis.
+
+## Capabilities
+
+### New Capabilities
+
+None.
+
+### Modified Capabilities
+
+- `queue-entries`: Hold lifecycle timestamps as instants stored as float epoch
+  seconds, report clock time as an instant derived without an intermediate form,
+  and expose a queue's clock.
+- `worker-observability`: Report the run start time as an instant taken from the
+  worker's clock, which its queue supplies.
+
+## Impact
+
+Changes the type of the clock protocol's return, of three entry lifecycle
+fields, and of the worker snapshot's run start time; changes the durable form of
+those fields from a string to a number; and adds a public `clock` accessor to
+the backend contract and an optional clock to the worker.
+
+This change assumes `add-clock-time` archives before it, since it adopts the
+type that change defines, and `add-worker-observability` before that, since it
+modifies the run start time that change specifies.
+
+This package has no released consumers and no stored entries to preserve. There
+is no legacy behaviour, no migration, no rolling-upgrade ordering, and no wire
+compatibility to maintain.
