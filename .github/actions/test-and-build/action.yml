@@ -32,13 +32,15 @@ runs:
       shell: bash
       run: uv run ty check
 
+    # Run ephemerally, as their pre-commit hooks do: neither is imported by the
+    # package, so neither belongs in the project environment.
     - name: Audit dependencies
       shell: bash
-      run: uv run osvcheck
+      run: uvx osvcheck
 
     - name: Validate pyproject
       shell: bash
-      run: uv run validate-pyproject pyproject.toml
+      run: uvx validate-pyproject pyproject.toml
 
     - name: Run the tests
       shell: bash
