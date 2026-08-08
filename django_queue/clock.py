@@ -55,7 +55,7 @@ class ClockTime:
     def from_timestamp(cls, timestamp: float) -> ClockTime:
         """Build from a count of seconds since the epoch."""
         if type(timestamp) not in (int, float):
-            raise TypeError("Clock time timestamp must be a whole number of seconds")
+            raise TypeError("Clock time timestamp must be an int or float")
         if not math.isfinite(timestamp):
             raise ValueError("Clock time requires a finite count of seconds")
         if timestamp < 0:

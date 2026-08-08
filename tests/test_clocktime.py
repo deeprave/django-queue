@@ -57,8 +57,12 @@ class TestConstruction:
             ClockTime(seconds, microseconds)
 
     def test_rejects_a_boolean_timestamp(self):
-        with pytest.raises(TypeError, match="whole number"):
+        with pytest.raises(TypeError, match="int or float"):
             ClockTime.from_timestamp(True)
+
+    def test_accepts_a_fractional_count_of_seconds(self):
+        """The rejection above is about type, not about sub-second precision."""
+        assert ClockTime.from_timestamp(TIMESTAMP).microseconds == MICROSECONDS
 
     @pytest.mark.parametrize("timestamp", [float("nan"), float("inf"), float("-inf")])
     def test_rejects_a_timestamp_that_is_not_finite(self, timestamp):
