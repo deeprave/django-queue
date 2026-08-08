@@ -2,7 +2,6 @@ try:
     import json
     import uuid
     from dataclasses import replace
-    from typing import Any
 
     import redis
 
@@ -22,13 +21,21 @@ try:
         except UnicodeEncodeError as e:
             raise QueueEncodingException from e
 
-    # redis-py's return types depend on the client's decode_responses setting,
-    # which it cannot express statically, so this boundary accepts what it yields.
-    def _decode(item: Any, encoding: str) -> str:
-        try:
-            return item.decode(encoding)
-        except UnicodeDecodeError as e:
-            raise QueueEncodingException from e
+    # Accepts `object` rather than a narrower type because redis-py's return
+    # types depend on its client's decode_responses setting, which it cannot
+    # express statically. Unlike `Any` this asserts nothing: every branch below
+    # is narrowed and checked.
+    def _decode(item: object, encoding: str) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, bytes | bytearray | memoryview):
+            try:
+                return bytes(item).decode(encoding)
+            except UnicodeDecodeError as e:
+                raise QueueEncodingException from e
+        raise QueueEncodingException(
+            f"Queue value must be text or bytes, not {type(item).__name__}"
+        )
 
     def random_queue_name() -> str:
         return f"queue_{uuid.uuid4().hex}"
@@ -78,9 +85,15 @@ try:
                 )
 
         def get(self):
+            # The size check and the pop are not atomic, so a competing consumer
+            # can empty the queue in between; treat that as empty rather than
+            # letting None reach the decoder.
             if self.size() == 0:
                 raise QueueEmptyException
-            return _decode(self.pop(self._queue_name), self._encoding)
+            item = self.pop(self._queue_name)
+            if item is None:
+                raise QueueEmptyException
+            return _decode(item, self._encoding)
 
         def poll(self):
             # A zero timeout blocks indefinitely, so this should not return
