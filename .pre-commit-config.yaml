@@ -22,6 +22,7 @@ repos:
         args:
           - --fix
           - --line-length=120
+      - id: ruff-format
 
   - repo: https://github.com/deeprave/osvcheck
     rev: v1.2.2

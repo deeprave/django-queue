@@ -18,14 +18,27 @@ runs:
       shell: bash
       run: uv sync ${{ inputs.sync-args }}
 
-    # Runs every hook from .pre-commit-config.yaml, so the local and CI gates
-    # cannot drift. Skips the branch guard, which only means anything locally,
-    # and pytest, which has its own step below.
-    - name: Run pre-commit checks
+    # Mirrors the pre-commit hooks, invoked directly so CI does not depend on
+    # pre-commit itself. Keep in step with .pre-commit-config.yaml.
+    - name: Lint
       shell: bash
-      env:
-        SKIP: no-commit-to-branch,pytest
-      run: uv run pre-commit run --all-files --show-diff-on-failure
+      run: uv run ruff check
+
+    - name: Check formatting
+      shell: bash
+      run: uv run ruff format --check
+
+    - name: Check types
+      shell: bash
+      run: uv run ty check
+
+    - name: Audit dependencies
+      shell: bash
+      run: uv run osvcheck
+
+    - name: Validate pyproject
+      shell: bash
+      run: uv run validate-pyproject pyproject.toml
 
     - name: Run the tests
       shell: bash
