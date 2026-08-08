@@ -30,10 +30,11 @@ in doing so corrects where the worker's own time comes from.
 
 ### Instants are stored as a float count of seconds
 
-`ClockTime` does not serialise itself, and Python performs no implicit
-conversion — `json.dumps` ignores `__float__` and raises — so the durable form
-is chosen rather than inherited, and the entry's conversion is explicit in both
-directions.
+`ClockTime` does not serialise itself, and it implements no numeric coercion, so
+`json.dumps` raises on one rather than emitting a number. The durable form is
+therefore chosen rather than inherited, and the entry's conversion is explicit
+in both directions: `to_timestamp` on the way out, `from_timestamp` on the way
+back.
 
 That form is a float count of seconds since the epoch. Epoch is absolute, so
 there is no zone to record or resolve, and the value is numerically ordered
@@ -43,10 +44,18 @@ expiring claims and retention sweeps both need.
 
 Storing the second and microsecond pair instead would be exact by construction,
 but it is a JSON array, which cannot be a score or a range bound without being
-taken apart again. Nothing is lost by the float: adjacent doubles near the
-present are about 238 nanoseconds apart, comfortably finer than the microsecond
-resolution Redis reports, and the round trip is exact across the microsecond
-range.
+taken apart again. Nothing is lost by the float for any instant a queue can
+observe: adjacent doubles near the present are about 238 nanoseconds apart,
+comfortably finer than the microsecond resolution Redis reports, and the round
+trip is exact across all one million microsecond values at the current epoch.
+
+The margin is finite. A double's spacing crosses one microsecond between 2^32
+and 2^33 seconds — measured, the round trip is exact at 2^32 (year 2106) and
+loses microseconds for roughly half of sampled values at 2^33 (year 2242). That
+is the bound on the durable form, and `add-clock-time` states it on the
+requirement rather than leaving an unqualified guarantee. It does not change the
+choice made here: two centuries of headroom is ample, and the alternatives were
+rejected for reasons that have nothing to do with resolution.
 
 This does introduce a conversion at the wire boundary. It is accepted because it
 is one typed conversion in one place, tested, replacing the

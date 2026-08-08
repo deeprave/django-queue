@@ -150,6 +150,36 @@ def test_priority_handling(redis_priority_queue):
     assert redis_priority_queue.get() == "item0"  # Prev entered with priority 5
 
 
+def test_get_removes_the_stored_member(redis_priority_queue):
+    """`get()` returns the highest-priority item and removes exactly that member."""
+    redis_priority_queue.add((10, "item1"), (20, "item2"))
+
+    assert redis_priority_queue.get() == "item2"
+    assert redis_priority_queue.size() == 1
+    assert redis_priority_queue.get() == "item1"
+    assert redis_priority_queue.size() == 0
+
+
+def test_get_removes_the_stored_member_from_a_decoding_client(redis_container):
+    """`get()` removes the member even when the client yields str, not bytes."""
+    import redis
+
+    client = redis.Redis(
+        host=redis_container.get_container_host_ip(),
+        port=redis_container.get_exposed_port(6379),
+        decode_responses=True,
+    )
+    queue = RedisPriorityQueue(client, queue_name="test_priority_decoding_client")
+    queue.clear()
+
+    queue.add((10, "item1"), (20, "item2"))
+
+    assert queue.get() == "item2"
+    assert queue.size() == 1
+    assert queue.get() == "item1"
+    assert queue.size() == 0
+
+
 def test_negative_priority(redis_priority_queue):
     """
     Test handling of negative priority values.
