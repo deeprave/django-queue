@@ -11,8 +11,9 @@ corresponding entry state was persisted.
 The run start time SHALL come from the worker's clock, which defaults to local
 time and is supplied by the queue when the queue creates the worker, so that a
 worker's recorded time and the timestamps of the entries it dispatches share one
-basis. It SHALL be reported as a `ClockTime`, in snapshots and in structured log
-records alike, matching the representation used for entry timestamps.
+basis. A snapshot SHALL hold it as a `ClockTime`. A structured log record SHALL
+carry its count of seconds, since a record must be serialisable, matching the
+form entry timestamps are stored in.
 
 #### Scenario: Inspect a running worker
 - **WHEN** an operator reads a worker snapshot during dispatch

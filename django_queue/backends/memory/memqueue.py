@@ -2,7 +2,7 @@ import queue
 from dataclasses import replace
 from uuid import UUID
 
-from django_queue.clock import LocalQueueClock, QueueClock
+from django_queue.clock import DEFAULT_CLOCK, QueueClock
 from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
 from django_queue.signals import send_entry_enqueued
 
@@ -20,7 +20,7 @@ class MemoryQueue(BaseQueue):
             maxsize=self._maxsize
         )
         self._queue_name = options.pop("queue_name", "default")
-        self._clock: QueueClock = options.pop("clock", LocalQueueClock())
+        self._clock: QueueClock = options.pop("clock", DEFAULT_CLOCK)
         self._entries: dict[UUID, QueueEntry] = {}
         pending_entry_queue = queue.LifoQueue if self._stack else queue.Queue
         self._pending_entries: queue.Queue[UUID] = pending_entry_queue()
@@ -67,7 +67,7 @@ class MemoryQueue(BaseQueue):
     def enqueue(self, payload) -> UUID:
         validate_json_value(payload)
         entry = self.entry_class.create(
-            queue=self._queue_name, payload=payload, queued_at=self._clock.now()
+            queue=self._queue_name, payload=payload, queued_at=self.clock.now()
         )
         self._entries[entry.id] = entry
         self._pending_entries.put_nowait(entry.id)
@@ -91,7 +91,7 @@ class MemoryQueue(BaseQueue):
 
     def mark_running(self, entry_id: UUID) -> QueueEntry:
         return self._replace_entry(
-            entry_id, status=QueueEntryStatus.RUNNING, dispatched_at=self._clock.now()
+            entry_id, status=QueueEntryStatus.RUNNING, dispatched_at=self.clock.now()
         )
 
     def mark_succeeded(self, entry_id: UUID, result) -> QueueEntry:
@@ -101,7 +101,7 @@ class MemoryQueue(BaseQueue):
             status=QueueEntryStatus.SUCCEEDED,
             result=result,
             error=None,
-            finished_at=self._clock.now(),
+            finished_at=self.clock.now(),
         )
 
     def mark_failed(self, entry_id: UUID, error: Exception) -> QueueEntry:
@@ -109,14 +109,14 @@ class MemoryQueue(BaseQueue):
             entry_id,
             status=QueueEntryStatus.FAILED,
             error={"type": type(error).__name__, "message": str(error)},
-            finished_at=self._clock.now(),
+            finished_at=self.clock.now(),
         )
 
     def mark_cancelled(self, entry_id: UUID) -> QueueEntry:
         return self._replace_entry(
             entry_id,
             status=QueueEntryStatus.CANCELLED,
-            finished_at=self._clock.now(),
+            finished_at=self.clock.now(),
         )
 
     def _replace_entry(

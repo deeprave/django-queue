@@ -1,6 +1,6 @@
 import queue
 
-from django_queue.clock import LocalQueueClock
+from django_queue.clock import DEFAULT_CLOCK
 
 from ..base import BaseQueue
 from ..exceptions import QueueEmptyException, QueueFullException
@@ -14,7 +14,7 @@ class MemoryPriorityQueue(BaseQueue):
         self._maxsize = options.pop("maxsize", 0)
         self._queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=self._maxsize)
         self._queue_name = options.pop("queue_name", "default")
-        self._clock = options.pop("clock", LocalQueueClock())
+        self._clock = options.pop("clock", DEFAULT_CLOCK)
         self._entries = {}
         self._pending_entries = queue.Queue()
 

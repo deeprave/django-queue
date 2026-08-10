@@ -7,12 +7,12 @@ import logging
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
 from django_queue.backends.base import BaseQueue
 from django_queue.backends.exceptions import QueueEmptyException
+from django_queue.clock import DEFAULT_CLOCK, ClockTime, QueueClock, elapsed_time
 from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,8 @@ class WorkerSnapshot:
 
     worker_id: UUID
     running: bool
-    started_at: datetime | None
+    started_at: ClockTime | None
+    running_for: float | None
     active_entry_id: UUID | None
     active_queue_name: str | None
     queue_names: tuple[str, ...]
@@ -67,13 +68,16 @@ class AsyncQueueWorker:
         *,
         idle_delay: float = 0.1,
         cancellation_grace_period: float = 30,
+        clock: QueueClock | None = None,
     ) -> None:
+        self._clock: QueueClock = clock or DEFAULT_CLOCK
         self._queues = {name: queues[name] for name in handlers}
         self._handlers = dict(handlers)
         self._idle_delay = idle_delay
         self._cancellation_grace_period = cancellation_grace_period
         self._worker_id = uuid.uuid7()
-        self._started_at: datetime | None = None
+        self._started_at: ClockTime | None = None
+        self._stopped_at: ClockTime | None = None
         self._active_entry_id: UUID | None = None
         self._active_queue_name: str | None = None
         self._dispatch_count = 0
@@ -88,12 +92,22 @@ class AsyncQueueWorker:
         return self._running
 
     @property
+    def clock(self) -> QueueClock:
+        """Return the clock this worker times itself on.
+
+        Supplied by the queue that created it, so a worker's recorded time and
+        the entries it dispatches share one basis.
+        """
+        return self._clock
+
+    @property
     def snapshot(self) -> WorkerSnapshot:
         """Return an immutable snapshot of this worker's local state."""
         return WorkerSnapshot(
             worker_id=self._worker_id,
             running=self.running,
             started_at=self._started_at,
+            running_for=self._running_for(),
             active_entry_id=self._active_entry_id,
             active_queue_name=self._active_queue_name,
             queue_names=tuple(self._queues),
@@ -103,10 +117,26 @@ class AsyncQueueWorker:
             cancelled_count=self._cancelled_count,
         )
 
+    def _running_for(self) -> float | None:
+        """Seconds this worker has been running, or ran before it stopped.
+
+        Measured on the worker's own clock, so a reader needs no second source
+        of time; frozen at the stop instant, since a stopped worker whose
+        runtime keeps growing is simply wrong. Absent if the clock has moved
+        back behind the start, which a recalibrated Redis clock may do.
+        """
+        if self._started_at is None:
+            return None
+        return elapsed_time(self._started_at, self._stopped_at or self._clock.now())
+
     async def run(self) -> None:
         """Dispatch registered queue entries until the caller cancels this task."""
         self._running = True
-        self._started_at = datetime.now(UTC)
+        # Start before clearing the stop: a reader caught between these sees a
+        # fresh start with a stale stop -- at worst a short duration -- rather
+        # than the previous run's start with no stop at all.
+        self._started_at = self._clock.now()
+        self._stopped_at = None
         self._log_state_change("started")
         try:
             while True:
@@ -126,6 +156,7 @@ class AsyncQueueWorker:
                     await asyncio.sleep(self._idle_delay)
         finally:
             self._running = False
+            self._stopped_at = self._clock.now()
             self._active_entry_id = None
             self._active_queue_name = None
             self._log_state_change("stopped")
@@ -253,9 +284,9 @@ class AsyncQueueWorker:
                 return
         self._active_entry_id = None
         self._active_queue_name = None
-        self._log_state_change("terminal_recorded")
+        self._log_state_change("terminal_recorded", entry)
 
-    def _log_state_change(self, event: str) -> None:
+    def _log_state_change(self, event: str, entry: QueueEntry | None = None) -> None:
         snapshot = self.snapshot
         message = WORKER_EVENT_MESSAGES.get(event, event)
         logger.info(
@@ -264,8 +295,16 @@ class AsyncQueueWorker:
                 "queue_worker_event": event,
                 "queue_worker_id": str(snapshot.worker_id),
                 "queue_worker_running": snapshot.running,
-                "queue_worker_started_at": snapshot.started_at.isoformat()
+                "queue_worker_started_at": snapshot.started_at.to_timestamp()
                 if snapshot.started_at is not None
+                else None,
+                "queue_worker_running_for": snapshot.running_for,
+                # Present only on a terminal record, where an entry is in hand.
+                "queue_worker_entry_queued_for": entry.queued_for
+                if entry is not None
+                else None,
+                "queue_worker_entry_ran_for": entry.ran_for
+                if entry is not None
                 else None,
                 "queue_worker_active_entry_id": str(snapshot.active_entry_id)
                 if snapshot.active_entry_id is not None

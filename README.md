@@ -72,11 +72,12 @@ QUEUES = {
 `WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import
 path. They default to `AsyncQueueWorker` and `QueueEntry`, respectively.
 Workers must subclass `AsyncQueueWorker` and use its normal queue-lookup and
-handler-mapping constructor. Entry classes must subclass `QueueEntry` and
-declare any additional fields as a frozen dataclass; those fields must be
-JSON-serialisable, and are persisted and restored without further work. Django
-validates and
-imports entry types during queue configuration and worker types during
+handler-mapping constructor. A queue constructs its worker with its own clock,
+so a subclass that overrides `__init__` must accept a `clock` keyword and pass
+it to `super().__init__`, or accept `**kwargs` and forward them. Entry classes
+must subclass `QueueEntry` and declare any additional fields as a frozen
+dataclass; those fields must be JSON-serialisable, and are persisted and
+restored without further work. Django validates and imports entry types during queue configuration and worker types during
 `runqueues` startup. A worker is constructed only when its queue first becomes
 active; an entry only when it is enqueued, restored, or updated.
 
@@ -160,7 +161,32 @@ so does `json.dumps` on one, so a caller that wants a number asks for it.
 The entry-oriented API is appropriate when a producer needs to poll the
 outcome of work processed later. Payloads and handler results must be
 JSON-serialisable. The queue generates the UUIDv7 identifier and owns all
-lifecycle timestamps.
+lifecycle timestamps, taking them from its own clock — Redis-aligned for a Redis
+queue, local time otherwise. That clock is available as `queue.clock`, so
+anything recording times alongside a queue's entries can share its basis.
+
+`queued_at`, `dispatched_at` and `finished_at` are `ClockTime` values, stored as
+a float count of seconds since the epoch. Nothing parses a string or resolves a
+timezone to read one, and a stored instant is directly usable as a Redis
+sorted-set score.
+
+Because those instants share one basis, an entry can report elapsed time
+directly:
+
+```python
+entry.queued_for  # seconds it waited before a worker picked it up
+entry.ran_for  # seconds its handler took
+```
+
+Each is a count of seconds carrying its microseconds, not a whole number of
+them — a handler that ran for 137 microseconds reports `0.000137`, which matters
+because most work finishes in well under a second.
+
+Both are derived from the instants rather than stored, so they cannot disagree
+with them, and both are `None` until the instants describing them exist — an
+entry still waiting has not waited zero seconds. They are also `None` if the
+instants contradict, which a clock recalibrating backwards can cause: a negative
+elapsed time is meaningless rather than merely small.
 
 ```python
 from django_queue import queue
@@ -237,9 +263,24 @@ start time, dispatch count, and outcome counters as the snapshot. Counters advan
 only after the corresponding terminal entry state has been confirmed in the
 backend.
 
-`started_at` is local UTC process metadata; queue-entry timestamps remain owned
-by their queue clock. Read snapshots from the worker's event loop for a
-consistent observation; they do not coordinate cross-thread reads. A shutdown
+`started_at` comes from the worker's clock, which its queue supplies when it
+creates the worker, so a worker's recorded time and the entries it dispatches
+share one basis and elapsed time across them is meaningful. A worker built
+directly defaults to local time and accepts a `clock` argument. Like every
+instant the package reports it is a `ClockTime`, rendered in structured log
+records as a count of seconds rather than an ISO string.
+
+`running_for` reports how long the worker has been running, measured on that
+same clock, and stops advancing once the worker leaves its dispatch loop so it
+reports how long it ran. Structured records carry it, and a terminal-outcome
+record also carries the entry's `queued_for` and `ran_for`.
+
+Reading a running worker's snapshot samples the queue clock to measure
+`running_for`, so on a Redis-backed queue a snapshot read takes the clock's lock
+and may trigger its periodic recalibration. A stopped worker reads its recorded
+stop instant instead and touches no clock. Read snapshots from the worker's
+event loop for a consistent observation; they do not coordinate cross-thread
+reads. A shutdown
 can interrupt the worker's acknowledgement of an in-flight terminal write, so
 the final snapshot records only terminal outcomes the worker observed before it
 stopped.

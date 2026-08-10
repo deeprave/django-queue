@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from django_queue.clock import MICROSECONDS_PER_SECOND, ClockTime
+from django_queue.clock import MICROSECONDS_PER_SECOND, ClockTime, elapsed_time
 
 # 2026-08-03 23:33:20.250000 UTC, expressed three ways.
 SECONDS = 1_785_800_000
@@ -197,3 +197,41 @@ class TestArithmetic:
 
         with pytest.raises(TypeError):
             instant + instant
+
+
+class TestElapsedTime:
+    def test_measures_between_two_instants(self):
+        started = ClockTime.from_timeval(SECONDS, 250_000)
+        finished = ClockTime.from_timeval(SECONDS + 2, 750_000)
+
+        assert elapsed_time(started, finished) == pytest.approx(2.5)
+
+    def test_keeps_a_sub_second_span(self):
+        started = ClockTime.from_timeval(SECONDS, 0)
+
+        assert elapsed_time(started, ClockTime(SECONDS, 137)) == pytest.approx(0.000137)
+
+    def test_measures_nothing_between_one_instant_and_itself(self):
+        instant = ClockTime.from_timeval(SECONDS, 0)
+
+        assert elapsed_time(instant, instant) == 0.0
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [(None, None), (ClockTime(SECONDS), None), (None, ClockTime(SECONDS))],
+    )
+    def test_reports_nothing_without_both_instants(self, start, end):
+        assert elapsed_time(start, end) is None
+
+    def test_reports_nothing_when_the_instants_contradict(self):
+        """A clock that moved backwards describes no elapsed time."""
+        assert elapsed_time(ClockTime(SECONDS, 500), ClockTime(SECONDS, 100)) is None
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [(1.0, 2.0), (1, 5), (ClockTime(SECONDS), 2.0), (2.0, ClockTime(SECONDS))],
+    )
+    def test_rejects_anything_that_is_not_an_instant(self, start, end):
+        """Durations must not stand in for the instants they are measured from."""
+        with pytest.raises(TypeError, match="ClockTime"):
+            elapsed_time(start, end)

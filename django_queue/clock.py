@@ -7,7 +7,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from threading import Lock, Thread
 from typing import Protocol, overload
 
@@ -123,15 +123,40 @@ class ClockTime:
         return self + -other
 
 
+def elapsed_time(start: ClockTime | None, end: ClockTime | None) -> float | None:
+    """Time from *start* to *end* in seconds, or None where that has no answer.
+
+    A count of seconds carrying its microseconds, not a whole number of them:
+    `ClockTime` subtraction works in integer microseconds and divides once, so a
+    sub-second span reports as such -- 137 microseconds is 0.000137, not 0.
+
+    Absent when either instant is missing, and absent when they contradict: a
+    clock that moved backwards -- as a recalibrated Redis clock may -- can leave
+    *end* before *start*, and a negative elapsed time is not a smaller duration
+    but a meaningless one.
+    """
+    for name, value in (("start", start), ("end", end)):
+        if value is not None and not isinstance(value, ClockTime):
+            raise TypeError(f"Elapsed time {name} must be a ClockTime or None")
+    if start is None or end is None:
+        return None
+    seconds = end - start
+    return None if seconds < 0 else seconds
+
+
 class QueueClock(Protocol):
-    def now(self) -> datetime: ...
+    def now(self) -> ClockTime: ...
 
 
 class LocalQueueClock:
     """UTC wall-clock fallback used by in-memory queues."""
 
-    def now(self) -> datetime:
-        return datetime.now(UTC)
+    def now(self) -> ClockTime:
+        return ClockTime.from_timestamp(time.time())
+
+
+# Stateless, so one instance serves every fallback in the package.
+DEFAULT_CLOCK = LocalQueueClock()
 
 
 class RedisTimeClient(Protocol):
@@ -151,18 +176,29 @@ class RedisQueueClock:
         *,
         refresh_interval: float = 600,
         monotonic: Callable[[], float] = time.monotonic,
-        utcnow: Callable[[], datetime] = lambda: datetime.now(UTC),
+        utcnow: Callable[[], ClockTime] = lambda: ClockTime.from_timestamp(time.time()),
     ) -> None:
         self._redis = redis
         self._refresh_interval = refresh_interval
         self._monotonic = monotonic
         self._utcnow = utcnow
         self._last_refresh_attempt: float | None = None
-        self._offset: timedelta | None = None
+        self._offset: float | None = None
         self._refreshing = False
         self._lock = Lock()
 
-    def now(self) -> datetime:
+    @property
+    def refreshing(self) -> bool:
+        """Return whether a background calibration refresh is in flight.
+
+        Advisory: read without the calibration lock, so it answers for the
+        moment it was asked and may be stale by the time a caller acts on it.
+        Useful for observing that a refresh is under way, not for coordinating
+        with one.
+        """
+        return self._refreshing
+
+    def now(self) -> ClockTime:
         with self._lock:
             monotonic_now = self._monotonic()
             if self._offset is None:
@@ -181,27 +217,41 @@ class RedisQueueClock:
             or monotonic_now - self._last_refresh_attempt >= self._refresh_interval
         )
 
-    def _read_calibration(self) -> tuple[timedelta, float]:
+    def _read_calibration(self) -> tuple[float, float]:
         local_time = self._utcnow()
         try:
             seconds, microseconds = self._redis.time()
         except Exception as exc:
             raise QueueClockError("Redis TIME is unavailable") from exc
 
-        redis_time = datetime.fromtimestamp(seconds, UTC).replace(
-            microsecond=microseconds
-        )
-        offset = redis_time - local_time
-        if abs(offset.total_seconds()) > MAX_CLOCK_DRIFT_SECONDS:
+        try:
+            offset = ClockTime.from_timeval(seconds, microseconds) - local_time
+        except (TypeError, ValueError) as exc:
+            raise QueueClockError(
+                f"Redis TIME reported an unusable instant: {seconds!r}, {microseconds!r}"
+            ) from exc
+        if abs(offset) > MAX_CLOCK_DRIFT_SECONDS:
             raise QueueClockError(
                 "Redis and local UTC clocks exceed the maximum permitted drift"
             )
         return offset, self._monotonic()
 
-    def _set_calibration(self, calibration: tuple[timedelta, float]) -> None:
-        self._offset, self._last_refresh_attempt = calibration
+    def _set_calibration(self, calibration: tuple[float, float]) -> None:
+        # Named rather than unpacked: both are counts of seconds, one a
+        # wall-clock offset and one a monotonic reading, so a transposition
+        # would type-check and silently break refreshing.
+        offset, read_at = calibration
+        self._offset = offset
+        self._last_refresh_attempt = read_at
 
     def _refresh_in_background(self) -> None:
+        # Any failure retains the last good offset and retries at the next
+        # interval, and the flag is cleared in a finally rather than by the
+        # handler: a refresh that died without clearing it would stop this clock
+        # refreshing for good, while every reported time still looked ordinary.
+        # That makes the retry contract independent of what is caught here, so
+        # only an untrustworthy clock is handled and anything else -- a genuine
+        # bug in calibration -- still surfaces rather than becoming a warning.
         try:
             calibration = self._read_calibration()
         except QueueClockError as exc:
@@ -209,9 +259,9 @@ class RedisQueueClock:
                 "Unable to refresh Redis queue time; retaining the last known offset",
                 exc_info=exc,
             )
-            with self._lock:
-                self._refreshing = False
         else:
             with self._lock:
                 self._set_calibration(calibration)
+        finally:
+            with self._lock:
                 self._refreshing = False

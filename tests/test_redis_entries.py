@@ -9,6 +9,7 @@ from django_queue.backends import (
     RedisStack,
 )
 from django_queue.backends.exceptions import QueueEmptyException
+from django_queue.clock import ClockTime
 from django_queue.entries import QueueEntryStatus
 from tests.helpers import CustomQueueEntry
 
@@ -64,10 +65,22 @@ class TestRedisQueueEntries:
         completed = redis_entry_queue.mark_succeeded(entry_id, {"ok": True})
 
         assert running.status is QueueEntryStatus.RUNNING
-        assert running.dispatched_at is not None
+        assert isinstance(running.dispatched_at, ClockTime)
         assert completed.status is QueueEntryStatus.SUCCEEDED
-        assert completed.finished_at is not None
+        assert isinstance(completed.finished_at, ClockTime)
         assert completed.result == {"ok": True}
+
+    def test_restores_redis_lifecycle_timestamps_to_equal_instants(
+        self, redis_entry_queue
+    ):
+        """Round-trips through the durable form, not just through memory."""
+        entry_id = redis_entry_queue.enqueue("work")
+        running = redis_entry_queue.mark_running(entry_id)
+
+        restored = redis_entry_queue.get_entry(entry_id)
+
+        assert restored.queued_at == running.queued_at
+        assert restored.dispatched_at == running.dispatched_at
 
     def test_uses_its_configured_entry_subclass_for_lifecycle_operations(
         self, redis_entry_queue

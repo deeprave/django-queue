@@ -124,7 +124,7 @@ try:
         def enqueue(self, payload) -> uuid.UUID:
             validate_json_value(payload)
             entry = self.entry_class.create(
-                queue=self._queue_name, payload=payload, queued_at=self._clock.now()
+                queue=self._queue_name, payload=payload, queued_at=self.clock.now()
             )
             self._store_entry(entry)
             self.push(self._entry_pending_name, _encode(str(entry.id), self._encoding))
@@ -150,7 +150,7 @@ try:
             return self._replace_entry(
                 entry_id,
                 status=QueueEntryStatus.RUNNING,
-                dispatched_at=self._clock.now(),
+                dispatched_at=self.clock.now(),
             )
 
         def mark_succeeded(self, entry_id: uuid.UUID, result) -> QueueEntry:
@@ -160,7 +160,7 @@ try:
                 status=QueueEntryStatus.SUCCEEDED,
                 result=result,
                 error=None,
-                finished_at=self._clock.now(),
+                finished_at=self.clock.now(),
             )
 
         def mark_failed(self, entry_id: uuid.UUID, error: Exception) -> QueueEntry:
@@ -168,14 +168,14 @@ try:
                 entry_id,
                 status=QueueEntryStatus.FAILED,
                 error={"type": type(error).__name__, "message": str(error)},
-                finished_at=self._clock.now(),
+                finished_at=self.clock.now(),
             )
 
         def mark_cancelled(self, entry_id: uuid.UUID) -> QueueEntry:
             return self._replace_entry(
                 entry_id,
                 status=QueueEntryStatus.CANCELLED,
-                finished_at=self._clock.now(),
+                finished_at=self.clock.now(),
             )
 
         def _entry_key(self, entry_id: uuid.UUID) -> str:

@@ -5,8 +5,9 @@ from uuid import UUID
 
 import pytest
 
+from django_queue.clock import ClockTime
 from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
-from tests.helpers import FIXED_UUID7, CustomQueueEntry
+from tests.helpers import FIXED_CLOCK_TIME, FIXED_UUID7, CustomQueueEntry
 
 
 class TestQueueEntry:
@@ -42,7 +43,7 @@ class TestQueueEntry:
             "id": str(entry.id),
             "queue": "requests",
             "status": "queued",
-            "queued_at": entry.queued_at.isoformat(),
+            "queued_at": entry.queued_at.to_timestamp(),
             "dispatched_at": None,
             "finished_at": None,
             "payload": {"request_id": 42},
@@ -55,9 +56,9 @@ class TestQueueEntry:
             id=FIXED_UUID7,
             queue="requests",
             status=QueueEntryStatus.SUCCEEDED,
-            queued_at=datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
-            dispatched_at=datetime(2026, 8, 6, 12, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 8, 6, 12, 2, tzinfo=UTC),
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=FIXED_CLOCK_TIME + 60,
+            finished_at=FIXED_CLOCK_TIME + 120,
             payload=["source", 3],
             result={"accepted": True},
             error=None,
@@ -67,14 +68,227 @@ class TestQueueEntry:
 
         assert restored == entry
 
+    @pytest.mark.parametrize(
+        "queued_at",
+        [datetime(2026, 8, 6, 12, 0, tzinfo=UTC), 1_786_032_000.0, None],
+    )
+    def test_rejects_a_lifecycle_timestamp_that_is_not_an_instant(self, queued_at):
+        """Otherwise the failure surfaces at to_dict, far from its cause."""
+        with pytest.raises(TypeError, match="ClockTime"):
+            QueueEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=queued_at,
+                dispatched_at=None,
+                finished_at=None,
+                payload=None,
+                result=None,
+                error=None,
+            )
+
+    @pytest.mark.parametrize("field", ["dispatched_at", "finished_at"])
+    def test_rejects_an_optional_timestamp_that_is_not_an_instant(self, field):
+        with pytest.raises(TypeError, match="ClockTime"):
+            QueueEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=FIXED_CLOCK_TIME,
+                payload=None,
+                result=None,
+                error=None,
+                **{
+                    "dispatched_at": None,
+                    "finished_at": None,
+                    field: datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
+                },
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value", "match"),
+        [("id", "not-a-uuid", "UUID"), ("queue", 42, "string")],
+    )
+    def test_rejects_an_identifier_or_queue_name_of_the_wrong_type(
+        self, field, value, match
+    ):
+        with pytest.raises(TypeError, match=match):
+            QueueEntry(
+                **{
+                    "id": FIXED_UUID7,
+                    "queue": "requests",
+                    "status": QueueEntryStatus.QUEUED,
+                    "queued_at": FIXED_CLOCK_TIME,
+                    "dispatched_at": None,
+                    "finished_at": None,
+                    "payload": None,
+                    "result": None,
+                    "error": None,
+                    field: value,
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("id", "not-a-uuid"),
+            ("status", "bogus"),
+            ("queue", 42),
+            ("queued_at", "not-a-number"),
+            ("queued_at", -1.0),
+            ("dispatched_at", "not-a-number"),
+            ("dispatched_at", -1.0),
+            ("finished_at", "not-a-number"),
+        ],
+    )
+    def test_rejects_a_malformed_durable_record_naming_the_field(self, field, value):
+        """One exception class whichever way the stored value is wrong."""
+        stored = QueueEntry.create(queue="requests", payload=None).to_dict()
+
+        with pytest.raises(ValueError, match=rf"Queue entry .*\b{field}\b") as raised:
+            QueueEntry.from_dict(stored | {field: value})
+
+        assert isinstance(raised.value.__cause__, TypeError | ValueError)
+
+    def test_rejects_a_restored_record_that_omits_a_required_field(self):
+        """A missing key must not surface the dataclass constructor's own error."""
+        stored = QueueEntry.create(queue="requests", payload=None).to_dict()
+
+        with pytest.raises(ValueError, match=r"Queue entry .*\bqueued_at\b"):
+            QueueEntry.from_dict(
+                {name: v for name, v in stored.items() if name != "queued_at"}
+            )
+
+    def test_rejects_a_restored_record_whose_value_the_record_rejects(self):
+        """A null where an instant belongs reads like any other bad record."""
+        stored = QueueEntry.create(queue="requests", payload=None).to_dict()
+
+        with pytest.raises(ValueError, match=r"Queue entry .*\bqueued_at\b") as raised:
+            QueueEntry.from_dict(stored | {"queued_at": None})
+
+        assert isinstance(raised.value.__cause__, TypeError)
+
+    def test_reports_how_long_it_waited_and_ran(self):
+        entry = QueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.SUCCEEDED,
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=FIXED_CLOCK_TIME + 2.5,
+            finished_at=FIXED_CLOCK_TIME + 9,
+            payload=None,
+            result=None,
+            error=None,
+        )
+
+        assert entry.queued_for == pytest.approx(2.5)
+        assert entry.ran_for == pytest.approx(6.5)
+
+    @pytest.mark.parametrize(
+        ("microseconds", "expected"),
+        [(1, 1e-06), (137, 0.000137), (2_500, 0.0025), (999_999, 0.999999)],
+    )
+    def test_reports_a_sub_second_duration_without_truncating(
+        self, microseconds, expected
+    ):
+        """Most handlers finish in well under a second; whole seconds would be 0."""
+        entry = QueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.SUCCEEDED,
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=FIXED_CLOCK_TIME,
+            finished_at=ClockTime(
+                FIXED_CLOCK_TIME.seconds, FIXED_CLOCK_TIME.microseconds + microseconds
+            ),
+            payload=None,
+            result=None,
+            error=None,
+        )
+
+        assert entry.ran_for == pytest.approx(expected)
+
+    def test_reports_no_duration_before_the_instants_exist(self):
+        queued = QueueEntry.create(queue="requests", payload=None)
+        running = replace(queued, dispatched_at=queued.queued_at + 1)
+
+        assert queued.queued_for is None
+        assert queued.ran_for is None
+        assert running.queued_for == pytest.approx(1)
+        assert running.ran_for is None
+
+    def test_reports_no_duration_when_the_instants_contradict(self):
+        """A clock that moved backwards cannot describe an elapsed time."""
+        entry = QueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.SUCCEEDED,
+            queued_at=FIXED_CLOCK_TIME + 50,
+            dispatched_at=FIXED_CLOCK_TIME,
+            finished_at=FIXED_CLOCK_TIME - 10,
+            payload=None,
+            result=None,
+            error=None,
+        )
+
+        assert entry.queued_for is None
+        assert entry.ran_for is None
+
+    def test_keeps_durations_out_of_the_durable_record(self):
+        entry = QueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.SUCCEEDED,
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=FIXED_CLOCK_TIME + 2.5,
+            finished_at=FIXED_CLOCK_TIME + 9,
+            payload=None,
+            result=None,
+            error=None,
+        )
+
+        stored = entry.to_dict()
+        restored = QueueEntry.from_dict(json.loads(json.dumps(stored)))
+
+        assert "queued_for" not in stored
+        assert "ran_for" not in stored
+        assert restored.queued_for == entry.queued_for
+        assert restored.ran_for == entry.ran_for
+
+    def test_holds_lifecycle_timestamps_as_instants(self):
+        entry = QueueEntry.create(queue="requests", payload=None)
+
+        assert isinstance(entry.queued_at, ClockTime)
+
+    def test_stores_lifecycle_timestamps_as_a_count_of_seconds(self):
+        entry = QueueEntry.create(
+            queue="requests", payload=None, queued_at=ClockTime(1_786_032_000, 250_000)
+        )
+
+        assert entry.to_dict()["queued_at"] == 1_786_032_000.25
+
+    def test_restores_lifecycle_timestamps_to_an_equal_instant(self):
+        entry = QueueEntry.create(
+            queue="requests", payload=None, queued_at=ClockTime(1_786_032_000, 999_999)
+        )
+
+        restored = QueueEntry.from_dict(json.loads(json.dumps(entry.to_dict())))
+
+        assert restored.queued_at == entry.queued_at
+
+    def test_stores_no_timezone_and_needs_no_parsing(self):
+        entry = QueueEntry.create(queue="requests", payload=None)
+
+        assert isinstance(entry.to_dict()["queued_at"], float)
+
     def test_round_trips_a_field_declared_by_a_subclass(self):
         entry = CustomQueueEntry(
             id=FIXED_UUID7,
             queue="requests",
             status=QueueEntryStatus.SUCCEEDED,
-            queued_at=datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
-            dispatched_at=datetime(2026, 8, 6, 12, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 8, 6, 12, 2, tzinfo=UTC),
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=FIXED_CLOCK_TIME + 60,
+            finished_at=FIXED_CLOCK_TIME + 120,
             payload=["source", 3],
             result={"accepted": True},
             error=None,
@@ -99,7 +313,7 @@ class TestQueueEntry:
                 id=FIXED_UUID7,
                 queue="requests",
                 status=QueueEntryStatus.QUEUED,
-                queued_at=datetime(2026, 8, 6, 12, 0, tzinfo=UTC),
+                queued_at=FIXED_CLOCK_TIME,
                 dispatched_at=None,
                 finished_at=None,
                 payload=None,

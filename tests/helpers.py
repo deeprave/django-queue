@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import UUID
 
+from django_queue.clock import ClockTime
 from django_queue.entries import QueueEntry
 
 FIXED_UUID7 = UUID("0198babb-3bce-7f81-8c43-3c1d99f475a9")
+# 2026-08-06 12:00:00 UTC
+FIXED_CLOCK_TIME = ClockTime(1_786_032_000)
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,10 +17,10 @@ class CustomQueueEntry(QueueEntry):
 
 
 class FixedClock:
-    def __init__(self, timestamp: datetime | None = None):
-        self.timestamp = timestamp or datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+    def __init__(self, timestamp: ClockTime | None = None):
+        self.timestamp = timestamp or FIXED_CLOCK_TIME
 
-    def now(self):
+    def now(self) -> ClockTime:
         return self.timestamp
 
 
