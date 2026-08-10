@@ -15,6 +15,22 @@ from tests.helpers import FakeMonotonic, FakeRedisTime
 LOCAL = ClockTime(1_785_799_995)
 
 
+def wait_until(condition, message, timeout=5.0):
+    """Wait for a background refresh thread to make *condition* true.
+
+    Deadline-based rather than a fixed iteration count: these wait on a daemon
+    thread, and a loaded machine can take far longer to schedule it than any
+    plausible number of one-millisecond sleeps allows for. A generous timeout
+    keeps a genuine failure quick without making scheduling a test failure.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.001)
+    pytest.fail(message)
+
+
 class TestLocalQueueClock:
     def test_reports_an_instant(self):
         assert isinstance(LocalQueueClock().now(), ClockTime)
@@ -129,21 +145,17 @@ class TestRedisQueueClock:
 
         monotonic.value = 700.0
         clock.now()
-        for _ in range(100):
-            if redis.time_calls == 2 and not clock.refreshing:
-                break
-            time.sleep(0.001)
-        else:
-            pytest.fail("Background refresh did not finish after a malformed reply")
+        wait_until(
+            lambda: redis.time_calls == 2 and not clock.refreshing,
+            "Background refresh did not finish after a malformed reply",
+        )
 
         monotonic.value = 1_300.0
         clock.now()
-        for _ in range(100):
-            if redis.time_calls == 3:
-                break
-            time.sleep(0.001)
-        else:
-            pytest.fail("Clock did not retry after the next refresh interval")
+        wait_until(
+            lambda: redis.time_calls == 3,
+            "Clock did not retry after the next refresh interval",
+        )
 
     def test_retains_the_last_good_offset_after_a_background_redis_refresh_failure(
         self,
@@ -162,22 +174,15 @@ class TestRedisQueueClock:
         assert clock.now() == ClockTime(1_785_800_600)
         assert redis.time_calls == 2
 
-        for _ in range(100):
-            if not clock.refreshing:
-                break
-            time.sleep(0.001)
-        else:
-            pytest.fail("Background refresh did not complete")
+        wait_until(lambda: not clock.refreshing, "Background refresh did not complete")
 
         monotonic.value = 1_300.0
         utcnow.value += 600
         clock.now()
-        for _ in range(100):
-            if redis.time_calls == 3:
-                break
-            time.sleep(0.001)
-        else:
-            pytest.fail("Clock did not retry after the next refresh interval")
+        wait_until(
+            lambda: redis.time_calls == 3,
+            "Clock did not retry after the next refresh interval",
+        )
 
 
 class FakeUtcNow:

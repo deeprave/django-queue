@@ -136,6 +136,8 @@ Raised by the collated review after the elapsed-time work and taken before merge
   instant rather than silently measuring between two numbers.
 - [x] 8.3 Assert in the `runqueues` tests that an activated worker reports its
   queue's clock, pinning the shared basis where workers are really built.
+- [x] 8.4 Replace the clock tests' fixed-iteration waits with a deadline, so a
+  loaded machine cannot fail a test by scheduling a daemon thread slowly.
 
 ## 9. Documentation and validation
 
