@@ -3,17 +3,21 @@ import logging
 import threading
 import time
 from dataclasses import FrozenInstanceError
-from datetime import UTC
 
 import pytest
 
-from django_queue import WorkerSnapshot
+from django_queue import ClockTime, WorkerSnapshot
 from django_queue.backends import MemoryQueue
+from django_queue.clock import LocalQueueClock
 from django_queue.entries import QueueEntryStatus
 from django_queue.worker import (
     AsyncQueueWorker,
     QueuePersistenceError,
 )
+from tests.helpers import FixedClock
+
+# Twenty-five years from local time: one basis or neither.
+SKEWED = ClockTime(1_000_000_000)
 
 
 class TestAsyncQueueWorker:
@@ -74,8 +78,7 @@ class TestAsyncQueueWorker:
 
         snapshot = worker.snapshot
         assert snapshot.running is True
-        assert snapshot.started_at is not None
-        assert snapshot.started_at.tzinfo is UTC
+        assert isinstance(snapshot.started_at, ClockTime)
         assert snapshot.active_entry_id == entry_id
         assert snapshot.active_queue_name == "requests"
         assert snapshot.queue_names == ("requests",)
@@ -139,6 +142,14 @@ class TestAsyncQueueWorker:
             record.queue_worker_id == str(worker.snapshot.worker_id)
             for record in records
         )
+        assert isinstance(records[0].queue_worker_started_at, float)
+        assert all(
+            isinstance(record.queue_worker_running_for, float) for record in records
+        )
+        assert records[2].queue_worker_entry_queued_for >= 0
+        assert records[2].queue_worker_entry_ran_for >= 0
+        assert records[0].queue_worker_entry_queued_for is None
+        assert records[0].queue_worker_entry_ran_for is None
         assert records[1].queue_worker_active_entry_id == str(entry_id)
         assert records[1].queue_worker_active_queue_name == "requests"
         assert records[1].queue_worker_queue_names == ("requests",)
@@ -578,3 +589,122 @@ class FailingTerminalQueue(MemoryQueue):
 class UnrecoverableTerminalQueue(FailingTerminalQueue):
     def mark_failed(self, entry_id, error):
         raise ConnectionError("Redis is unavailable")
+
+
+class TestWorkerClock:
+    def test_takes_its_queue_clock_when_the_queue_creates_it(self):
+        """A worker and the entries it dispatches must share one time basis."""
+        queue = MemoryQueue(queue_name="requests", clock=FixedClock())
+
+        async def handle(entry):
+            return entry.payload
+
+        worker = queue.create_worker("requests", handle)
+
+        assert worker.clock is queue.clock
+
+    def test_defaults_to_local_time_when_constructed_directly(self):
+        worker = AsyncQueueWorker({}, {})
+
+        assert isinstance(worker.clock, LocalQueueClock)
+
+    def test_run_start_time_never_follows_a_dispatch_it_made(self):
+        asyncio.run(self._run_start_time_never_follows_a_dispatch_it_made())
+
+    async def _run_start_time_never_follows_a_dispatch_it_made(self):
+        """The queue clock is skewed far from local time; one basis or neither."""
+        queue = MemoryQueue(queue_name="requests", clock=FixedClock(SKEWED))
+        entry_id = queue.enqueue("work")
+        dispatched = asyncio.Event()
+
+        async def handle(entry):
+            dispatched.set()
+            return entry.payload
+
+        worker = queue.create_worker("requests", handle)
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(dispatched.wait(), timeout=1)
+        started_at = worker.snapshot.started_at
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        entry = queue.get_entry(entry_id)
+        assert started_at == SKEWED
+        assert entry.dispatched_at == SKEWED
+        assert started_at <= entry.dispatched_at
+
+
+class TestWorkerDuration:
+    def test_reports_how_long_it_has_been_running(self):
+        asyncio.run(self._reports_how_long_it_has_been_running())
+
+    async def _reports_how_long_it_has_been_running(self):
+        clock = FixedClock(SKEWED)
+        queue = MemoryQueue(queue_name="requests", clock=clock)
+        dispatched = asyncio.Event()
+
+        async def handle(entry):
+            dispatched.set()
+            return entry.payload
+
+        queue.enqueue("work")
+        worker = queue.create_worker("requests", handle)
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(dispatched.wait(), timeout=1)
+        clock.timestamp = SKEWED + 12
+        running_for = worker.snapshot.running_for
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert running_for == pytest.approx(12)
+
+    def test_reports_no_duration_when_the_clock_moves_backwards(self):
+        """A recalibrated Redis clock can read earlier than it did before."""
+        clock = FixedClock(SKEWED)
+        worker = AsyncQueueWorker({}, {}, clock=clock)
+        worker_started = asyncio.Event()
+
+        async def start_and_read():
+            task = asyncio.create_task(worker.run())
+            await asyncio.sleep(0)
+            worker_started.set()
+            clock.timestamp = SKEWED - 30
+            running_for = worker.snapshot.running_for
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return running_for
+
+        assert asyncio.run(start_and_read()) is None
+
+    def test_reports_no_duration_before_it_starts(self):
+        assert AsyncQueueWorker({}, {}).snapshot.running_for is None
+
+    def test_a_stopped_worker_reports_how_long_it_ran(self):
+        asyncio.run(self._a_stopped_worker_reports_how_long_it_ran())
+
+    async def _a_stopped_worker_reports_how_long_it_ran(self):
+        """Otherwise a stopped worker's runtime grows forever."""
+        clock = FixedClock(SKEWED)
+        queue = MemoryQueue(queue_name="requests", clock=clock)
+
+        async def handle(entry):
+            return entry.payload
+
+        worker = queue.create_worker("requests", handle)
+        task = asyncio.create_task(worker.run())
+        await asyncio.sleep(0)
+        clock.timestamp = SKEWED + 5
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        stopped = worker.snapshot.running_for
+        clock.timestamp = SKEWED + 500
+
+        assert stopped == pytest.approx(5)
+        assert worker.snapshot.running_for == stopped

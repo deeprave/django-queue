@@ -1,61 +1,84 @@
 import threading
 import time
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from django_queue.clock import LocalQueueClock, QueueClockError, RedisQueueClock
+from django_queue.clock import (
+    ClockTime,
+    LocalQueueClock,
+    QueueClockError,
+    RedisQueueClock,
+)
 from tests.helpers import FakeMonotonic, FakeRedisTime
+
+# 2026-08-03 23:33:15 UTC, the local reading the fakes below start from.
+LOCAL = ClockTime(1_785_799_995)
 
 
 class TestLocalQueueClock:
-    def test_returns_an_aware_utc_timestamp(self):
-        timestamp = LocalQueueClock().now()
-
-        assert timestamp.tzinfo is UTC
+    def test_reports_an_instant(self):
+        assert isinstance(LocalQueueClock().now(), ClockTime)
 
 
 class TestRedisQueueClock:
+    def test_reports_an_instant(self):
+        clock = RedisQueueClock(
+            FakeRedisTime((1_785_800_000, 0)), utcnow=lambda: ClockTime(1_785_800_000)
+        )
+
+        assert isinstance(clock.now(), ClockTime)
+
+    def test_builds_the_instant_from_the_reported_integers(self):
+        """At this magnitude a float on the way loses the last microsecond.
+
+        A datetime would not, so this pins exactness rather than the absence
+        of an intermediate form; that the clock builds no datetime is a
+        structural property the design records and review enforces.
+        """
+        seconds = 2**33
+        redis = FakeRedisTime((seconds, 999_999))
+        clock = RedisQueueClock(redis, utcnow=lambda: ClockTime(seconds))
+
+        assert clock.now() == ClockTime(seconds, 999_999)
+
     def test_derives_time_from_a_redis_to_local_utc_offset_within_refresh_window(self):
         redis = FakeRedisTime((1_785_800_000, 250_000))
         monotonic = FakeMonotonic(100.0)
-        utcnow = FakeUtcNow(datetime(2026, 8, 3, 23, 33, 15, 250_000, tzinfo=UTC))
+        utcnow = FakeUtcNow(LOCAL + 0.25)
         clock = RedisQueueClock(redis, monotonic=monotonic, utcnow=utcnow)
 
         first = clock.now()
         monotonic.value = 102.5
-        utcnow.value += timedelta(seconds=2.5)
+        utcnow.value += 2.5
         second = clock.now()
 
-        assert first == datetime(2026, 8, 3, 23, 33, 20, 250_000, tzinfo=UTC)
-        assert second == datetime(2026, 8, 3, 23, 33, 22, 750_000, tzinfo=UTC)
+        assert first == ClockTime(1_785_800_000, 250_000)
+        assert second == ClockTime(1_785_800_002, 750_000)
         assert redis.time_calls == 1
 
     def test_refreshes_in_the_background_after_six_hundred_seconds(self):
         redis = BlockingRefreshRedis()
         monotonic = FakeMonotonic(100.0)
-        utcnow = FakeUtcNow(datetime(2026, 8, 3, 23, 33, 15, tzinfo=UTC))
+        utcnow = FakeUtcNow(LOCAL)
         clock = RedisQueueClock(redis, monotonic=monotonic, utcnow=utcnow)
 
         clock.now()
         monotonic.value = 700.0
-        utcnow.value += timedelta(seconds=600)
+        utcnow.value += 600
         stale = clock.now()
         assert redis.refresh_started.wait(timeout=1)
-        assert stale == datetime(2026, 8, 3, 23, 43, 20, tzinfo=UTC)
+        assert stale == ClockTime(1_785_800_600)
 
         redis.release_refresh.set()
         assert redis.refresh_completed.wait(timeout=1)
-        utcnow.value += timedelta(seconds=1)
+        utcnow.value += 1
 
-        assert clock.now() == datetime(2026, 8, 3, 23, 43, 22, tzinfo=UTC)
+        assert clock.now() == ClockTime(1_785_800_602)
         assert redis.time_calls == 2
 
     def test_serialises_concurrent_initial_calibration(self):
         redis = BlockingRedisTime()
-        clock = RedisQueueClock(
-            redis, utcnow=lambda: datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC)
-        )
+        clock = RedisQueueClock(redis, utcnow=lambda: ClockTime(1_785_800_000))
 
         first = threading.Thread(target=clock.now)
         first.start()
@@ -73,9 +96,7 @@ class TestRedisQueueClock:
 
     def test_rejects_initial_redis_time_that_drifts_more_than_three_minutes(self):
         redis = FakeRedisTime((1_785_800_181, 0))
-        clock = RedisQueueClock(
-            redis, utcnow=lambda: datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC)
-        )
+        clock = RedisQueueClock(redis, utcnow=lambda: ClockTime(1_785_800_000))
 
         with pytest.raises(QueueClockError, match="drift"):
             clock.now()
@@ -86,32 +107,59 @@ class TestRedisQueueClock:
         with pytest.raises(QueueClockError, match="unavailable"):
             clock.now()
 
+    def test_retries_after_a_background_refresh_fails_on_a_malformed_reply(self):
+        """A dead refresh thread must not stop the clock refreshing for good."""
+        redis = MalformedRefreshRedis()
+        monotonic = FakeMonotonic(100.0)
+        clock = RedisQueueClock(
+            redis, monotonic=monotonic, utcnow=lambda: ClockTime(1_785_800_000)
+        )
+        clock.now()
+
+        monotonic.value = 700.0
+        clock.now()
+        for _ in range(100):
+            if redis.time_calls == 2 and not clock.refreshing:
+                break
+            time.sleep(0.001)
+        else:
+            pytest.fail("Background refresh did not finish after a malformed reply")
+
+        monotonic.value = 1_300.0
+        clock.now()
+        for _ in range(100):
+            if redis.time_calls == 3:
+                break
+            time.sleep(0.001)
+        else:
+            pytest.fail("Clock did not retry after the next refresh interval")
+
     def test_retains_the_last_good_offset_after_a_background_redis_refresh_failure(
         self,
     ):
         redis = FailingRefreshRedis()
         monotonic = FakeMonotonic(100.0)
-        utcnow = FakeUtcNow(datetime(2026, 8, 3, 23, 33, 20, tzinfo=UTC))
+        utcnow = FakeUtcNow(ClockTime(1_785_800_000))
         clock = RedisQueueClock(redis, monotonic=monotonic, utcnow=utcnow)
         clock.now()
 
         monotonic.value = 700.0
-        utcnow.value += timedelta(seconds=600)
+        utcnow.value += 600
         clock.now()
         assert redis.refresh_failed.wait(timeout=1)
 
-        assert clock.now() == datetime(2026, 8, 3, 23, 43, 20, tzinfo=UTC)
+        assert clock.now() == ClockTime(1_785_800_600)
         assert redis.time_calls == 2
 
         for _ in range(100):
-            if not clock._refreshing:
+            if not clock.refreshing:
                 break
             time.sleep(0.001)
         else:
             pytest.fail("Background refresh did not complete")
 
         monotonic.value = 1_300.0
-        utcnow.value += timedelta(seconds=600)
+        utcnow.value += 600
         clock.now()
         for _ in range(100):
             if redis.time_calls == 3:
@@ -164,6 +212,19 @@ class BlockingRefreshRedis:
         self.release_refresh.wait(timeout=1)
         self.refresh_completed.set()
         return 1_785_800_601, 0
+
+
+class MalformedRefreshRedis:
+    """Calibrates once, then returns a shape ClockTime rejects."""
+
+    def __init__(self):
+        self.time_calls = 0
+
+    def time(self):
+        self.time_calls += 1
+        if self.time_calls == 1:
+            return 1_785_800_000, 0
+        return "1785800000", "0"
 
 
 class FailingRedisTime:

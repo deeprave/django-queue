@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields
-from datetime import UTC, datetime
+from dataclasses import MISSING, dataclass, fields
 from enum import StrEnum
 from typing import Any
+
+from django_queue.clock import DEFAULT_CLOCK, ClockTime, elapsed_time
 
 
 class QueueEntryStatus(StrEnum):
@@ -44,9 +45,9 @@ class QueueEntryStatus(StrEnum):
 _WIRE_DECODERS: Mapping[str, Callable[[Any], Any]] = {
     "id": uuid.UUID,
     "status": QueueEntryStatus,
-    "queued_at": datetime.fromisoformat,
-    "dispatched_at": datetime.fromisoformat,
-    "finished_at": datetime.fromisoformat,
+    "queued_at": ClockTime.from_timestamp,
+    "dispatched_at": ClockTime.from_timestamp,
+    "finished_at": ClockTime.from_timestamp,
 }
 
 
@@ -58,15 +59,28 @@ def _encode_wire_value(name: str, value: Any) -> Any:
         return str(value)
     if isinstance(value, StrEnum):
         return value.value
-    return value.isoformat()
+    return value.to_timestamp()
 
 
 def _decode_wire_value(name: str, value: Any) -> Any:
-    """Restore a field value from its durable form."""
+    """Restore a field value from its durable form.
+
+    The decoders raise either class depending on how a stored value is wrong --
+    `uuid.UUID` and the status enum raise ValueError, `ClockTime.from_timestamp`
+    raises TypeError for a non-number and ValueError for one out of range. A
+    caller restoring a record should not have to catch both and still be left
+    guessing which field was at fault, so both become one error naming it,
+    mirroring how `validate_json_value` normalises `json.dumps`.
+    """
     decoder = _WIRE_DECODERS.get(name)
     if decoder is None or value is None:
         return value
-    return decoder(value)
+    try:
+        return decoder(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Queue entry {name} could not be restored from {value!r}"
+        ) from exc
 
 
 def validate_json_value(value: Any) -> None:
@@ -84,16 +98,26 @@ class QueueEntry:
     id: uuid.UUID
     queue: str
     status: QueueEntryStatus
-    queued_at: datetime
-    dispatched_at: datetime | None
-    finished_at: datetime | None
+    queued_at: ClockTime
+    dispatched_at: ClockTime | None
+    finished_at: ClockTime | None
     payload: Any
     result: Any | None
     error: dict[str, str] | None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.id, uuid.UUID):
+            raise TypeError("Queue entry id must be a UUID")
+        if not isinstance(self.queue, str):
+            raise TypeError("Queue entry queue must be a string")
         if not isinstance(self.status, QueueEntryStatus):
             raise TypeError("Queue entry status must be a QueueEntryStatus")
+        if not isinstance(self.queued_at, ClockTime):
+            raise TypeError("Queue entry queued_at must be a ClockTime")
+        for name in ("dispatched_at", "finished_at"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, ClockTime):
+                raise TypeError(f"Queue entry {name} must be a ClockTime or None")
         if self.id.version != 7:
             raise ValueError("Queue entry IDs must be UUIDv7 values")
         if not self.queue:
@@ -105,16 +129,31 @@ class QueueEntry:
             if field.name not in _WIRE_DECODERS:
                 validate_json_value(getattr(self, field.name))
 
+    @property
+    def queued_for(self) -> float | None:
+        """Seconds this entry waited before a worker dispatched it.
+
+        Derived rather than stored, so it cannot disagree with the instants it
+        comes from. Absent until dispatch, since an entry still waiting has not
+        waited zero seconds -- the question has no answer yet.
+        """
+        return elapsed_time(self.queued_at, self.dispatched_at)
+
+    @property
+    def ran_for(self) -> float | None:
+        """Seconds this entry's handler ran, once it reached a terminal state."""
+        return elapsed_time(self.dispatched_at, self.finished_at)
+
     @classmethod
     def create(
-        cls, *, queue: str, payload: Any, queued_at: datetime | None = None
+        cls, *, queue: str, payload: Any, queued_at: ClockTime | None = None
     ) -> QueueEntry:
         """Create a newly queued entry with a queue-owned UUIDv7 and timestamp."""
         return cls(
             id=uuid.uuid7(),
             queue=queue,
             status=QueueEntryStatus.QUEUED,
-            queued_at=queued_at or datetime.now(UTC),
+            queued_at=queued_at or DEFAULT_CLOCK.now(),
             dispatched_at=None,
             finished_at=None,
             payload=payload,
@@ -131,11 +170,31 @@ class QueueEntry:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> QueueEntry:
-        """Rebuild an entry from its JSON-decoded durable representation."""
-        return cls(
-            **{
-                field.name: _decode_wire_value(field.name, value[field.name])
-                for field in fields(cls)
-                if field.init and field.name in value
-            }
-        )
+        """Rebuild an entry from its JSON-decoded durable representation.
+
+        A record that cannot be restored fails one way whichever way it is
+        wrong -- a field missing, a stored value that will not decode, or one
+        the record itself rejects -- naming the field and chaining the cause, so
+        a caller catches one class and an operator reads one kind of message.
+        """
+        missing = [
+            field.name
+            for field in fields(cls)
+            if field.init
+            and field.name not in value
+            and field.default is MISSING
+            and field.default_factory is MISSING
+        ]
+        if missing:
+            raise ValueError(
+                f"Queue entry record is missing {', '.join(sorted(missing))}"
+            )
+        decoded = {
+            field.name: _decode_wire_value(field.name, value[field.name])
+            for field in fields(cls)
+            if field.init and field.name in value
+        }
+        try:
+            return cls(**decoded)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Queue entry record is invalid: {exc}") from exc

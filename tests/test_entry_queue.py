@@ -1,12 +1,10 @@
-from datetime import UTC, datetime
-
 import pytest
 
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue, MemoryStack
 from django_queue.backends.exceptions import QueueEmptyException
 from django_queue.entries import QueueEntryStatus
 from django_queue.signals import entry_enqueued
-from tests.helpers import CustomQueueEntry, FixedClock
+from tests.helpers import FIXED_CLOCK_TIME, CustomQueueEntry, FixedClock
 
 
 @pytest.fixture
@@ -35,7 +33,7 @@ class TestMemoryQueueEntries:
         assert entry.id == entry_id
         assert entry.queue == "requests"
         assert entry.status is QueueEntryStatus.QUEUED
-        assert entry.queued_at == datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        assert entry.queued_at == FIXED_CLOCK_TIME
         assert entry.payload == {"request_id": 42}
 
     def test_dequeue_removes_the_entry_from_pending_work_but_retains_its_record(
@@ -56,10 +54,10 @@ class TestMemoryQueueEntries:
         completed = queue.mark_succeeded(entry_id, {"ok": True})
 
         assert running.status is QueueEntryStatus.RUNNING
-        assert running.dispatched_at == datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        assert running.dispatched_at == FIXED_CLOCK_TIME
         assert completed.status is QueueEntryStatus.SUCCEEDED
         assert completed.result == {"ok": True}
-        assert completed.finished_at == datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        assert completed.finished_at == FIXED_CLOCK_TIME
 
     def test_records_a_safe_failure_without_a_traceback(self, queue):
         entry_id = queue.enqueue("work")
@@ -88,7 +86,7 @@ class TestMemoryQueueEntries:
         cancelled = queue.mark_cancelled(entry_id)
 
         assert cancelled.status is QueueEntryStatus.CANCELLED
-        assert cancelled.finished_at == datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
+        assert cancelled.finished_at == FIXED_CLOCK_TIME
 
     def test_uses_its_configured_entry_subclass_for_lifecycle_operations(self, queue):
         queue.entry_class = CustomQueueEntry

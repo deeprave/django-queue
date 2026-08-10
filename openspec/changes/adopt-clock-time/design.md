@@ -98,6 +98,57 @@ That change's design records the original reasoning and is left as the record of
 what was decided then; the correction belongs here, where the premise is
 re-examined.
 
+### Durations are derived, never stored
+
+`queued_for` and `ran_for` are read-only properties over the instants the entry
+already holds, and a snapshot's `running_for` is computed when the snapshot is
+taken. Nothing new enters the durable record.
+
+Storing them would duplicate derivable state, which is the one way a record can
+contradict itself: an entry rewritten at each transition could carry a
+`ran_for` that disagrees with its own `dispatched_at` and `finished_at`, and
+nothing could say which is right. Deriving also means every entry already
+written gains the durations without migration, and it keeps the wire format
+exactly as the storage decision above settled it.
+
+A duration the instants cannot yet describe is absent rather than zero. An entry
+that has not been dispatched has not waited zero seconds — the question has no
+answer yet, and zero is an answer.
+
+Instants that contradict each other are treated the same way. A Redis-aligned
+clock is recalibrated periodically and its offset may move backwards within the
+drift tolerance, so an instant read after a refresh can precede one read before
+it, and a subtraction would yield a negative duration. That is not a smaller
+elapsed time but a meaningless one, and it would be published straight into
+snapshots and structured logs. Reporting it as absent is the same answer already
+given when the instants cannot describe a duration, so a consumer needs one rule
+rather than two.
+
+Clamping to zero was rejected: it produces a plausible number from contradictory
+inputs, which is worse than an obvious gap. Both cases route through one helper,
+so an entry and a worker cannot disagree about what an unanswerable duration
+looks like.
+
+A worker's `running_for` is measured against its own clock at snapshot time, so
+a reader needs no second source of time to interpret it, and the number cannot
+disagree with the `started_at` beside it. Once the loop exits the worker records
+a stop instant and measures against that, because a stopped worker that reports
+an ever-growing runtime is simply wrong.
+
+### Elapsed time is for reporting, not for enforcing a budget
+
+This is the distinction `add-timeout-governance` depends on and must not lose.
+An execution budget is enforced on the event loop's monotonic clock, because a
+wall clock can jump and this one is periodically recalibrated against Redis — a
+handler must not be killed early because an offset moved beneath it.
+
+The durations here are the wall-clock record of what happened, which is a
+different job: how long a handler ran before it was abandoned, how long work sat
+before pickup. They are also the only basis available to the changes that reason
+across processes — expiring another worker's claim, or sweeping entries finished
+more than some interval ago — since a monotonic clock means nothing outside the
+process that read it.
+
 ## Risks / Trade-offs
 
 - [Every instant in the public API changes type at once] → Unavoidable for a

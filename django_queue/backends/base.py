@@ -7,6 +7,7 @@ from uuid import UUID
 from django.utils.module_loading import import_string
 
 from django_queue.backends.exceptions import InvalidQueueBackendError
+from django_queue.clock import DEFAULT_CLOCK, QueueClock
 from django_queue.entries import QueueEntry
 
 if TYPE_CHECKING:
@@ -18,6 +19,7 @@ class BaseQueue(ABC):
     entry_class: type[QueueEntry] = QueueEntry
     worker_class: type[AsyncQueueWorker] | str = "django_queue.worker.AsyncQueueWorker"
     _queue_name: str = ""
+    _clock: QueueClock | None = None
 
     @property
     def queue_name(self) -> str:
@@ -27,6 +29,17 @@ class BaseQueue(ABC):
         entry-capable backend must supply a name.
         """
         return self._queue_name
+
+    @property
+    def clock(self) -> QueueClock:
+        """Return the clock this queue timestamps its entries with.
+
+        Local time when a backend never set one, so a component recording times
+        alongside this queue's entries can always ask rather than assume. Read
+        through here rather than the attribute, so the fallback applies and the
+        result is never optional.
+        """
+        return self._clock or DEFAULT_CLOCK
 
     def resolve_worker_class(self, alias: str) -> type[AsyncQueueWorker]:
         """Import and validate this queue's configured worker class."""
@@ -54,8 +67,15 @@ class BaseQueue(ABC):
         return worker_class
 
     def create_worker(self, alias: str, handler: QueueEntryHandler) -> AsyncQueueWorker:
-        """Create this queue's configured worker when it becomes active."""
-        return self.resolve_worker_class(alias)({alias: self}, {alias: handler})
+        """Create this queue's configured worker when it becomes active.
+
+        The worker is given this queue's clock, so its recorded time and the
+        entries it dispatches share one basis. A configured WORKER subclass
+        overriding `__init__` must therefore accept a `clock` keyword.
+        """
+        return self.resolve_worker_class(alias)(
+            {alias: self}, {alias: handler}, clock=self.clock
+        )
 
     @property
     def stack(self):
