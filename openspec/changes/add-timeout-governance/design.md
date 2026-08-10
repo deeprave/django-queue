@@ -22,7 +22,7 @@ below is new code.
 - Let a caller set a budget when enqueueing work, a queue supply a default, and
   a worker override both.
 - Let a handler that is still working extend its own budget rather than be
-  killed for taking a long time legitimately. **Deferred to UT-361** — see the
+  killed for taking a long time legitimately. **Deferred to `refactor-redis-async`** — see the
   heartbeat decision below for why it cannot land on synchronous backends.
 
 **Non-Goals:**
@@ -120,7 +120,7 @@ exactly this reason, so both deadlines are told apart the same way.
 
 ### The heartbeat is a module-level call, not a handler argument
 
-**Deferred to UT-361.** The reasoning below is settled and kept here because it
+**Deferred to `refactor-redis-async`.** The reasoning below is settled and kept here because it
 was reached during this change, but the requirement and its tasks belong to the
 change that can implement them. A heartbeat must extend the backend's lease as
 well as the loop deadline and verify the calling handler still owns that lease;

@@ -46,7 +46,8 @@ Extending a live budget -- the heartbeat -- is deliberately not part of this
 change. A heartbeat must extend the backend's lease as well as the loop
 deadline and verify the calling handler still owns that lease, neither of which
 is safe across the `to_thread` hops the synchronous backends require. It
-follows the async backend conversion in UT-361, and its requirement belongs to
+follows the async backend conversion in `refactor-redis-async`, and its
+requirement belongs to
 that change rather than this one.
 
 This change assumes `adopt-clock-time` archives before it, since the entry and

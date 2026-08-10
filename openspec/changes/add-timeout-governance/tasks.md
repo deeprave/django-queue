@@ -37,7 +37,7 @@
   `timeout_seconds` attribute set by the registry, as `entry_class` and
   `worker_class` already are.
 
-## 4. Enforcement and heartbeat
+## 4. Enforcement
 
 - [x] 4.1 Add failing tests for a hung handler being abandoned as `timeout` while
   the worker continues to the next entry, and for a handler within its budget
@@ -47,19 +47,14 @@
   wraps the `asyncio.shield(handler_task)` await in `_dispatch`, and its expiry
   must be distinguishable from the outer cancellation that path already
   handles, which currently re-raises into `_finish_cancellation`.
-- [ ] 4.3 DEFERRED to UT-361, with the requirement and design section moved
-  there too rather than left ADDED in this change's delta. Add failing tests for the heartbeat: extending from
-  the handler coroutine, extending from a delegated worker thread, and raising
-  outside a dispatch.
-- [ ] 4.4 DEFERRED to UT-361. Publish the active dispatch's extension callback in
-  a `ContextVar` and implement the public `heartbeat()` call, rescheduling
-  through the loop.
-
-  Both wait on the async backend conversion. A heartbeat must extend the
-  backend's lease as well as the loop deadline, and validate that the calling
-  handler still owns that lease — neither is safe to do from the `to_thread`
-  hops the sync backends require, since `Timeout.reschedule` mutates a
-  `TimerHandle` and is not thread-safe.
+  The heartbeat tasks that were 4.3 and 4.4 are deliberately not listed here as
+  pending, because they are not pending here. A heartbeat extends the loop
+  deadline through `Timeout.reschedule`, which mutates a `TimerHandle` and is
+  not thread-safe, so it cannot be done across the `to_thread` hops the
+  synchronous backends require. The work, its requirement, and its design
+  reasoning moved to `refactor-redis-async`, which removes those hops — see its
+  tasks 6.1 and 6.2. Leaving them here permanently unchecked would report this
+  change as incomplete for work it does not own.
 - [x] 4.5 Add a failing test that shutdown grace-period expiry now records
   `timeout`, and change `_finish_cancellation`'s `TimeoutError` branch from
   `queue.mark_cancelled` to `queue.mark_timed_out`. Expiry was `cancelled`'s
@@ -91,7 +86,8 @@
 - [x] 7.1 Document the budget, its resolution order, the `TIMEOUT` setting, the
   `timeout_seconds` enqueue keyword, and the `mark_timed_out` backend contract
   addition in the README. The heartbeat is not documented here: it ships with
-  4.3/4.4 in UT-361, and documenting a call that does not exist would be worse
+  4.3/4.4 in `refactor-redis-async`, and documenting a call that does not
+  exist would be worse
   than not mentioning it.
 - [x] 7.3 Address independent review. One shared `validate_budget` in
   `entries.py` is now the single definition of a budget, called from the entry
