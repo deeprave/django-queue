@@ -57,9 +57,15 @@ an operator acts on. `timeout` joins `succeeded`, `failed`, and `cancelled` as a
 terminal state reachable only from `running`, with a matching `mark_timed_out`
 on the backend contract and a `timed_out_count` on the worker snapshot.
 
-Shutdown grace-period expiry routes here too. After this change `cancelled`
-means only that the worker stopped the entry deliberately and the handler
-complied.
+Shutdown grace-period expiry routes here too, which leaves `cancelled` with no
+producer. That is deliberate, and worth stating plainly rather than papering
+over: expiry was its only source, and the handler that stops when asked has
+always recorded its own outcome, because it finished and its result is real —
+discarding that as `cancelled` would lose work the queue actually did. So
+`cancelled` stays in the enum and the backend contract as a reserved status,
+reachable through `mark_cancelled` for the deliberate per-entry cancellation the
+queue does not yet offer. Removing it instead would be a breaking wire-format
+change well outside this change, and would foreclose that API.
 
 ### Budget resolution: worker, then entry, then queue, then 600 seconds
 
@@ -75,10 +81,22 @@ durable record, and is available to whichever worker dispatches it.
 
 ### The budget applies to entry dispatch, not to raw items
 
-`enqueue` creates an identified entry and gains a `timeout` keyword. `add` is
-the item-oriented API: it stores raw values, creates no entry, and is never
+`enqueue` creates an identified entry and gains a `timeout_seconds` keyword.
+`add` is the item-oriented API: it stores raw values, creates no entry, and is
+never
 dispatched to a handler, so it has nothing to which a budget could apply and
 gains no keyword.
+
+### The budget is named for the duration it is
+
+The record field and the `enqueue` keyword are `timeout_seconds`, not `timeout`.
+A bare `timeout` sits beside `queued_at`, `dispatched_at` and `finished_at` and
+reads just as easily as the instant at which an entry expires, which is the
+exact instant-versus-duration confusion `ClockTime` was introduced to make
+impossible. Naming the unit closes it at the one place a reader meets the value
+far from any documentation. The queue setting stays `TIMEOUT`: it sits beside
+`WORKER`, `HANDLER` and `ENTRY_CLASS` in a settings dict where short keys are
+the convention and the documentation is adjacent.
 
 ### `asyncio.timeout` provides the extendable deadline
 
@@ -111,6 +129,13 @@ dispatch it raises rather than silently doing nothing.
 Each heartbeat grants a fresh full budget from the moment of the call. A handler
 that pings faster than its budget runs indefinitely, which is the intent: the
 budget bounds silence, not total runtime.
+
+The expectation on a caller follows from that, and belongs in the documentation
+rather than only in this reasoning: heartbeat is not a keepalive to be called on
+a timer or in a tight loop. A handler pings when it genuinely needs another
+allotment, as it approaches its current one, having made progress worth
+reporting. A handler that pings on a schedule has turned its budget off without
+saying so.
 
 ## Risks / Trade-offs
 

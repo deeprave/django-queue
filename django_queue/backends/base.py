@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 class BaseQueue(ABC):
     entry_class: type[QueueEntry] = QueueEntry
     worker_class: type[AsyncQueueWorker] | str = "django_queue.worker.AsyncQueueWorker"
+    # Set by the configured queue registry from the alias's TIMEOUT setting,
+    # as entry_class and worker_class are. An entry's own budget takes
+    # precedence over it, and a worker override over both.
+    timeout_seconds: float | None = None
     _queue_name: str = ""
     _clock: QueueClock | None = None
 
@@ -116,8 +120,13 @@ class BaseQueue(ABC):
         pass
 
     @abstractmethod
-    def enqueue(self, payload) -> UUID:
-        """Store a JSON-serialisable payload and return its queue-owned ID."""
+    def enqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+        """Store a JSON-serialisable payload and return its queue-owned ID.
+
+        An execution budget given here is carried on the entry and persisted
+        with it, so it survives enqueue and reaches whichever worker dispatches
+        the entry.
+        """
         raise NotImplementedError("enqueue")
 
     @abstractmethod
@@ -150,6 +159,15 @@ class BaseQueue(ABC):
     @abstractmethod
     def mark_cancelled(self, entry_id: UUID) -> QueueEntry:
         raise NotImplementedError("mark_cancelled")
+
+    @abstractmethod
+    def mark_timed_out(self, entry_id: UUID) -> QueueEntry:
+        """Record that a handler exceeded its budget and was abandoned.
+
+        Distinct from cancellation, which means the worker stopped the entry
+        deliberately and the handler complied.
+        """
+        raise NotImplementedError("mark_timed_out")
 
     def __len__(self):
         return self.size()

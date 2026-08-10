@@ -20,6 +20,7 @@ class QueueEntryStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
 
     def next_state(self) -> frozenset[QueueEntryStatus]:
         """Return the lifecycle states this status may transition to."""
@@ -32,12 +33,14 @@ class QueueEntryStatus(StrEnum):
                         QueueEntryStatus.SUCCEEDED,
                         QueueEntryStatus.FAILED,
                         QueueEntryStatus.CANCELLED,
+                        QueueEntryStatus.TIMEOUT,
                     }
                 )
             case (
                 QueueEntryStatus.SUCCEEDED
                 | QueueEntryStatus.FAILED
                 | QueueEntryStatus.CANCELLED
+                | QueueEntryStatus.TIMEOUT
             ):
                 return frozenset()
 
@@ -104,6 +107,9 @@ class QueueEntry:
     payload: Any
     result: Any | None
     error: dict[str, str] | None
+    # A duration, not the instant at which the entry expires: named for its
+    # unit so it cannot be read as one of the lifecycle instants above.
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, uuid.UUID):
@@ -118,6 +124,10 @@ class QueueEntry:
             value = getattr(self, name)
             if value is not None and not isinstance(value, ClockTime):
                 raise TypeError(f"Queue entry {name} must be a ClockTime or None")
+        if self.timeout_seconds is not None and (
+            type(self.timeout_seconds) not in (int, float)
+        ):
+            raise TypeError("Queue entry timeout_seconds must be a number or None")
         if self.id.version != 7:
             raise ValueError("Queue entry IDs must be UUIDv7 values")
         if not self.queue:
@@ -146,7 +156,12 @@ class QueueEntry:
 
     @classmethod
     def create(
-        cls, *, queue: str, payload: Any, queued_at: ClockTime | None = None
+        cls,
+        *,
+        queue: str,
+        payload: Any,
+        queued_at: ClockTime | None = None,
+        timeout_seconds: float | None = None,
     ) -> QueueEntry:
         """Create a newly queued entry with a queue-owned UUIDv7 and timestamp."""
         return cls(
@@ -159,6 +174,7 @@ class QueueEntry:
             payload=payload,
             result=None,
             error=None,
+            timeout_seconds=timeout_seconds,
         )
 
     def to_dict(self) -> dict[str, Any]:

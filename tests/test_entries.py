@@ -22,12 +22,14 @@ class TestQueueEntry:
                         QueueEntryStatus.SUCCEEDED,
                         QueueEntryStatus.FAILED,
                         QueueEntryStatus.CANCELLED,
+                        QueueEntryStatus.TIMEOUT,
                     }
                 ),
             ),
             (QueueEntryStatus.SUCCEEDED, frozenset()),
             (QueueEntryStatus.FAILED, frozenset()),
             (QueueEntryStatus.CANCELLED, frozenset()),
+            (QueueEntryStatus.TIMEOUT, frozenset()),
         ],
     )
     def test_lists_valid_next_states(self, status, next_states):
@@ -49,6 +51,7 @@ class TestQueueEntry:
             "payload": {"request_id": 42},
             "result": None,
             "error": None,
+            "timeout_seconds": None,
         }
 
     def test_round_trips_a_terminal_entry(self):
@@ -149,6 +152,55 @@ class TestQueueEntry:
             QueueEntry.from_dict(stored | {field: value})
 
         assert isinstance(raised.value.__cause__, TypeError | ValueError)
+
+    def test_rejects_a_restored_record_with_an_unrecognised_status(self):
+        stored = QueueEntry.create(queue="requests", payload=None).to_dict()
+
+        with pytest.raises(ValueError, match=r"Queue entry .*\bstatus\b"):
+            QueueEntry.from_dict(stored | {"status": "expired"})
+
+    @pytest.mark.parametrize("budget", ["2.5", True, object()])
+    def test_rejects_an_execution_budget_that_is_not_a_number(self, budget):
+        """A budget is a count of seconds, like every other duration here."""
+        with pytest.raises(TypeError, match="timeout_seconds"):
+            QueueEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=FIXED_CLOCK_TIME,
+                dispatched_at=None,
+                finished_at=None,
+                payload=None,
+                result=None,
+                error=None,
+                timeout_seconds=budget,
+            )
+
+    def test_carries_no_budget_when_enqueued_without_one(self):
+        entry = QueueEntry.create(queue="requests", payload=None)
+
+        assert entry.timeout_seconds is None
+        assert entry.to_dict()["timeout_seconds"] is None
+
+    def test_round_trips_an_execution_budget(self):
+        entry = QueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.QUEUED,
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=None,
+            finished_at=None,
+            payload=None,
+            result=None,
+            error=None,
+            timeout_seconds=2.5,
+        )
+
+        stored = entry.to_dict()
+        restored = QueueEntry.from_dict(json.loads(json.dumps(stored)))
+
+        assert stored["timeout_seconds"] == 2.5
+        assert restored == entry
 
     def test_rejects_a_restored_record_that_omits_a_required_field(self):
         """A missing key must not surface the dataclass constructor's own error."""

@@ -35,17 +35,17 @@ applied. There SHALL be no value meaning "unbounded".
 - **THEN** the system raises a value error naming the offending value
 
 ### Requirement: Accept a budget when enqueueing an entry
-The entry-oriented enqueue operation SHALL accept an optional `timeout` keyword
+The entry-oriented enqueue operation SHALL accept an optional `timeout_seconds` keyword
 naming that entry's execution budget in seconds, and MUST persist it on the
 entry record. The item-oriented `add` operation creates no entry and SHALL NOT
 accept a budget.
 
 #### Scenario: Enqueue with an explicit budget
-- **WHEN** a caller enqueues a payload with a `timeout` keyword
+- **WHEN** a caller enqueues a payload with a `timeout_seconds` keyword
 - **THEN** the returned entry records that budget in its durable representation
 
 #### Scenario: Enqueue without a budget
-- **WHEN** a caller enqueues a payload with no `timeout` keyword
+- **WHEN** a caller enqueues a payload with no `timeout_seconds` keyword
 - **THEN** the entry records no budget and resolution falls to the queue default
 
 ### Requirement: Abandon a handler that exceeds its budget

@@ -121,10 +121,15 @@ try:
         def clear(self):
             self._redis.delete(self._queue_name)
 
-        def enqueue(self, payload) -> uuid.UUID:
+        def enqueue(
+            self, payload, *, timeout_seconds: float | None = None
+        ) -> uuid.UUID:
             validate_json_value(payload)
             entry = self.entry_class.create(
-                queue=self._queue_name, payload=payload, queued_at=self.clock.now()
+                queue=self._queue_name,
+                payload=payload,
+                queued_at=self.clock.now(),
+                timeout_seconds=timeout_seconds,
             )
             self._store_entry(entry)
             self.push(self._entry_pending_name, _encode(str(entry.id), self._encoding))
@@ -175,6 +180,13 @@ try:
             return self._replace_entry(
                 entry_id,
                 status=QueueEntryStatus.CANCELLED,
+                finished_at=self.clock.now(),
+            )
+
+        def mark_timed_out(self, entry_id: uuid.UUID) -> QueueEntry:
+            return self._replace_entry(
+                entry_id,
+                status=QueueEntryStatus.TIMEOUT,
                 finished_at=self.clock.now(),
             )
 

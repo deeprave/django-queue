@@ -28,6 +28,10 @@ WORKER_EVENT_MESSAGES: Mapping[str, str] = {
 # asyncio.create_task, and runqueues already rejects non-coroutine handlers.
 QueueHandler = Callable[[QueueEntry], Coroutine[Any, Any, object]]
 
+# The budget that governs when nothing else specifies one. There is no value
+# meaning unlimited: an unbounded handler is the defect the budget removes.
+DEFAULT_TIMEOUT_SECONDS = 600
+
 
 class QueueLookup(Protocol):
     """Queue service lookup used by a worker's registered aliases."""
@@ -56,6 +60,7 @@ class WorkerSnapshot:
     succeeded_count: int
     failed_count: int
     cancelled_count: int
+    timed_out_count: int
 
 
 class AsyncQueueWorker:
@@ -69,7 +74,15 @@ class AsyncQueueWorker:
         idle_delay: float = 0.1,
         cancellation_grace_period: float = 30,
         clock: QueueClock | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
+        if timeout_seconds is not None and (
+            type(timeout_seconds) not in (int, float) or timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "Worker timeout_seconds must be a positive number of seconds"
+            )
+        self._timeout_seconds = timeout_seconds
         self._clock: QueueClock = clock or DEFAULT_CLOCK
         self._queues = {name: queues[name] for name in handlers}
         self._handlers = dict(handlers)
@@ -84,6 +97,7 @@ class AsyncQueueWorker:
         self._succeeded_count = 0
         self._failed_count = 0
         self._cancelled_count = 0
+        self._timed_out_count = 0
         self._running = False
 
     @property
@@ -100,6 +114,23 @@ class AsyncQueueWorker:
         """
         return self._clock
 
+    def resolve_budget(self, queue: BaseQueue, entry: QueueEntry) -> float:
+        """Return the execution budget governing this entry, in seconds.
+
+        A worker override wins over the entry's own budget, which wins over the
+        queue default, which falls back to `DEFAULT_TIMEOUT_SECONDS`. The worker
+        takes precedence because it is the component that knows the runtime it
+        is actually operating in.
+        """
+        for budget in (
+            self._timeout_seconds,
+            entry.timeout_seconds,
+            queue.timeout_seconds,
+        ):
+            if budget is not None:
+                return budget
+        return DEFAULT_TIMEOUT_SECONDS
+
     @property
     def snapshot(self) -> WorkerSnapshot:
         """Return an immutable snapshot of this worker's local state."""
@@ -115,6 +146,7 @@ class AsyncQueueWorker:
             succeeded_count=self._succeeded_count,
             failed_count=self._failed_count,
             cancelled_count=self._cancelled_count,
+            timed_out_count=self._timed_out_count,
         )
 
     def _running_for(self) -> float | None:
@@ -167,7 +199,14 @@ class AsyncQueueWorker:
         await asyncio.to_thread(queue.mark_running, entry.id)
         handler_task = asyncio.create_task(handler(entry))
         try:
-            result = await asyncio.shield(handler_task)
+            # The budget cancels this await; the shield keeps the handler task
+            # alive so the abandon path can stop it deliberately and report it.
+            # An outer cancellation arrives as CancelledError instead, which is
+            # how shutdown stays distinguishable from a budget that ran out.
+            async with asyncio.timeout(self.resolve_budget(queue, entry)):
+                result = await asyncio.shield(handler_task)
+        except TimeoutError:
+            await self._abandon_over_budget(queue, entry, handler_task)
         except asyncio.CancelledError:
             await self._finish_cancellation(queue, entry, handler_task)
             raise
@@ -175,6 +214,25 @@ class AsyncQueueWorker:
             await self._record_failure(queue, entry, exc)
         else:
             await self._record_result(queue, entry, result)
+
+    async def _abandon_over_budget(
+        self,
+        queue: BaseQueue,
+        entry: QueueEntry,
+        handler_task: asyncio.Task[object],
+    ) -> None:
+        """Stop a handler that ran out of time and record it as timed out.
+
+        Reached both when a dispatch exceeds its budget and when a handler
+        ignores shutdown cancellation for longer than the grace period: in
+        either case the handler stopped answering, which `cancelled` would not
+        distinguish from an orderly stop.
+        """
+        handler_task.cancel()
+        handler_task.add_done_callback(
+            lambda task: self._log_late_handler_outcome(entry, task)
+        )
+        await self._record_terminal(queue, entry, queue.mark_timed_out)
 
     async def _finish_cancellation(
         self,
@@ -187,11 +245,7 @@ class AsyncQueueWorker:
                 asyncio.shield(handler_task), self._cancellation_grace_period
             )
         except TimeoutError:
-            handler_task.cancel()
-            handler_task.add_done_callback(
-                lambda task: self._log_late_handler_outcome(entry, task)
-            )
-            await self._record_terminal(queue, entry, queue.mark_cancelled)
+            await self._abandon_over_budget(queue, entry, handler_task)
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
             await self._record_failure(queue, entry, exc)
         else:
@@ -280,6 +334,8 @@ class AsyncQueueWorker:
                 self._failed_count += 1
             case QueueEntryStatus.CANCELLED:
                 self._cancelled_count += 1
+            case QueueEntryStatus.TIMEOUT:
+                self._timed_out_count += 1
             case _:
                 return
         self._active_entry_id = None
@@ -315,5 +371,6 @@ class AsyncQueueWorker:
                 "queue_worker_succeeded_count": snapshot.succeeded_count,
                 "queue_worker_failed_count": snapshot.failed_count,
                 "queue_worker_cancelled_count": snapshot.cancelled_count,
+                "queue_worker_timed_out_count": snapshot.timed_out_count,
             },
         )

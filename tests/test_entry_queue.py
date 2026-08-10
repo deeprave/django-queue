@@ -88,6 +88,37 @@ class TestMemoryQueueEntries:
         assert cancelled.status is QueueEntryStatus.CANCELLED
         assert cancelled.finished_at == FIXED_CLOCK_TIME
 
+    def test_records_a_timeout_as_a_terminal_outcome(self, queue):
+        """Distinct from cancellation: the handler never answered."""
+        entry_id = queue.enqueue("work")
+        queue.mark_running(entry_id)
+
+        timed_out = queue.mark_timed_out(entry_id)
+
+        assert timed_out.status is QueueEntryStatus.TIMEOUT
+        assert timed_out.finished_at == FIXED_CLOCK_TIME
+
+    def test_refuses_to_move_a_timed_out_entry_on(self, queue):
+        entry_id = queue.enqueue("work")
+        queue.mark_running(entry_id)
+        queue.mark_timed_out(entry_id)
+
+        with pytest.raises(ValueError, match="timeout"):
+            queue.mark_succeeded(entry_id, "too late")
+
+    def test_persists_an_execution_budget_given_at_enqueue(self, queue):
+        entry_id = queue.enqueue("work", timeout_seconds=2.5)
+
+        assert queue.get_entry(entry_id).timeout_seconds == 2.5
+
+    def test_carries_no_budget_when_none_was_given(self, queue):
+        assert queue.get_entry(queue.enqueue("work")).timeout_seconds is None
+
+    def test_rejects_a_budget_on_the_item_oriented_api(self, queue):
+        """`add` stores raw values and dispatches nothing, so a budget is meaningless."""
+        with pytest.raises(TypeError):
+            queue.add("work", timeout_seconds=2.5)
+
     def test_uses_its_configured_entry_subclass_for_lifecycle_operations(self, queue):
         queue.entry_class = CustomQueueEntry
 

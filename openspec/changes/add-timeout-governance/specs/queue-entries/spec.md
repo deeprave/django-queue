@@ -4,8 +4,11 @@
 The system SHALL represent entries in Python as frozen value objects and SHALL
 serialise them as JSON objects for durable storage. Entry records MUST contain
 `id`, `queue`, `status`, `queued_at`, `dispatched_at`, `finished_at`, `payload`,
-`result`, `error`, and `timeout` fields. The `timeout` field carries that entry's
-execution budget in seconds, or nothing when the entry was enqueued without one.
+`result`, `error`, and `timeout_seconds` fields. The `timeout_seconds` field
+carries that entry's execution budget, or nothing when the entry was enqueued
+without one. It is named for what it holds: a duration, not the instant at which
+the entry expires, which is the one confusion the lifecycle instants beside it
+make easy.
 
 Lifecycle timestamps SHALL be held as `ClockTime` values and stored as a float
 count of seconds since the Unix epoch. The durable representation MUST NOT
@@ -56,9 +59,13 @@ this set when restoring an entry from its durable representation.
   `finished_at` timestamp
 
 #### Scenario: Record cancelled handling
-- **WHEN** a worker stops an active handler that complies with cancellation
+- **WHEN** a caller marks a running entry cancelled through the backend contract
 - **THEN** the entry is stored with status `cancelled` and a non-null
   `finished_at` timestamp
+- **AND** no worker path produces this status: a handler that finishes during
+  shutdown records its own outcome and one that overruns records `timeout`, so
+  `cancelled` is reserved for a deliberate cancellation the queue does not yet
+  offer
 
 #### Scenario: Record a timed-out handling
 - **WHEN** a worker abandons a handler that exceeded its execution budget

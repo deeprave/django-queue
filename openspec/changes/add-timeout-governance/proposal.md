@@ -16,8 +16,8 @@ that is still making progress to say so.
 - Bound normal dispatch with a per-entry execution budget, resolved from the
   worker override, then the entry's own budget, then the queue default, then
   600 seconds.
-- Accept an optional `timeout` keyword on `enqueue`, carried on the entry and
-  persisted with it.
+- Accept an optional `timeout_seconds` keyword on `enqueue`, carried on the
+  entry and persisted with it.
 - Provide a heartbeat call a handler makes to extend its budget while it is
   still making progress, so long but live work is not killed.
 - Count `timeout` outcomes separately in worker snapshots and structured logs.
@@ -31,8 +31,9 @@ that is still making progress to say so.
 
 ### Modified Capabilities
 
-- `queue-entries`: Add the `timeout` terminal status and an optional per-entry
-  execution budget to the entry record and its durable representation.
+- `queue-entries`: Add the `timeout` terminal status and an optional
+  `timeout_seconds` execution budget to the entry record and its durable
+  representation.
 - `async-queue-workers`: Bound handler execution by the resolved budget, and
   record grace-period expiry as `timeout` rather than `cancelled`.
 - `worker-observability`: Count timeout outcomes separately.
@@ -40,8 +41,9 @@ that is still making progress to say so.
 ## Impact
 
 Adds a status to the entry lifecycle, a field to the entry record and its wire
-format, `mark_timed_out` to the backend contract, a budget keyword to `enqueue`,
-a `TIMEOUT` queue setting, a worker-level override, and a public heartbeat call.
+format, `mark_timed_out` to the backend contract, a `timeout_seconds` keyword to
+`enqueue`, a `TIMEOUT` queue setting, a worker-level override, and a public
+heartbeat call.
 
 This change assumes `adopt-clock-time` archives before it, since the entry and
 worker requirements it modifies are the ones that change carries forward, and

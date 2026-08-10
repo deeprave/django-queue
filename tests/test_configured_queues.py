@@ -253,3 +253,32 @@ class TestConfiguredQueueInitialization:
         else:
             with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
                 django_queue.initialise_queues(handler)
+
+    @pytest.mark.parametrize("budget", [0, -1, "30", True, None])
+    def test_rejects_an_invalid_queue_timeout(self, budget):
+        """A bad budget fails at settings initialisation, not at first dispatch."""
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "TIMEOUT": budget,
+                }
+            }
+        )
+
+        with pytest.raises(InvalidQueueBackendError, match="default.*TIMEOUT"):
+            django_queue.initialise_queues(handler)
+
+    def test_accepts_a_positive_queue_timeout(self):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "TIMEOUT": 30,
+                }
+            }
+        )
+
+        django_queue.initialise_queues(handler)
+
+        assert handler["default"].timeout_seconds == 30

@@ -198,8 +198,12 @@ assert entry.status == "queued"
 ```
 
 An entry transitions through `queued`, `running`, and one terminal status:
-`succeeded`, `failed`, or `cancelled`. Failed entries expose only an exception
-type and safe message; the worker logs the traceback for diagnosis.
+`succeeded`, `failed`, or `timeout`. Failed entries expose only an exception
+type and safe message; the worker logs the traceback for diagnosis. A fourth
+terminal status, `cancelled`, exists on the backend contract but no worker path
+produces it: a handler that finishes during shutdown is recorded by what it
+returned, and one that overruns is recorded as `timeout`. It is reserved for a
+deliberate per-entry cancellation the queue does not yet offer.
 
 ### Asynchronous worker
 
@@ -236,6 +240,54 @@ best-effort attempt to record a safe `QueuePersistenceError` failure outcome.
 If it cannot confirm either terminal outcome, the worker raises
 `QueuePersistenceError` rather than accepting further entries.
 
+### Execution budgets
+
+Every dispatch runs under a budget: a count of seconds after which the worker
+stops waiting, cancels the handler, and records the entry as `timeout`. The
+worker then moves to the next entry, so one handler that never returns cannot
+starve an alias. A budget is always in force — an unbounded handler is the
+defect the budget exists to remove — so there is no value meaning unlimited.
+
+The budget is resolved per dispatch, taking the first of these that is set:
+
+1. the worker's `timeout_seconds` override, which applies to every alias it serves
+2. the entry's own `timeout_seconds`, set when it was enqueued
+3. the alias's `TIMEOUT` setting
+4. 600 seconds
+
+```python
+QUEUES = {
+    "default": {
+        "BACKEND": "django_queue.backends.RedisQueueJson",
+        "LOCATION": "redis://localhost:6379/12",
+        "TIMEOUT": 30,
+    },
+}
+```
+
+`TIMEOUT` is a positive number of seconds, validated when settings are
+initialised rather than at first dispatch, so a bad value fails at startup.
+
+A single piece of work that legitimately takes longer carries its own budget:
+
+```python
+entry_id = queue.enqueue({"request_id": 42}, timeout_seconds=120)
+```
+
+The budget expires on the event loop's monotonic clock, while the entry's
+timestamps are read from the queue's own clock. They are deliberately
+independent: the budget decides when to stop, and the entry records what
+happened. A timed-out entry's `ran_for` is a wall-clock measurement and will not
+equal the budget that expired.
+
+Custom entry-capable backends must implement `mark_timed_out(entry_id)`
+alongside the other terminal transitions, moving a `running` entry to `timeout`
+and setting `finished_at`.
+
+The shutdown grace period is separate from the budget: it bounds how long a
+cancelled worker waits for an active handler, and its expiry is also recorded as
+`timeout`.
+
 ### Worker observability
 
 Each `AsyncQueueWorker` has a generated UUIDv7 identity and exposes a frozen,
@@ -261,7 +313,9 @@ structured fields are prefixed with `queue_worker_` and include the same worker
 ID, running state, registered queue aliases, active queue name and entry ID,
 start time, dispatch count, and outcome counters as the snapshot. Counters advance
 only after the corresponding terminal entry state has been confirmed in the
-backend.
+backend. `timed_out_count` is counted separately from `cancelled_count`, so a
+handler abandoned on its budget is distinguishable from one the queue was told
+to cancel.
 
 `started_at` comes from the worker's clock, which its queue supplies when it
 creates the worker, so a worker's recorded time and the entries it dispatches

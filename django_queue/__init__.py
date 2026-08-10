@@ -58,6 +58,8 @@ class QueueHandler(BaseConnectionHandler):
             _resolve_extension_class(
                 alias, "ENTRY_CLASS", configured_options.get("ENTRY_CLASS"), QueueEntry
             )
+            if "TIMEOUT" in configured_options:
+                _resolve_timeout(alias, configured_options["TIMEOUT"])
             configured_queues[alias] = configured_options
         return configured_queues
 
@@ -68,6 +70,11 @@ class QueueHandler(BaseConnectionHandler):
         location = params.pop("LOCATION", "")
         params.pop("HANDLER", None)
         worker_class = params.pop("WORKER", None)
+        timeout_seconds = (
+            _resolve_timeout(alias, params.pop("TIMEOUT"))
+            if "TIMEOUT" in params
+            else None
+        )
         entry_class = _resolve_extension_class(
             alias, "ENTRY_CLASS", params.pop("ENTRY_CLASS", None), QueueEntry
         )
@@ -84,6 +91,7 @@ class QueueHandler(BaseConnectionHandler):
                 f"Queue alias '{alias}' has invalid backend options: {exc}"
             ) from exc
         queue.entry_class = entry_class
+        queue.timeout_seconds = timeout_seconds
         if worker_class is not None:
             queue.worker_class = worker_class
         queue_created.send(self, name=params.get("queue_name", alias), instance=queue)
@@ -105,6 +113,22 @@ def initialise_queues(queue_handler: QueueHandler | None = None) -> QueueHandler
 
 def close_queues(**kwargs):
     queues.close_all()
+
+
+def _resolve_timeout(alias: str, value: object) -> float:
+    """Validate an alias's execution budget, in seconds.
+
+    A budget is a positive count of seconds. There is no value meaning
+    unlimited: an unbounded handler is the defect the budget exists to remove,
+    so a queue that wants no ceiling omits the setting and takes the default.
+    """
+    # isinstance so the checker narrows, then bool excluded explicitly: a flag
+    # is an int in Python but not a count of seconds.
+    if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
+        raise InvalidQueueBackendError(
+            f"Queue alias '{alias}' TIMEOUT must be a positive number of seconds"
+        )
+    return value
 
 
 def _resolve_extension_class(
