@@ -139,13 +139,23 @@ Raised by the collated review after the elapsed-time work and taken before merge
 - [x] 8.4 Replace the clock tests' fixed-iteration waits with a deadline, so a
   loaded machine cannot fail a test by scheduling a daemon thread slowly.
 
-## 9. Documentation and validation
+## 9. Fifth review round
 
-- [x] 9.1 Sweep for any remaining instant that is still a datetime or an ISO
+- [x] 9.1 Narrow the background refresh's handler to `QueueClockError`, so an
+  untrustworthy clock is handled while a genuine bug still surfaces. The retry
+  contract rests on the `finally`, not the handler, and a test now pins that an
+  unexpected failure still clears the flag and retries.
+- [x] 9.2 Extend the malformed-record cases to `dispatched_at`, `finished_at`
+  and a wrong-typed `queue`, so every lifecycle field and identifier is shown to
+  take the one error path naming it.
+
+## 10. Documentation and validation
+
+- [x] 10.1 Sweep for any remaining instant that is still a datetime or an ISO
   string, and confirm durations — the grace period, refresh interval and drift
   tolerance — were left as plain second counts.
-- [x] 9.2 Update the README for the new instant type on the clock protocol, the
+- [x] 10.2 Update the README for the new instant type on the clock protocol, the
   entry lifecycle fields and the worker snapshot, the durable float form, and the
   queue `clock` accessor; correct its statement that the run start time is local
   UTC process metadata.
-- [x] 9.3 Run Ruff, ty, the full pytest suite, and strict OpenSpec validation.
+- [x] 10.3 Run Ruff, ty, the full pytest suite, and strict OpenSpec validation.

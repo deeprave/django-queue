@@ -157,6 +157,29 @@ class TestRedisQueueClock:
             "Clock did not retry after the next refresh interval",
         )
 
+    def test_retries_after_a_background_refresh_raises_something_unexpected(self):
+        """The retry contract rests on the finally, not on what is caught."""
+        redis = ExplodingRefreshRedis()
+        monotonic = FakeMonotonic(100.0)
+        clock = RedisQueueClock(
+            redis, monotonic=monotonic, utcnow=lambda: ClockTime(1_785_800_000)
+        )
+        clock.now()
+
+        monotonic.value = 700.0
+        clock.now()
+        wait_until(
+            lambda: not clock.refreshing,
+            "An unexpected failure left the refresh flag set",
+        )
+
+        monotonic.value = 1_300.0
+        clock.now()
+        wait_until(
+            lambda: redis.time_calls == 3,
+            "Clock did not retry after an unexpected refresh failure",
+        )
+
     def test_retains_the_last_good_offset_after_a_background_redis_refresh_failure(
         self,
     ):
@@ -246,6 +269,19 @@ class MalformedRefreshRedis:
 class MalformedTime:
     def time(self):
         return "1785800000", "0"
+
+
+class ExplodingRefreshRedis:
+    """Calibrates once, then fails in a way no clock handler expects."""
+
+    def __init__(self):
+        self.time_calls = 0
+
+    def time(self):
+        self.time_calls += 1
+        if self.time_calls == 1:
+            return 1_785_800_000, 0
+        raise RuntimeError("not a clock error")
 
 
 class FailingRedisTime:

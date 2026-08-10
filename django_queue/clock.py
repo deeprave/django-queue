@@ -246,12 +246,15 @@ class RedisQueueClock:
 
     def _refresh_in_background(self) -> None:
         # Any failure retains the last good offset and retries at the next
-        # interval, so the flag is cleared in a finally: a refresh that died
-        # without clearing it would stop this clock refreshing for good, while
-        # every reported time still looked ordinary.
+        # interval, and the flag is cleared in a finally rather than by the
+        # handler: a refresh that died without clearing it would stop this clock
+        # refreshing for good, while every reported time still looked ordinary.
+        # That makes the retry contract independent of what is caught here, so
+        # only an untrustworthy clock is handled and anything else -- a genuine
+        # bug in calibration -- still surfaces rather than becoming a warning.
         try:
             calibration = self._read_calibration()
-        except Exception as exc:
+        except QueueClockError as exc:
             logger.warning(
                 "Unable to refresh Redis queue time; retaining the last known offset",
                 exc_info=exc,

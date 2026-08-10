@@ -133,8 +133,12 @@ class TestQueueEntry:
         [
             ("id", "not-a-uuid"),
             ("status", "bogus"),
+            ("queue", 42),
             ("queued_at", "not-a-number"),
             ("queued_at", -1.0),
+            ("dispatched_at", "not-a-number"),
+            ("dispatched_at", -1.0),
+            ("finished_at", "not-a-number"),
         ],
     )
     def test_rejects_a_malformed_durable_record_naming_the_field(self, field, value):
