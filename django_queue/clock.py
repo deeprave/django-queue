@@ -135,6 +135,9 @@ def elapsed_time(start: ClockTime | None, end: ClockTime | None) -> float | None
     *end* before *start*, and a negative elapsed time is not a smaller duration
     but a meaningless one.
     """
+    for name, value in (("start", start), ("end", end)):
+        if value is not None and not isinstance(value, ClockTime):
+            raise TypeError(f"Elapsed time {name} must be a ClockTime or None")
     if start is None or end is None:
         return None
     seconds = end - start
@@ -221,7 +224,12 @@ class RedisQueueClock:
         except Exception as exc:
             raise QueueClockError("Redis TIME is unavailable") from exc
 
-        offset = ClockTime.from_timeval(seconds, microseconds) - local_time
+        try:
+            offset = ClockTime.from_timeval(seconds, microseconds) - local_time
+        except (TypeError, ValueError) as exc:
+            raise QueueClockError(
+                f"Redis TIME reported an unusable instant: {seconds!r}, {microseconds!r}"
+            ) from exc
         if abs(offset) > MAX_CLOCK_DRIFT_SECONDS:
             raise QueueClockError(
                 "Redis and local UTC clocks exceed the maximum permitted drift"

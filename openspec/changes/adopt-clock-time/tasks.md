@@ -127,13 +127,23 @@ Raised by the collated review after the elapsed-time work and taken before merge
 - [x] 7.6 Anchor the malformed-record test's match so a message that stops
   naming the field fails it.
 
-## 8. Documentation and validation
+## 8. Fourth review round
 
-- [x] 8.1 Sweep for any remaining instant that is still a datetime or an ISO
+- [x] 8.1 Report an unusable initial Redis `TIME` reply as a `QueueClockError`,
+  so unavailability, drift and a malformed pair all fail the one way callers
+  are told to catch.
+- [x] 8.2 Test `elapsed_time` directly, and reject anything that is not an
+  instant rather than silently measuring between two numbers.
+- [x] 8.3 Assert in the `runqueues` tests that an activated worker reports its
+  queue's clock, pinning the shared basis where workers are really built.
+
+## 9. Documentation and validation
+
+- [x] 9.1 Sweep for any remaining instant that is still a datetime or an ISO
   string, and confirm durations — the grace period, refresh interval and drift
   tolerance — were left as plain second counts.
-- [x] 8.2 Update the README for the new instant type on the clock protocol, the
+- [x] 9.2 Update the README for the new instant type on the clock protocol, the
   entry lifecycle fields and the worker snapshot, the durable float form, and the
   queue `clock` accessor; correct its statement that the run start time is local
   UTC process metadata.
-- [x] 8.3 Run Ruff, ty, the full pytest suite, and strict OpenSpec validation.
+- [x] 9.3 Run Ruff, ty, the full pytest suite, and strict OpenSpec validation.

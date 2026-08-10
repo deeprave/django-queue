@@ -258,6 +258,24 @@ class TestRunQueuesCommand:
         assert len(activations) == 1
         assert activations[0].queue.resolve_worker_class("default") is AsyncQueueWorker
 
+    def test_activates_each_worker_on_its_own_queue_clock(self, monkeypatch):
+        """The shared time basis has to hold where workers are really built."""
+        queues = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "HANDLER": "tests.test_runqueues.handle_entry",
+                    "LOCATION": "",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", queues)
+        activation = Command()._create_workers()[0]
+
+        worker = activation.queue.create_worker(activation.alias, activation.handler)
+
+        assert worker.clock is activation.queue.clock
+
     def test_continues_healthy_workers_after_another_worker_fails(self, caplog):
         asyncio.run(self._continues_healthy_workers_after_another_worker_fails(caplog))
 

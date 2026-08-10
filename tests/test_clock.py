@@ -101,6 +101,17 @@ class TestRedisQueueClock:
         with pytest.raises(QueueClockError, match="drift"):
             clock.now()
 
+    def test_raises_a_clock_error_when_the_initial_redis_time_is_malformed(self):
+        """Every untrustworthy initial calibration reports the same way."""
+        clock = RedisQueueClock(
+            MalformedTime(), utcnow=lambda: ClockTime(1_785_800_000)
+        )
+
+        with pytest.raises(QueueClockError, match="unusable") as raised:
+            clock.now()
+
+        assert isinstance(raised.value.__cause__, TypeError)
+
     def test_raises_when_initial_redis_time_is_unavailable(self):
         clock = RedisQueueClock(FailingRedisTime())
 
@@ -224,6 +235,11 @@ class MalformedRefreshRedis:
         self.time_calls += 1
         if self.time_calls == 1:
             return 1_785_800_000, 0
+        return "1785800000", "0"
+
+
+class MalformedTime:
+    def time(self):
         return "1785800000", "0"
 
 
