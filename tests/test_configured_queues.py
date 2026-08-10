@@ -254,7 +254,9 @@ class TestConfiguredQueueInitialization:
             with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
                 django_queue.initialise_queues(handler)
 
-    @pytest.mark.parametrize("budget", [0, -1, "30", True, None])
+    @pytest.mark.parametrize(
+        "budget", [0, -1, "30", True, None, float("nan"), float("inf")]
+    )
     def test_rejects_an_invalid_queue_timeout(self, budget):
         """A bad budget fails at settings initialisation, not at first dispatch."""
         handler = django_queue.QueueHandler(

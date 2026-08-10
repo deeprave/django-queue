@@ -29,13 +29,19 @@ value.
 - **THEN** the worker enforces its override
 
 #### Scenario: Reject a budget that is not a number
-- **WHEN** a queue setting, an `enqueue` call, or a worker override supplies a
-  budget that is not a number
+- **WHEN** an `enqueue` call or a worker override supplies a budget that is not
+  a number
 - **THEN** the system raises a type error naming the offending value
 
+#### Scenario: Reject a queue setting that is not a valid budget
+- **WHEN** an alias `TIMEOUT` setting is not a number, or is zero, negative,
+  infinite, or NaN
+- **THEN** initialising the settings raises the configuration error class,
+  naming the alias and the offending value, rather than a type or value error
+
 #### Scenario: Reject a budget that is not finite and positive
-- **WHEN** a queue setting, an `enqueue` call, or a worker override supplies a
-  numeric budget that is zero, negative, infinite, or NaN
+- **WHEN** an `enqueue` call or a worker override supplies a numeric budget that
+  is zero, negative, infinite, or NaN
 - **THEN** the system raises a value error naming the offending value
 
 #### Scenario: Reject a budget restored from a durable record
