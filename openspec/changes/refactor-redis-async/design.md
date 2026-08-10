@@ -165,9 +165,10 @@ the lease is Redis wall time.
   synchronous client it replaces] → Accepted. The producer path is one command;
   the worker path is the hot one and it becomes strictly cheaper. A project that
   enqueues heavily from async views can call `aenqueue` and pay nothing.
-- [Custom `BaseQueue` subclasses break] → **BREAKING** and stated in the
-  proposal. The package has no released consumers, and the README documents the
-  contract for custom backends.
+- [A custom backend is written against the asynchronous contract] → The README
+  documents that contract, and the synchronous names come from the base class
+  rather than from each backend, so a custom backend implements one surface
+  rather than two.
 - [Memory backends carry `async def` with nothing to await] → Accepted, as the
   price of one contract. A mixed contract would keep `to_thread` in the worker,
   which is the thing being removed.
@@ -178,17 +179,15 @@ the lease is Redis wall time.
 - [`sync_to_async` on `apoll` reintroduces a thread] → Accepted and confined to
   one item-oriented method that blocks by design. No worker path reaches it.
 
-## Migration Plan
+## Implementation Order
 
 The conversion lands bottom-up so the suite is meaningful at each step: the
 `BaseQueue` contract and the memory backends first, then the Redis backends onto
 `redis.asyncio`, then the three call sites that shed `to_thread`, then the
 heartbeat. Synchronous wrappers are added with the contract, so existing
 synchronous tests keep passing throughout and act as the regression net for the
-producer API.
-
-There is nothing to roll back in storage: the wire format, the entry record and
-the Redis key layout are untouched. Rollback is reverting the change.
+producer API. The wire format, the entry record and the Redis key layout are
+untouched, so nothing outside the package's own code is affected.
 
 ## Open Questions
 

@@ -44,9 +44,9 @@ it.
   the heartbeat by that change, and this change's requirement says so rather
   than implying a guarantee it does not provide. Nothing can reclaim an entry
   today, so a budget-only heartbeat is correct now and incomplete later.
-- **BREAKING** for custom backends: a third-party `BaseQueue` subclass must
-  implement the asynchronous methods. The synchronous names it implements today
-  are no longer the extension point.
+- The extension point for a custom backend becomes the asynchronous methods.
+  A `BaseQueue` subclass implements those; the synchronous names come from the
+  base class and are not overridden.
 
 ## Capabilities
 
@@ -90,5 +90,5 @@ Dependencies: `redis.asyncio` ships in the already-pinned redis 8.1.0, and
 added.
 
 Public API: every existing synchronous name keeps working, so application code
-that enqueues from a synchronous view needs no change. Custom backend
-implementations are the breaking surface. The package has no released consumers.
+that enqueues from a synchronous view needs no change. A custom backend is
+written against the asynchronous contract.
