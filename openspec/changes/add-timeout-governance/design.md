@@ -22,7 +22,8 @@ below is new code.
 - Let a caller set a budget when enqueueing work, a queue supply a default, and
   a worker override both.
 - Let a handler that is still working extend its own budget rather than be
-  killed for taking a long time legitimately.
+  killed for taking a long time legitimately. **Deferred to UT-361** — see the
+  heartbeat decision below for why it cannot land on synchronous backends.
 
 **Non-Goals:**
 
@@ -74,7 +75,10 @@ the queue default, which falls back to 600 seconds. A worker is the component
 that knows the runtime it is actually operating in, so it takes precedence over
 what a producer asked for. A resolved budget is always a positive number of
 seconds; there is no "unlimited" value, because an unbounded handler is the
-defect this change exists to remove.
+defect this change exists to remove. That rules out infinity as much as it rules
+out zero, so the shared `validate_budget` requires a finite positive number and
+NaN is excluded by name — it compares false against every bound, so a magnitude
+test alone would admit it.
 
 The budget is carried on the entry so it survives enqueue, is visible in the
 durable record, and is available to whichever worker dispatches it.
@@ -83,9 +87,8 @@ durable record, and is available to whichever worker dispatches it.
 
 `enqueue` creates an identified entry and gains a `timeout_seconds` keyword.
 `add` is the item-oriented API: it stores raw values, creates no entry, and is
-never
-dispatched to a handler, so it has nothing to which a budget could apply and
-gains no keyword.
+never dispatched to a handler, so it has nothing to which a budget could apply
+and gains no keyword.
 
 ### The budget is named for the duration it is
 
@@ -106,7 +109,24 @@ cannot move its deadline once started. On expiry the handler task is cancelled
 and the entry is marked timed out, mirroring how grace-period expiry already
 handles a handler that will not stop.
 
+The context object must be retained rather than discarded, because catching
+`TimeoutError` is not enough to know the deadline is what raised it. Since 3.11
+`TimeoutError` *is* `asyncio.TimeoutError`, so a handler that wraps its own I/O
+in a deadline — `wait_for`, an HTTP client, a database driver — raises the same
+class. Only `expired()` on the context distinguishes them; without it an
+ordinary handler failure is recorded as never having answered and its error is
+discarded. The grace period uses `asyncio.timeout` rather than `wait_for` for
+exactly this reason, so both deadlines are told apart the same way.
+
 ### The heartbeat is a module-level call, not a handler argument
+
+**Deferred to UT-361.** The reasoning below is settled and kept here because it
+was reached during this change, but the requirement and its tasks belong to the
+change that can implement them. A heartbeat must extend the backend's lease as
+well as the loop deadline and verify the calling handler still owns that lease;
+neither is safe across the `to_thread` hops the synchronous backends require,
+and `Timeout.reschedule` mutates a `TimerHandle` that is not thread-safe. It
+follows the async backend conversion.
 
 A handler is `Callable[[QueueEntry], Awaitable[object]]`. Threading a heartbeat
 object through that signature would change the handler contract and force it on

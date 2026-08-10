@@ -162,7 +162,7 @@ class TestQueueEntry:
     @pytest.mark.parametrize("budget", ["2.5", True, object()])
     def test_rejects_an_execution_budget_that_is_not_a_number(self, budget):
         """A budget is a count of seconds, like every other duration here."""
-        with pytest.raises(TypeError, match="timeout_seconds"):
+        with pytest.raises(TypeError, match="Execution budget"):
             QueueEntry(
                 id=FIXED_UUID7,
                 queue="requests",
@@ -175,6 +175,30 @@ class TestQueueEntry:
                 error=None,
                 timeout_seconds=budget,
             )
+
+    @pytest.mark.parametrize("budget", [0, -1, -2.5, float("nan"), float("inf")])
+    def test_rejects_an_execution_budget_that_is_not_finite_and_positive(self, budget):
+        """Zero abandons a handler the moment it starts; infinity never does."""
+        with pytest.raises(ValueError, match="Execution budget"):
+            QueueEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=FIXED_CLOCK_TIME,
+                dispatched_at=None,
+                finished_at=None,
+                payload=None,
+                result=None,
+                error=None,
+                timeout_seconds=budget,
+            )
+
+    def test_rejects_a_restored_record_carrying_an_invalid_budget(self):
+        """A bad budget persisted before this guard must not restore silently."""
+        stored = QueueEntry.create(queue="requests", payload=None).to_dict()
+
+        with pytest.raises(ValueError, match="Queue entry record is invalid"):
+            QueueEntry.from_dict(stored | {"timeout_seconds": 0})
 
     def test_carries_no_budget_when_enqueued_without_one(self):
         entry = QueueEntry.create(queue="requests", payload=None)

@@ -756,9 +756,14 @@ class TestBudgetResolution:
 
         assert worker.resolve_budget(queue, self._entry(queue, 5)) == 2
 
-    @pytest.mark.parametrize("budget", [0, -1, "30", True])
-    def test_rejects_a_worker_override_that_is_not_a_positive_number(self, budget):
-        with pytest.raises(ValueError, match="timeout_seconds"):
+    @pytest.mark.parametrize("budget", ["30", True, object()])
+    def test_rejects_a_worker_override_that_is_not_a_number(self, budget):
+        with pytest.raises(TypeError, match="Execution budget"):
+            AsyncQueueWorker({}, {}, timeout_seconds=budget)
+
+    @pytest.mark.parametrize("budget", [0, -1, float("nan"), float("inf")])
+    def test_rejects_a_worker_override_that_is_not_finite_and_positive(self, budget):
+        with pytest.raises(ValueError, match="Execution budget"):
             AsyncQueueWorker({}, {}, timeout_seconds=budget)
 
 
@@ -803,6 +808,123 @@ class TestBudgetEnforcement:
         assert queue.get_entry(hung_id).status is QueueEntryStatus.TIMEOUT
         assert queue.get_entry(hung_id).finished_at is not None
         assert queue.get_entry(next_id).status is QueueEntryStatus.SUCCEEDED
+
+    def test_enforces_a_budget_carried_on_the_entry(self):
+        asyncio.run(self._enforces_a_budget_carried_on_the_entry())
+
+    async def _enforces_a_budget_carried_on_the_entry(self):
+        """The budget a producer set at enqueue, with no worker override."""
+        queue = MemoryQueue(queue_name="requests")
+        entry_id = queue.enqueue("work", timeout_seconds=0.05)
+
+        async def handle(entry):
+            await asyncio.Event().wait()
+
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
+        task = asyncio.create_task(worker.run())
+        await self._wait_for_snapshot_count(worker, "timed_out_count", 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert queue.get_entry(entry_id).status is QueueEntryStatus.TIMEOUT
+
+    def test_enforces_the_queues_configured_budget(self):
+        asyncio.run(self._enforces_the_queues_configured_budget())
+
+    async def _enforces_the_queues_configured_budget(self):
+        """The alias TIMEOUT setting, with neither entry nor worker overriding."""
+        queue = MemoryQueue(queue_name="requests")
+        queue.timeout_seconds = 0.05
+        entry_id = queue.enqueue("work")
+
+        async def handle(entry):
+            await asyncio.Event().wait()
+
+        worker = AsyncQueueWorker(
+            {"requests": queue}, {"requests": handle}, idle_delay=0.001
+        )
+        task = asyncio.create_task(worker.run())
+        await self._wait_for_snapshot_count(worker, "timed_out_count", 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert queue.get_entry(entry_id).status is QueueEntryStatus.TIMEOUT
+
+    def test_a_handler_raising_timeout_error_is_a_failure_not_an_expiry(self):
+        asyncio.run(self._a_handler_raising_timeout_error_is_a_failure_not_an_expiry())
+
+    async def _a_handler_raising_timeout_error_is_a_failure_not_an_expiry(self):
+        """TimeoutError is asyncio.TimeoutError, so the two must be told apart.
+
+        A handler wrapping its own I/O in a deadline raises the same class the
+        budget expires with. Only the budget actually running out means the
+        handler never answered.
+        """
+        queue = MemoryQueue(queue_name="requests")
+        entry_id = queue.enqueue("work")
+
+        async def handle(entry):
+            raise TimeoutError("upstream did not answer")
+
+        worker = AsyncQueueWorker(
+            {"requests": queue},
+            {"requests": handle},
+            idle_delay=0.001,
+            timeout_seconds=30,
+        )
+        task = asyncio.create_task(worker.run())
+        await self._wait_for_snapshot_count(worker, "failed_count", 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        entry = queue.get_entry(entry_id)
+        assert entry.status is QueueEntryStatus.FAILED
+        # the handler's own error survives rather than being discarded
+        assert entry.error == {
+            "type": "TimeoutError",
+            "message": "upstream did not answer",
+        }
+        assert worker.snapshot.timed_out_count == 0
+
+    def test_a_handler_raising_timeout_error_during_shutdown_is_a_failure(self):
+        asyncio.run(
+            self._a_handler_raising_timeout_error_during_shutdown_is_a_failure()
+        )
+
+    async def _a_handler_raising_timeout_error_during_shutdown_is_a_failure(self):
+        """The grace period expires as TimeoutError too, and is told apart."""
+        queue = MemoryQueue(queue_name="requests")
+        entry_id = queue.enqueue("work")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(entry):
+            started.set()
+            await release.wait()
+            raise TimeoutError("upstream did not answer")
+
+        worker = AsyncQueueWorker(
+            {"requests": queue},
+            {"requests": handle},
+            idle_delay=0.001,
+            cancellation_grace_period=5,
+        )
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        entry = queue.get_entry(entry_id)
+        assert entry.status is QueueEntryStatus.FAILED
+        assert entry.error["type"] == "TimeoutError"
+        assert worker.snapshot.timed_out_count == 0
 
     def test_leaves_a_handler_inside_its_budget_alone(self):
         asyncio.run(self._leaves_a_handler_inside_its_budget_alone())

@@ -18,8 +18,6 @@ that is still making progress to say so.
   600 seconds.
 - Accept an optional `timeout_seconds` keyword on `enqueue`, carried on the
   entry and persisted with it.
-- Provide a heartbeat call a handler makes to extend its budget while it is
-  still making progress, so long but live work is not killed.
 - Count `timeout` outcomes separately in worker snapshots and structured logs.
 
 ## Capabilities
@@ -42,8 +40,14 @@ that is still making progress to say so.
 
 Adds a status to the entry lifecycle, a field to the entry record and its wire
 format, `mark_timed_out` to the backend contract, a `timeout_seconds` keyword to
-`enqueue`, a `TIMEOUT` queue setting, a worker-level override, and a public
-heartbeat call.
+`enqueue`, a `TIMEOUT` queue setting, and a worker-level override.
+
+Extending a live budget -- the heartbeat -- is deliberately not part of this
+change. A heartbeat must extend the backend's lease as well as the loop
+deadline and verify the calling handler still owns that lease, neither of which
+is safe across the `to_thread` hops the synchronous backends require. It
+follows the async backend conversion in UT-361, and its requirement belongs to
+that change rather than this one.
 
 This change assumes `adopt-clock-time` archives before it, since the entry and
 worker requirements it modifies are the ones that change carries forward, and

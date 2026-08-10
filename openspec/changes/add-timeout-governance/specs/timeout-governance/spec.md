@@ -4,10 +4,14 @@
 The system SHALL resolve one execution budget for every dispatched entry, in
 precedence order: the worker's configured override, then the budget carried on
 the entry, then the queue's configured default, then 600 seconds. A budget MUST
-be a positive number of seconds, wherever it was supplied from. The system SHALL
-reject a budget that is not a number with a type error and one that is not
-positive with a value error, at the point it is supplied rather than when it is
-applied. There SHALL be no value meaning "unbounded".
+be a finite, strictly positive number of seconds, wherever it was supplied from.
+The system SHALL reject a budget at the point it is supplied rather than when it
+is applied: one that is not a number with a type error, and one that is zero,
+negative, infinite, or NaN with a value error. A configuration setting SHALL
+instead raise the configuration error class its layer already uses, naming the
+alias, since a settings fault is misconfiguration whichever way the value is
+wrong. There SHALL be no value meaning "unbounded", and infinity is such a
+value.
 
 #### Scenario: Fall back to the built-in default
 - **WHEN** a worker dispatches an entry whose queue, entry, and worker all
@@ -29,10 +33,15 @@ applied. There SHALL be no value meaning "unbounded".
   budget that is not a number
 - **THEN** the system raises a type error naming the offending value
 
-#### Scenario: Reject a budget that is not positive
+#### Scenario: Reject a budget that is not finite and positive
 - **WHEN** a queue setting, an `enqueue` call, or a worker override supplies a
-  numeric budget that is zero or negative
+  numeric budget that is zero, negative, infinite, or NaN
 - **THEN** the system raises a value error naming the offending value
+
+#### Scenario: Reject a budget restored from a durable record
+- **WHEN** an entry is restored from a stored record carrying a budget that is
+  not finite and positive
+- **THEN** restoration fails rather than dispatching under it
 
 ### Requirement: Accept a budget when enqueueing an entry
 The entry-oriented enqueue operation SHALL accept an optional `timeout_seconds` keyword
@@ -65,22 +74,10 @@ subsequent entries on that queue.
 - **THEN** the worker records the handler's own outcome and never marks the
   entry `timeout`
 
-### Requirement: Extend a budget from a live handler
-The system SHALL provide a heartbeat call that a handler invokes to assert
-progress, and which restarts that entry's budget from the moment of the call.
-The call MUST be usable from the handler's own coroutine and from a worker
-thread the handler delegates to. It MUST raise when invoked outside an active
-dispatch.
-
-#### Scenario: Extend a long-running handler
-- **WHEN** a handler calls the heartbeat before its budget expires and then
-  continues working
-- **THEN** the worker grants a fresh full budget from that call and does not
-  time the handler out
-
-#### Scenario: Heartbeat outside a dispatch
-- **WHEN** the heartbeat is called where no entry is being dispatched
-- **THEN** it raises an error rather than silently succeeding
+#### Scenario: A handler raises the deadline's own exception class
+- **WHEN** a handler raises `TimeoutError` of its own, within its budget
+- **THEN** the worker records the entry `failed` with that error, since only the
+  budget actually expiring means the handler never answered
 
 ### Requirement: Count timeout outcomes separately
 A worker SHALL count entries it abandoned on budget expiry separately from

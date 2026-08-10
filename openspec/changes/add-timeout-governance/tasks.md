@@ -47,7 +47,8 @@
   wraps the `asyncio.shield(handler_task)` await in `_dispatch`, and its expiry
   must be distinguishable from the outer cancellation that path already
   handles, which currently re-raises into `_finish_cancellation`.
-- [ ] 4.3 DEFERRED to UT-361. Add failing tests for the heartbeat: extending from
+- [ ] 4.3 DEFERRED to UT-361, with the requirement and design section moved
+  there too rather than left ADDED in this change's delta. Add failing tests for the heartbeat: extending from
   the handler coroutine, extending from a delegated worker thread, and raising
   outside a dispatch.
 - [ ] 4.4 DEFERRED to UT-361. Publish the active dispatch's extension callback in
@@ -92,5 +93,18 @@
   addition in the README. The heartbeat is not documented here: it ships with
   4.3/4.4 in UT-361, and documenting a call that does not exist would be worse
   than not mentioning it.
+- [x] 7.3 Address independent review. One shared `validate_budget` in
+  `entries.py` is now the single definition of a budget, called from the entry
+  record, the alias `TIMEOUT` setting, and the worker override, rejecting
+  non-numbers with `TypeError` and non-finite or non-positive values with
+  `ValueError`. Retain the `asyncio.timeout` context and consult `expired()`, so
+  a handler raising `TimeoutError` of its own is recorded `failed` with its error
+  rather than `timeout` with none -- at both the budget and the grace period,
+  which now uses `asyncio.timeout` rather than `wait_for` for that reason.
+  Enforce end to end from the entry-carried and queue-configured budgets, not
+  only the worker override. Rename `_abandon_over_budget` to
+  `_abandon_unresponsive_handler`, since its second caller has no budget.
+  Parametrise the memory entry-lifecycle tests over `MemoryPriorityQueue` so its
+  borrowed methods are exercised rather than merely present.
 - [x] 7.2 Run Ruff, ty, the full pytest suite repeatedly to confirm the new
   timing paths are not flaky, and strict OpenSpec validation.

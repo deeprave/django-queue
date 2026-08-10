@@ -7,9 +7,13 @@ from django_queue.signals import entry_enqueued
 from tests.helpers import FIXED_CLOCK_TIME, CustomQueueEntry, FixedClock
 
 
-@pytest.fixture
-def queue():
-    return MemoryQueue(queue_name="requests", clock=FixedClock())
+# MemoryPriorityQueue takes its entry methods from MemoryQueue by class-level
+# assignment rather than inheritance, so the borrow list is only as correct as
+# the coverage that calls through it. Running the lifecycle against both classes
+# catches a method bound to the wrong original, which the abstract base cannot.
+@pytest.fixture(params=[MemoryQueue, MemoryPriorityQueue], ids=["fifo", "priority"])
+def queue(request):
+    return request.param(queue_name="requests", clock=FixedClock())
 
 
 class TestMemoryQueueEntries:
@@ -114,9 +118,15 @@ class TestMemoryQueueEntries:
     def test_carries_no_budget_when_none_was_given(self, queue):
         assert queue.get_entry(queue.enqueue("work")).timeout_seconds is None
 
+    @pytest.mark.parametrize("budget", [0, -1, float("nan"), float("inf")])
+    def test_refuses_to_enqueue_an_invalid_budget(self, queue, budget):
+        """Rejected where it is supplied, not when a worker comes to apply it."""
+        with pytest.raises(ValueError, match="Execution budget"):
+            queue.enqueue("work", timeout_seconds=budget)
+
     def test_rejects_a_budget_on_the_item_oriented_api(self, queue):
         """`add` stores raw values and dispatches nothing, so a budget is meaningless."""
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match="timeout_seconds"):
             queue.add("work", timeout_seconds=2.5)
 
     def test_uses_its_configured_entry_subclass_for_lifecycle_operations(self, queue):

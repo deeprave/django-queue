@@ -6,7 +6,7 @@ from django.utils.module_loading import import_string
 
 from .backends import InvalidQueueBackendError
 from .clock import ClockTime
-from .entries import QueueEntry, QueueEntryStatus
+from .entries import QueueEntry, QueueEntryStatus, validate_budget
 from .signals import queue_created
 from .worker import AsyncQueueWorker, WorkerSnapshot
 
@@ -118,17 +118,17 @@ def close_queues(**kwargs):
 def _resolve_timeout(alias: str, value: object) -> float:
     """Validate an alias's execution budget, in seconds.
 
-    A budget is a positive count of seconds. There is no value meaning
-    unlimited: an unbounded handler is the defect the budget exists to remove,
-    so a queue that wants no ceiling omits the setting and takes the default.
+    Defers to the shared budget rule and re-raises as a configuration error:
+    a settings fault is an `ImproperlyConfigured` whichever way the value is
+    wrong, and an operator reading it wants the alias named, not the exception
+    class distinguished.
     """
-    # isinstance so the checker narrows, then bool excluded explicitly: a flag
-    # is an int in Python but not a count of seconds.
-    if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
+    try:
+        return validate_budget(value)
+    except (TypeError, ValueError) as exc:
         raise InvalidQueueBackendError(
-            f"Queue alias '{alias}' TIMEOUT must be a positive number of seconds"
-        )
-    return value
+            f"Queue alias '{alias}' TIMEOUT is invalid: {exc}"
+        ) from exc
 
 
 def _resolve_extension_class(

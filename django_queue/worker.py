@@ -13,7 +13,12 @@ from uuid import UUID
 from django_queue.backends.base import BaseQueue
 from django_queue.backends.exceptions import QueueEmptyException
 from django_queue.clock import DEFAULT_CLOCK, ClockTime, QueueClock, elapsed_time
-from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
+from django_queue.entries import (
+    QueueEntry,
+    QueueEntryStatus,
+    validate_budget,
+    validate_json_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +81,8 @@ class AsyncQueueWorker:
         clock: QueueClock | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
-        if timeout_seconds is not None and (
-            type(timeout_seconds) not in (int, float) or timeout_seconds <= 0
-        ):
-            raise ValueError(
-                "Worker timeout_seconds must be a positive number of seconds"
-            )
+        if timeout_seconds is not None:
+            validate_budget(timeout_seconds)
         self._timeout_seconds = timeout_seconds
         self._clock: QueueClock = clock or DEFAULT_CLOCK
         self._queues = {name: queues[name] for name in handlers}
@@ -203,10 +204,18 @@ class AsyncQueueWorker:
             # alive so the abandon path can stop it deliberately and report it.
             # An outer cancellation arrives as CancelledError instead, which is
             # how shutdown stays distinguishable from a budget that ran out.
-            async with asyncio.timeout(self.resolve_budget(queue, entry)):
+            async with asyncio.timeout(self.resolve_budget(queue, entry)) as budget:
                 result = await asyncio.shield(handler_task)
-        except TimeoutError:
-            await self._abandon_over_budget(queue, entry, handler_task)
+        except TimeoutError as exc:
+            # TimeoutError is asyncio.TimeoutError, so a handler that wraps its
+            # own I/O in a deadline raises the same class this budget expires
+            # with. Only the context knows which happened; without asking, an
+            # ordinary handler failure would be recorded as never having
+            # answered and its error discarded.
+            if budget.expired():
+                await self._abandon_unresponsive_handler(queue, entry, handler_task)
+            else:
+                await self._record_failure(queue, entry, exc)
         except asyncio.CancelledError:
             await self._finish_cancellation(queue, entry, handler_task)
             raise
@@ -215,18 +224,18 @@ class AsyncQueueWorker:
         else:
             await self._record_result(queue, entry, result)
 
-    async def _abandon_over_budget(
+    async def _abandon_unresponsive_handler(
         self,
         queue: BaseQueue,
         entry: QueueEntry,
         handler_task: asyncio.Task[object],
     ) -> None:
-        """Stop a handler that ran out of time and record it as timed out.
+        """Stop a handler that stopped answering and record it as timed out.
 
-        Reached both when a dispatch exceeds its budget and when a handler
-        ignores shutdown cancellation for longer than the grace period: in
-        either case the handler stopped answering, which `cancelled` would not
-        distinguish from an orderly stop.
+        Named for what its two callers have in common rather than for either
+        deadline: a dispatch may exceed its execution budget, or a handler may
+        ignore shutdown cancellation past the grace period. Neither is an
+        orderly stop, which is the distinction `cancelled` would lose.
         """
         handler_task.cancel()
         handler_task.add_done_callback(
@@ -241,11 +250,16 @@ class AsyncQueueWorker:
         handler_task: asyncio.Task[object],
     ) -> None:
         try:
-            result = await asyncio.wait_for(
-                asyncio.shield(handler_task), self._cancellation_grace_period
-            )
-        except TimeoutError:
-            await self._abandon_over_budget(queue, entry, handler_task)
+            # asyncio.timeout rather than wait_for for the same reason as the
+            # budget: only the context can tell the grace period running out
+            # from a handler raising TimeoutError of its own while it winds up.
+            async with asyncio.timeout(self._cancellation_grace_period) as grace:
+                result = await asyncio.shield(handler_task)
+        except TimeoutError as exc:
+            if grace.expired():
+                await self._abandon_unresponsive_handler(queue, entry, handler_task)
+            else:
+                await self._record_failure(queue, entry, exc)
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
             await self._record_failure(queue, entry, exc)
         else:

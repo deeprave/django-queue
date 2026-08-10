@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import MISSING, dataclass, fields
@@ -86,6 +87,30 @@ def _decode_wire_value(name: str, value: Any) -> Any:
         ) from exc
 
 
+def validate_budget(value: Any) -> float:
+    """Return *value* as an execution budget, or raise if it is not one.
+
+    The single definition of what a budget is, shared by every point one can be
+    supplied from -- the entry record, the queue's `TIMEOUT` setting, and the
+    worker override -- so the three cannot drift apart.
+
+    A budget is a finite, strictly positive count of seconds. Zero and negative
+    values would abandon a handler the moment it started, and infinity is a
+    value meaning unbounded, which is the defect a budget exists to remove. NaN
+    is neither, and compares false against every bound, so it must be excluded
+    by name rather than by comparison.
+    """
+    # `type(...) is` rather than isinstance: bool is an int, and a flag standing
+    # in for a duration is exactly the confusion worth catching here.
+    if type(value) not in (int, float):
+        raise TypeError(f"Execution budget must be a number of seconds, not {value!r}")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"Execution budget must be a finite positive number of seconds, not {value!r}"
+        )
+    return value
+
+
 def validate_json_value(value: Any) -> None:
     """Raise ``TypeError`` unless *value* can be stored in the JSON wire format."""
     try:
@@ -124,10 +149,8 @@ class QueueEntry:
             value = getattr(self, name)
             if value is not None and not isinstance(value, ClockTime):
                 raise TypeError(f"Queue entry {name} must be a ClockTime or None")
-        if self.timeout_seconds is not None and (
-            type(self.timeout_seconds) not in (int, float)
-        ):
-            raise TypeError("Queue entry timeout_seconds must be a number or None")
+        if self.timeout_seconds is not None:
+            validate_budget(self.timeout_seconds)
         if self.id.version != 7:
             raise ValueError("Queue entry IDs must be UUIDv7 values")
         if not self.queue:

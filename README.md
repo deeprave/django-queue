@@ -265,8 +265,12 @@ QUEUES = {
 }
 ```
 
-`TIMEOUT` is a positive number of seconds, validated when settings are
-initialised rather than at first dispatch, so a bad value fails at startup.
+`TIMEOUT` is a finite positive number of seconds, validated when settings are
+initialised rather than at first dispatch, so a bad value fails at startup. The
+same rule applies wherever a budget is supplied — the setting, the `enqueue`
+keyword, and the worker override all reject a non-number with `TypeError` and a
+zero, negative, infinite or NaN value with `ValueError`, at the point it is
+supplied. There is no value meaning unlimited, infinity included.
 
 A single piece of work that legitimately takes longer carries its own budget:
 
@@ -287,6 +291,11 @@ and setting `finished_at`.
 The shutdown grace period is separate from the budget: it bounds how long a
 cancelled worker waits for an active handler, and its expiry is also recorded as
 `timeout`.
+
+A handler that raises `TimeoutError` of its own — from `asyncio.wait_for`, an
+HTTP client, or a database driver — is recorded `failed` with that error, not
+`timeout`. Only the budget actually running out means the handler never
+answered.
 
 ### Worker observability
 
