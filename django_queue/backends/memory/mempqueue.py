@@ -63,4 +63,5 @@ class MemoryPriorityQueue(BaseQueue):
     mark_succeeded = MemoryQueue.mark_succeeded
     mark_failed = MemoryQueue.mark_failed
     mark_cancelled = MemoryQueue.mark_cancelled
+    mark_timed_out = MemoryQueue.mark_timed_out
     _replace_entry = MemoryQueue._replace_entry

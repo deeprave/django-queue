@@ -64,10 +64,13 @@ class MemoryQueue(BaseQueue):
             except QueueEmptyException:
                 break
 
-    def enqueue(self, payload) -> UUID:
+    def enqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
         validate_json_value(payload)
         entry = self.entry_class.create(
-            queue=self._queue_name, payload=payload, queued_at=self.clock.now()
+            queue=self._queue_name,
+            payload=payload,
+            queued_at=self.clock.now(),
+            timeout_seconds=timeout_seconds,
         )
         self._entries[entry.id] = entry
         self._pending_entries.put_nowait(entry.id)
@@ -116,6 +119,13 @@ class MemoryQueue(BaseQueue):
         return self._replace_entry(
             entry_id,
             status=QueueEntryStatus.CANCELLED,
+            finished_at=self.clock.now(),
+        )
+
+    def mark_timed_out(self, entry_id: UUID) -> QueueEntry:
+        return self._replace_entry(
+            entry_id,
+            status=QueueEntryStatus.TIMEOUT,
             finished_at=self.clock.now(),
         )
 

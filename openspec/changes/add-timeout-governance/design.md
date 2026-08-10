@@ -22,7 +22,8 @@ below is new code.
 - Let a caller set a budget when enqueueing work, a queue supply a default, and
   a worker override both.
 - Let a handler that is still working extend its own budget rather than be
-  killed for taking a long time legitimately.
+  killed for taking a long time legitimately. **Deferred to `refactor-redis-async`** — see the
+  heartbeat decision below for why it cannot land on synchronous backends.
 
 **Non-Goals:**
 
@@ -57,9 +58,15 @@ an operator acts on. `timeout` joins `succeeded`, `failed`, and `cancelled` as a
 terminal state reachable only from `running`, with a matching `mark_timed_out`
 on the backend contract and a `timed_out_count` on the worker snapshot.
 
-Shutdown grace-period expiry routes here too. After this change `cancelled`
-means only that the worker stopped the entry deliberately and the handler
-complied.
+Shutdown grace-period expiry routes here too, which leaves `cancelled` with no
+producer. That is deliberate, and worth stating plainly rather than papering
+over: expiry was its only source, and the handler that stops when asked has
+always recorded its own outcome, because it finished and its result is real —
+discarding that as `cancelled` would lose work the queue actually did. So
+`cancelled` stays in the enum and the backend contract as a reserved status,
+reachable through `mark_cancelled` for the deliberate per-entry cancellation the
+queue does not yet offer. Removing it instead would be a breaking wire-format
+change well outside this change, and would foreclose that API.
 
 ### Budget resolution: worker, then entry, then queue, then 600 seconds
 
@@ -68,17 +75,31 @@ the queue default, which falls back to 600 seconds. A worker is the component
 that knows the runtime it is actually operating in, so it takes precedence over
 what a producer asked for. A resolved budget is always a positive number of
 seconds; there is no "unlimited" value, because an unbounded handler is the
-defect this change exists to remove.
+defect this change exists to remove. That rules out infinity as much as it rules
+out zero, so the shared `validate_budget` requires a finite positive number and
+NaN is excluded by name — it compares false against every bound, so a magnitude
+test alone would admit it.
 
 The budget is carried on the entry so it survives enqueue, is visible in the
 durable record, and is available to whichever worker dispatches it.
 
 ### The budget applies to entry dispatch, not to raw items
 
-`enqueue` creates an identified entry and gains a `timeout` keyword. `add` is
-the item-oriented API: it stores raw values, creates no entry, and is never
-dispatched to a handler, so it has nothing to which a budget could apply and
-gains no keyword.
+`enqueue` creates an identified entry and gains a `timeout_seconds` keyword.
+`add` is the item-oriented API: it stores raw values, creates no entry, and is
+never dispatched to a handler, so it has nothing to which a budget could apply
+and gains no keyword.
+
+### The budget is named for the duration it is
+
+The record field and the `enqueue` keyword are `timeout_seconds`, not `timeout`.
+A bare `timeout` sits beside `queued_at`, `dispatched_at` and `finished_at` and
+reads just as easily as the instant at which an entry expires, which is the
+exact instant-versus-duration confusion `ClockTime` was introduced to make
+impossible. Naming the unit closes it at the one place a reader meets the value
+far from any documentation. The queue setting stays `TIMEOUT`: it sits beside
+`WORKER`, `HANDLER` and `ENTRY_CLASS` in a settings dict where short keys are
+the convention and the documentation is adjacent.
 
 ### `asyncio.timeout` provides the extendable deadline
 
@@ -88,7 +109,24 @@ cannot move its deadline once started. On expiry the handler task is cancelled
 and the entry is marked timed out, mirroring how grace-period expiry already
 handles a handler that will not stop.
 
+The context object must be retained rather than discarded, because catching
+`TimeoutError` is not enough to know the deadline is what raised it. Since 3.11
+`TimeoutError` *is* `asyncio.TimeoutError`, so a handler that wraps its own I/O
+in a deadline — `wait_for`, an HTTP client, a database driver — raises the same
+class. Only `expired()` on the context distinguishes them; without it an
+ordinary handler failure is recorded as never having answered and its error is
+discarded. The grace period uses `asyncio.timeout` rather than `wait_for` for
+exactly this reason, so both deadlines are told apart the same way.
+
 ### The heartbeat is a module-level call, not a handler argument
+
+**Deferred to `refactor-redis-async`.** The reasoning below is settled and kept here because it
+was reached during this change, but the requirement and its tasks belong to the
+change that can implement them. A heartbeat must extend the backend's lease as
+well as the loop deadline and verify the calling handler still owns that lease;
+neither is safe across the `to_thread` hops the synchronous backends require,
+and `Timeout.reschedule` mutates a `TimerHandle` that is not thread-safe. It
+follows the async backend conversion.
 
 A handler is `Callable[[QueueEntry], Awaitable[object]]`. Threading a heartbeat
 object through that signature would change the handler contract and force it on
@@ -111,6 +149,13 @@ dispatch it raises rather than silently doing nothing.
 Each heartbeat grants a fresh full budget from the moment of the call. A handler
 that pings faster than its budget runs indefinitely, which is the intent: the
 budget bounds silence, not total runtime.
+
+The expectation on a caller follows from that, and belongs in the documentation
+rather than only in this reasoning: heartbeat is not a keepalive to be called on
+a timer or in a tight loop. A handler pings when it genuinely needs another
+allotment, as it approaches its current one, having made progress worth
+reporting. A handler that pings on a schedule has turned its budget off without
+saying so.
 
 ## Risks / Trade-offs
 

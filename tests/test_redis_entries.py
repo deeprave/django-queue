@@ -70,6 +70,20 @@ class TestRedisQueueEntries:
         assert isinstance(completed.finished_at, ClockTime)
         assert completed.result == {"ok": True}
 
+    def test_records_a_redis_timeout_as_a_terminal_outcome(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        redis_entry_queue.mark_running(entry_id)
+
+        timed_out = redis_entry_queue.mark_timed_out(entry_id)
+
+        assert timed_out.status is QueueEntryStatus.TIMEOUT
+        assert isinstance(timed_out.finished_at, ClockTime)
+
+    def test_persists_a_redis_execution_budget(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work", timeout_seconds=2.5)
+
+        assert redis_entry_queue.get_entry(entry_id).timeout_seconds == 2.5
+
     def test_restores_redis_lifecycle_timestamps_to_equal_instants(
         self, redis_entry_queue
     ):
