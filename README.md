@@ -498,8 +498,9 @@ All queues conform to the following interface:
 
 - add(item1[, item2, item3 ...]): add one or more items to the queue. With priority queues, items can be passed as `(priority, item)` tuples, although if not a tuple the default priority of 0 is defined. Priorities are evaluated as higher values = high priority, lower values = low priority. Priority can be positive or negative with 0 considered "normal".
 - get(): retrieve and remove the next item from the queue.
-- poll(): same as get(), but blocks if no item is available. Priority queues
-  accept ``timeout`` and ``retries``; timeout applies to each retry attempt.
+- poll(): same as get(), but blocks if no item is available. Redis priority
+  queues accept ``timeout`` and ``retries``; timeout applies to each retry
+  attempt.
 - peek(): retrieve but not remove the next item in the queue.
 - size(): returns the number of items currently in the queue. `len(queue)` also returns this value.
 - is_empty(): returns true if there are no items currently in the queue.

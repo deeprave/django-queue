@@ -118,7 +118,7 @@ dictionary and `queue.Queue` operations, so none of it needs a bridge.
 
 ### Disposal becomes asynchronous, and worker hosts own their loop cleanup
 
-An `redis.asyncio` pool must be closed from the loop that owns it, so `aclose`
+A `redis.asyncio` pool must be closed from the loop that owns it, so `aclose`
 is the real implementation and `close` wraps it. Django has no process-shutdown
 signal that can safely await the loop which owns a worker's resources, so ASGI
 lifespan and `runqueues` await disposal on their own loops. `close_queues`

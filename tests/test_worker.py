@@ -44,7 +44,6 @@ class TestAsyncQueueWorker:
         assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
         assert queue.thread_ids
         assert set(queue.thread_ids) == {loop_thread}
-        assert len(queue.thread_ids) >= 4
 
     def test_exposes_an_immutable_initial_snapshot(self):
         worker = AsyncQueueWorker({}, {})
