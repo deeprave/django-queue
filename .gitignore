@@ -14,3 +14,4 @@ wheels/
 .kiro
 .idea
 .*_cache
+.aider*

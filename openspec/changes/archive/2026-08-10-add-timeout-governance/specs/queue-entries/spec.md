@@ -32,6 +32,45 @@ duration, not an instant, and SHALL remain a plain count of seconds.
 - **THEN** its restored lifecycle timestamps equal the values it was created
   with, on every backend
 
+#### Scenario: Reject a lifecycle timestamp that is not an instant
+- **WHEN** an entry is constructed with a lifecycle timestamp that is not a
+  `ClockTime`, including a null where one is required
+- **THEN** construction fails
+
+#### Scenario: Reject a malformed durable record
+- **WHEN** a record is restored whose stored identifier, status or lifecycle
+  timestamp cannot be read back, whether because its type or its value is wrong
+- **THEN** restoration fails with a single error naming the field, chained to
+  the cause
+
+#### Scenario: Reject a record that omits a required field
+- **WHEN** a record is restored that has no value at all for a required field
+- **THEN** restoration fails the same way, naming the field that is absent
+
+#### Scenario: Report a duration shorter than a second
+- **WHEN** an entry's handler ran for a fraction of a second
+- **THEN** the reported duration carries that fraction rather than truncating to
+  zero
+
+#### Scenario: Report how long an entry waited and ran
+- **WHEN** an entry that was dispatched and finished is read
+- **THEN** it reports the seconds between being queued and dispatched, and the
+  seconds between being dispatched and finishing
+
+#### Scenario: Report no duration before the instants exist
+- **WHEN** an entry that has not been dispatched, or has been dispatched but not
+  finished, is read
+- **THEN** the durations its instants cannot yet describe are absent
+
+#### Scenario: Report no duration when the instants contradict
+- **WHEN** an entry holds a later lifecycle instant that precedes an earlier one
+- **THEN** the duration between them is absent rather than negative
+
+#### Scenario: Keep durations out of the durable record
+- **WHEN** an entry is written to its durable representation
+- **THEN** that representation carries only the instants, and a restored entry
+  reports the same durations as the entry it was restored from
+
 #### Scenario: Retrieve an entry enqueued with a budget
 - **WHEN** a caller retrieves an entry that was enqueued with an execution
   budget

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from collections.abc import Mapping
 
 from django.conf import settings as django_settings
@@ -8,7 +10,9 @@ from .backends import InvalidQueueBackendError
 from .clock import ClockTime
 from .entries import QueueEntry, QueueEntryStatus, validate_budget
 from .signals import queue_created
-from .worker import AsyncQueueWorker, WorkerSnapshot
+from .worker import AsyncQueueWorker, WorkerSnapshot, heartbeat
+
+logger = logging.getLogger(__name__)
 
 __all__ = (
     "AsyncQueueWorker",
@@ -16,6 +20,9 @@ __all__ = (
     "QueueEntry",
     "QueueEntryStatus",
     "WorkerSnapshot",
+    "aclose_queues",
+    "close_queues",
+    "heartbeat",
     "initialise_queues",
     "queue",
     "queues",
@@ -111,8 +118,24 @@ def initialise_queues(queue_handler: QueueHandler | None = None) -> QueueHandler
     return queue_handler
 
 
-def close_queues(**kwargs):
-    queues.close_all()
+def close_queues(queue_handler: QueueHandler | None = None, **kwargs) -> None:
+    """Synchronously release resources created through synchronous wrappers."""
+    (queues if queue_handler is None else queue_handler).close_all()
+
+
+async def aclose_queues(queue_handler: QueueHandler | None = None) -> None:
+    """Dispose configured queues from the loop that acquired their resources."""
+    queue_handler = queues if queue_handler is None else queue_handler
+    results = await asyncio.gather(
+        *(
+            configured_queue.aclose()
+            for configured_queue in queue_handler.all(initialized_only=True)
+        ),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error("Unable to dispose queue resources", exc_info=result)
 
 
 def _resolve_timeout(alias: str, value: object) -> float:

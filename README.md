@@ -188,6 +188,55 @@ entry still waiting has not waited zero seconds. They are also `None` if the
 instants contradict, which a clock recalibrating backwards can cause: a negative
 elapsed time is meaningless rather than merely small.
 
+### Asynchronous queue API and heartbeat
+
+The `a`-prefixed entry operations are the primary API in asynchronous code:
+`aenqueue`, `aget_entry`, `adequeue_entry`, `ahas_pending_entries`, and the
+`amark_*` lifecycle operations. Built-in queues also expose `aadd`, `aget`,
+`apoll`, `apeek`, `asize`, and `aclear` for raw queue values. Await these from
+an ASGI view, a handler, or another coroutine:
+
+```python
+entry_id = await queue.aenqueue({"request_id": 42})
+entry = await queue.aget_entry(entry_id)
+```
+
+The corresponding synchronous methods remain for synchronous Django code. They
+must not be called from a running event loop; use the `a`-prefixed operation
+instead. A custom backend implements the asynchronous methods, while the base
+class supplies the synchronous wrappers. `len(queue)`, `bool(queue)`, and
+`is_empty()` are likewise synchronous-only; use `asize()` or `ais_empty()` in
+an event loop. Synchronous wrapper calls release their bridge-loop resources
+after each operation, so a custom backend's `aclose()` must be idempotent.
+
+An ASGI worker and `runqueues` dispose their queues on their owning event loop.
+Other async hosts must await `aclose_queues()` before closing that loop;
+`close_queues()` only serves synchronous-wrapper resources and cannot close a
+different loop's Redis client.
+
+For a Redis backend, a synchronous queue operation uses a fresh bridge-loop
+connection and Redis `TIME` calibration before closing it. Prefer the async API
+in asynchronous or high-volume producer code, where the loop-local client and
+clock are reused.
+
+Long-running handlers may call `heartbeat()` after genuine progress to restart
+their current execution budget as they approach its deadline:
+
+```python
+from django_queue import heartbeat
+
+
+async def process_request(entry):
+    await store_progress(entry.payload)
+    heartbeat()
+    return {"processed": True}
+```
+
+Heartbeat extends only the local execution budget. It is neither a lease
+renewal nor an ownership or delivery guarantee; a later claim-and-recovery
+backend may add those guarantees. It is not a keepalive to call on a timer or
+in a loop: doing so disables the protection the budget provides.
+
 ```python
 from django_queue import queue
 
@@ -449,7 +498,8 @@ All queues conform to the following interface:
 
 - add(item1[, item2, item3 ...]): add one or more items to the queue. With priority queues, items can be passed as `(priority, item)` tuples, although if not a tuple the default priority of 0 is defined. Priorities are evaluated as higher values = high priority, lower values = low priority. Priority can be positive or negative with 0 considered "normal".
 - get(): retrieve and remove the next item from the queue.
-- poll(): same as get(), but blocks if no item is available.
+- poll(): same as get(), but blocks if no item is available. Priority queues
+  accept ``timeout`` and ``retries``; timeout applies to each retry attempt.
 - peek(): retrieve but not remove the next item in the queue.
 - size(): returns the number of items currently in the queue. `len(queue)` also returns this value.
 - is_empty(): returns true if there are no items currently in the queue.

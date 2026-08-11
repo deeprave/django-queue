@@ -18,17 +18,17 @@ try:
             raise QueueEncodingException from e
 
     class RedisQueueJson(RedisQueue):
-        def add(self, *items: dict | str) -> None:
-            super().add(*(_encode(item) for item in items if item is not None))
+        async def aadd(self, *items: dict | str) -> None:
+            await super().aadd(*(_encode(item) for item in items if item is not None))
 
-        def get(self) -> dict | str:
-            return _decode(super().get())
+        async def aget(self) -> dict | str:
+            return _decode(await super().aget())
 
-        def poll(self) -> dict | str:
-            return _decode(super().poll())
+        async def apoll(self) -> dict | str:
+            return _decode(await super().apoll())
 
-        def peek(self) -> dict | str:
-            return _decode(super().peek())
+        async def apeek(self) -> dict | str:
+            return _decode(await super().apeek())
 
     class RedisStackJson(RedisQueueJson):
         def __init__(self, redis_spec, options: dict | None = None, **kwargs):

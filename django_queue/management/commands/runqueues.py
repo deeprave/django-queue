@@ -96,10 +96,12 @@ class Command(BaseCommand):
             ): activation.alias
             for activation in activations
         }
-        await self._supervise_workers(tasks, shutdown_event)
+        await self._supervise_workers(
+            tasks, shutdown_event, tuple(activation.queue for activation in activations)
+        )
 
     async def _activate_worker(self, activation: ConfiguredWorkerActivation) -> None:
-        while not await asyncio.to_thread(activation.queue.has_pending_entries):
+        while not await activation.queue.ahas_pending_entries():
             await asyncio.sleep(0.1)
         worker = activation.queue.create_worker(activation.alias, activation.handler)
         self.stdout.write(f"Started queue handler for {activation.alias}.")
@@ -109,6 +111,7 @@ class Command(BaseCommand):
         self,
         tasks: dict[asyncio.Task[None], str],
         shutdown_event: asyncio.Event | None,
+        queues: Sequence[BaseQueue],
     ) -> None:
         shutdown_event = asyncio.Event() if shutdown_event is None else shutdown_event
         loop = asyncio.get_running_loop()
@@ -153,6 +156,12 @@ class Command(BaseCommand):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(shutdown_task, *tasks, return_exceptions=True)
+            results = await asyncio.gather(
+                *(queue.aclose() for queue in set(queues)), return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Unable to dispose queue resources", exc_info=result)
 
 
 def _is_async_handler(handler: Callable[..., object]) -> bool:

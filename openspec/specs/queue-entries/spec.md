@@ -4,9 +4,7 @@
 
 Define identified queue entries, their lifecycle, and their timekeeping
 contract across generic queue backends.
-
 ## Requirements
-
 ### Requirement: Enqueue identified JSON-serialisable entries
 The system SHALL provide an entry-oriented enqueue operation that accepts any
 JSON-serialisable payload value, generates a UUID version 7 identifier, records
@@ -28,20 +26,87 @@ not survive JSON serialisation before it persists a pending entry.
 The system SHALL represent entries in Python as frozen value objects and SHALL
 serialise them as JSON objects for durable storage. Entry records MUST contain
 `id`, `queue`, `status`, `queued_at`, `dispatched_at`, `finished_at`, `payload`,
-`result`, and `error` fields.
+`result`, `error`, and `timeout_seconds` fields. The `timeout_seconds` field
+carries that entry's execution budget, or nothing when the entry was enqueued
+without one. It is named for what it holds: a duration, not the instant at which
+the entry expires, which is the one confusion the lifecycle instants beside it
+make easy.
+
+Lifecycle timestamps SHALL be held as `ClockTime` values and stored as a float
+count of seconds since the Unix epoch. The durable representation MUST NOT
+encode a timezone or require string parsing to read, and restoring an entry MUST
+yield timestamps equal to those it was stored with. An execution budget is a
+duration, not an instant, and SHALL remain a plain count of seconds.
 
 #### Scenario: Retrieve a queued entry
 - **WHEN** a caller retrieves an entry by an identifier returned from enqueue
 - **THEN** the system returns an immutable entry record with the original
   payload and required lifecycle fields
 
+#### Scenario: Store a lifecycle timestamp
+- **WHEN** an entry carrying lifecycle timestamps is written to its durable
+  representation
+- **THEN** each timestamp appears as a float count of seconds since the Unix
+  epoch
+
+#### Scenario: Round-trip an entry without losing its instant
+- **WHEN** an entry is stored and restored
+- **THEN** its restored lifecycle timestamps equal the values it was created
+  with, on every backend
+
+#### Scenario: Reject a lifecycle timestamp that is not an instant
+- **WHEN** an entry is constructed with a lifecycle timestamp that is not a
+  `ClockTime`, including a null where one is required
+- **THEN** construction fails
+
+#### Scenario: Reject a malformed durable record
+- **WHEN** a record is restored whose stored identifier, status or lifecycle
+  timestamp cannot be read back, whether because its type or its value is wrong
+- **THEN** restoration fails with a single error naming the field, chained to
+  the cause
+
+#### Scenario: Reject a record that omits a required field
+- **WHEN** a record is restored that has no value at all for a required field
+- **THEN** restoration fails the same way, naming the field that is absent
+
+#### Scenario: Report a duration shorter than a second
+- **WHEN** an entry's handler ran for a fraction of a second
+- **THEN** the reported duration carries that fraction rather than truncating to
+  zero
+
+#### Scenario: Report how long an entry waited and ran
+- **WHEN** an entry that was dispatched and finished is read
+- **THEN** it reports the seconds between being queued and dispatched, and the
+  seconds between being dispatched and finishing
+
+#### Scenario: Report no duration before the instants exist
+- **WHEN** an entry that has not been dispatched, or has been dispatched but not
+  finished, is read
+- **THEN** the durations its instants cannot yet describe are absent
+
+#### Scenario: Report no duration when the instants contradict
+- **WHEN** an entry holds a later lifecycle instant that precedes an earlier one
+- **THEN** the duration between them is absent rather than negative
+
+#### Scenario: Keep durations out of the durable record
+- **WHEN** an entry is written to its durable representation
+- **THEN** that representation carries only the instants, and a restored entry
+  reports the same durations as the entry it was restored from
+
+#### Scenario: Retrieve an entry enqueued with a budget
+- **WHEN** a caller retrieves an entry that was enqueued with an execution
+  budget
+- **THEN** the returned record and its durable representation both carry that
+  budget
+
 ### Requirement: Record entry lifecycle outcomes
 The system SHALL represent lifecycle status with a string enum and SHALL
 transition an entry only from `queued` to `running`, then from `running` to
-exactly one terminal status of `succeeded`, `failed`, or `cancelled`. Terminal
-statuses SHALL have no valid successor. The system MUST set `dispatched_at` when
-it marks an entry running and MUST set `finished_at` when it records a terminal
-outcome.
+exactly one terminal status of `succeeded`, `failed`, `cancelled`, or `timeout`.
+Terminal statuses SHALL have no valid successor. The system MUST set
+`dispatched_at` when it marks an entry running and MUST set `finished_at` when
+it records a terminal outcome. The system SHALL reject any status value outside
+this set when restoring an entry from its durable representation.
 
 #### Scenario: Record successful handling
 - **WHEN** a worker completes an entry handler with a JSON-serialisable value
@@ -55,9 +120,18 @@ outcome.
   `finished_at` timestamp
 
 #### Scenario: Record cancelled handling
-- **WHEN** a worker cancels an active handler after its grace period
+- **WHEN** a caller marks a running entry cancelled through the backend contract
 - **THEN** the entry is stored with status `cancelled` and a non-null
   `finished_at` timestamp
+- **AND** no worker path produces this status: a handler that finishes during
+  shutdown records its own outcome and one that overruns records `timeout`, so
+  `cancelled` is reserved for a deliberate cancellation the queue does not yet
+  offer
+
+#### Scenario: Record a timed-out handling
+- **WHEN** a worker abandons a handler that exceeded its execution budget
+- **THEN** the entry is stored with status `timeout` and a non-null
+  `finished_at` timestamp, and no further transition is permitted
 
 ### Requirement: Use queue-authoritative lifecycle time
 Redis-backed queues SHALL source lifecycle timestamps from a Redis-aligned UTC
@@ -69,6 +143,13 @@ fail clearly. After an initial calibration, a failed background refresh SHALL
 retain the last good offset and retry no earlier than the next refresh interval.
 Non-Redis queues SHALL document their use of local UTC fallback time.
 
+A clock SHALL report the current instant as a `ClockTime`, and a Redis-aligned
+clock SHALL build it from the whole second and microsecond counts the server
+reports, without constructing an intermediate datetime or string. Its
+calibration offset SHALL be a count of seconds. A queue SHALL expose its clock,
+so a component recording times alongside that queue's entries can use the same
+basis rather than local time.
+
 #### Scenario: Timestamp entries without repeated Redis time calls
 - **WHEN** a Redis queue creates two lifecycle timestamps within the configured
   refresh interval
@@ -79,6 +160,15 @@ Non-Redis queues SHALL document their use of local UTC fallback time.
 - **WHEN** a Redis calibration reaches its refresh interval
 - **THEN** the queue returns timestamps using its current offset while one
   background refresh obtains the next Redis calibration
+
+#### Scenario: Read a Redis-aligned instant without an intermediate form
+- **WHEN** a Redis-aligned clock reports the current instant
+- **THEN** it builds that instant from the second and microsecond integers the
+  server reports, without constructing a datetime or a string on the way
+
+#### Scenario: Share a queue's clock with a component it creates
+- **WHEN** a component asks a queue for its clock
+- **THEN** it receives the clock that queue timestamps its entries with
 
 ### Requirement: Construct configured entry subclasses
 Each queue backend SHALL create and restore entries with its alias's resolved

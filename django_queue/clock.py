@@ -5,11 +5,15 @@ from __future__ import annotations
 import logging
 import math
 import time
+from asyncio import CancelledError, create_task, current_task, get_running_loop, shield
+from asyncio import Lock as AsyncLock
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock, Thread
-from typing import Protocol, overload
+from typing import Protocol, cast, overload
+
+from asgiref.sync import async_to_sync
 
 MAX_CLOCK_DRIFT_SECONDS = 180
 MICROSECONDS_PER_SECOND = 1_000_000
@@ -147,12 +151,17 @@ def elapsed_time(start: ClockTime | None, end: ClockTime | None) -> float | None
 class QueueClock(Protocol):
     def now(self) -> ClockTime: ...
 
+    async def anow(self) -> ClockTime: ...
+
 
 class LocalQueueClock:
     """UTC wall-clock fallback used by in-memory queues."""
 
     def now(self) -> ClockTime:
         return ClockTime.from_timestamp(time.time())
+
+    async def anow(self) -> ClockTime:
+        return self.now()
 
 
 # Stateless, so one instance serves every fallback in the package.
@@ -161,6 +170,10 @@ DEFAULT_CLOCK = LocalQueueClock()
 
 class RedisTimeClient(Protocol):
     def time(self) -> tuple[int, int]: ...
+
+
+class AsyncRedisTimeClient(Protocol):
+    async def time(self) -> tuple[int, int]: ...
 
 
 class QueueClockError(RuntimeError):
@@ -172,13 +185,15 @@ class RedisQueueClock:
 
     def __init__(
         self,
-        redis: RedisTimeClient,
+        redis: RedisTimeClient | AsyncRedisTimeClient,
         *,
         refresh_interval: float = 600,
         monotonic: Callable[[], float] = time.monotonic,
         utcnow: Callable[[], ClockTime] = lambda: ClockTime.from_timestamp(time.time()),
+        asynchronous: bool = False,
     ) -> None:
         self._redis = redis
+        self._asynchronous = asynchronous
         self._refresh_interval = refresh_interval
         self._monotonic = monotonic
         self._utcnow = utcnow
@@ -186,6 +201,8 @@ class RedisQueueClock:
         self._offset: float | None = None
         self._refreshing = False
         self._lock = Lock()
+        self._async_lock = AsyncLock()
+        self._refresh_task = None
 
     @property
     def refreshing(self) -> bool:
@@ -200,6 +217,18 @@ class RedisQueueClock:
 
     def now(self) -> ClockTime:
         with self._lock:
+            if self._asynchronous:
+                if self._offset is None:
+                    try:
+                        get_running_loop()
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise QueueClockError(
+                            "Redis queue clock is not calibrated; await anow() first"
+                        )
+                    return async_to_sync(self.anow)()
+                return self._utcnow() + self._offset
             monotonic_now = self._monotonic()
             if self._offset is None:
                 self._set_calibration(self._read_calibration())
@@ -207,6 +236,20 @@ class RedisQueueClock:
                 self._refreshing = True
                 self._last_refresh_attempt = monotonic_now
                 Thread(target=self._refresh_in_background, daemon=True).start()
+
+            assert self._offset is not None
+            return self._utcnow() + self._offset
+
+    async def anow(self) -> ClockTime:
+        """Return Redis-derived time without blocking the running event loop."""
+        async with self._async_lock:
+            monotonic_now = self._monotonic()
+            if self._offset is None:
+                self._set_calibration(await self._aread_calibration())
+            elif self._needs_refresh(monotonic_now) and not self._refreshing:
+                self._refreshing = True
+                self._last_refresh_attempt = monotonic_now
+                self._refresh_task = create_task(self._arefresh_in_background())
 
             assert self._offset is not None
             return self._utcnow() + self._offset
@@ -220,10 +263,28 @@ class RedisQueueClock:
     def _read_calibration(self) -> tuple[float, float]:
         local_time = self._utcnow()
         try:
-            seconds, microseconds = self._redis.time()
+            seconds, microseconds = cast(RedisTimeClient, self._redis).time()
         except Exception as exc:
             raise QueueClockError("Redis TIME is unavailable") from exc
 
+        try:
+            offset = ClockTime.from_timeval(seconds, microseconds) - local_time
+        except (TypeError, ValueError) as exc:
+            raise QueueClockError(
+                f"Redis TIME reported an unusable instant: {seconds!r}, {microseconds!r}"
+            ) from exc
+        if abs(offset) > MAX_CLOCK_DRIFT_SECONDS:
+            raise QueueClockError(
+                "Redis and local UTC clocks exceed the maximum permitted drift"
+            )
+        return offset, self._monotonic()
+
+    async def _aread_calibration(self) -> tuple[float, float]:
+        local_time = self._utcnow()
+        try:
+            seconds, microseconds = await cast(AsyncRedisTimeClient, self._redis).time()
+        except Exception as exc:
+            raise QueueClockError("Redis TIME is unavailable") from exc
         try:
             offset = ClockTime.from_timeval(seconds, microseconds) - local_time
         except (TypeError, ValueError) as exc:
@@ -265,3 +326,37 @@ class RedisQueueClock:
         finally:
             with self._lock:
                 self._refreshing = False
+
+    async def _arefresh_in_background(self) -> None:
+        try:
+            calibration = await self._aread_calibration()
+        except QueueClockError as exc:
+            logger.warning(
+                "Unable to refresh Redis queue time; retaining the last known offset",
+                exc_info=exc,
+            )
+        else:
+            async with self._async_lock:
+                self._set_calibration(calibration)
+        finally:
+            async with self._async_lock:
+                self._refreshing = False
+                self._refresh_task = None
+
+    async def aclose(self) -> None:
+        """Cancel the loop-local calibration refresh, if one is running."""
+        refresh_task = self._refresh_task
+        if refresh_task is None:
+            return
+        refresh_task.cancel()
+        try:
+            await shield(refresh_task)
+        except CancelledError:
+            task = current_task()
+            if task is not None and task.cancelling():
+                raise
+        finally:
+            async with self._async_lock:
+                if self._refresh_task is refresh_task:
+                    self._refreshing = False
+                    self._refresh_task = None

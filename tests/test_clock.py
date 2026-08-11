@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 
@@ -37,6 +38,39 @@ class TestLocalQueueClock:
 
 
 class TestRedisQueueClock:
+    def test_requires_anow_before_sync_time_on_an_active_loop(self):
+        async def exercise():
+            clock = RedisQueueClock(
+                AsyncFakeRedisTime((1_785_800_000, 0)),
+                utcnow=lambda: ClockTime(1_785_800_000),
+                asynchronous=True,
+            )
+            with pytest.raises(QueueClockError, match="await anow"):
+                clock.now()
+
+        asyncio.run(exercise())
+
+    def test_closing_an_async_clock_cancels_its_refresh(self):
+        async def exercise():
+            monotonic = FakeMonotonic(100.0)
+            redis = BlockingAsyncRefreshRedis()
+            clock = RedisQueueClock(
+                redis,
+                monotonic=monotonic,
+                utcnow=lambda: ClockTime(1_785_800_000),
+                asynchronous=True,
+            )
+            await clock.anow()
+            monotonic.value = 700.0
+            await clock.anow()
+            await redis.refresh_started.wait()
+
+            await clock.aclose()
+
+            assert redis.refresh_cancelled.is_set()
+
+        asyncio.run(exercise())
+
     def test_reports_an_instant(self):
         clock = RedisQueueClock(
             FakeRedisTime((1_785_800_000, 0)), utcnow=lambda: ClockTime(1_785_800_000)
@@ -214,6 +248,32 @@ class FakeUtcNow:
 
     def __call__(self):
         return self.value
+
+
+class AsyncFakeRedisTime:
+    def __init__(self, *values):
+        self.values = iter(values)
+
+    async def time(self):
+        return next(self.values)
+
+
+class BlockingAsyncRefreshRedis:
+    def __init__(self):
+        self.calls = 0
+        self.refresh_started = asyncio.Event()
+        self.refresh_cancelled = asyncio.Event()
+
+    async def time(self):
+        self.calls += 1
+        if self.calls == 1:
+            return (1_785_800_000, 0)
+        self.refresh_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.refresh_cancelled.set()
+            raise
 
 
 class BlockingRedisTime:

@@ -19,7 +19,10 @@ try:
         def stack(self):
             return False
 
-        def add(self, *items):
+        def poll(self, timeout: int = 0, retries: int = 10):
+            return self._run_synchronously(self.apoll, timeout, retries)
+
+        async def aadd(self, *items):
             """
             Add one or more priority, item pairs to the priority queue.
             :param items:
@@ -29,22 +32,24 @@ try:
             """
             for item in items:
                 priority, value = item
-                if self._maxsize != 0 and self.size() >= self._maxsize:
+                if self._maxsize != 0 and await self.asize() >= self._maxsize:
                     raise QueueFullException
-                self._redis.zadd(
+                await self._async_redis().zadd(
                     self._queue_name,
                     {_encode(value, self._encoding): priority},
                     nx=True,
                 )
 
-        def get(self):
+        async def aget(self):
             """
             Get and remove the next item from the priority queue.
             :return: The item with the highest priority.
             Raises QueueEmptyException if the queue is empty.
             """
             # Retrieve the highest-priority item
-            if item := self._redis.zrevrange(self._queue_name, 0, 0, withscores=False):
+            if item := await self._async_redis().zrevrange(
+                self._queue_name, 0, 0, withscores=False
+            ):
                 # Without withscores the reply is a flat list of members, but
                 # redis-py's stubs do not overload on that, so narrow before
                 # handing the member back to Redis. The accepted types match
@@ -57,51 +62,57 @@ try:
                     raise QueueEncodingException(
                         f"Queue value must be text or bytes, not {type(member).__name__}"
                     )
-                self._redis.zrem(self._queue_name, member)
+                await self._async_redis().zrem(self._queue_name, member)
                 return _decode(member, self._encoding)
             raise QueueEmptyException
 
-        def poll(self, timeout: int = 0, retries: int = 10):
-            """
-            Retrieves the next item from the queue without removing it (peek).
-            :return: The item with the lowest priority.
-            Raises QueueEmptyException if the queue is empty.
+        async def apoll(self, timeout: int = 0, retries: int = 10):
+            """Remove and return the highest-priority item.
+
+            A positive ``timeout`` applies to each blocking attempt. The call
+            can therefore wait up to ``timeout * retries`` before raising
+            ``QueueEmptyException``; with a positive timeout, zero retries
+            means keep trying.
             """
             # sourcery skip: use-assigned-variable
             attempt = retries
             while retries == 0 or attempt > 0:
                 attempt -= 1
                 try:  # Attempt to get the highest-priority item normally
-                    return self.get()
+                    return await self.aget()
                 except QueueEmptyException:
                     if timeout <= 0:
                         raise
-                    if item := self._redis.blpop(self._queue_name, timeout=timeout):
+                    if item := await self._async_redis().bzpopmax(
+                        [self._queue_name], timeout=timeout
+                    ):
                         return _decode(item[1], self._encoding)
             raise QueueEmptyException
 
-        def peek(self):
+        async def apeek(self):
             """
             Retrieve (but don't remove) the highest-priority item from the priority queue.
             :return: The item with the highest priority.
             Raises QueueEmptyException if the queue is empty.
             """
-            if item := self._redis.zrevrange(self._queue_name, 0, 0, withscores=False):
+            if item := await self._async_redis().zrevrange(
+                self._queue_name, 0, 0, withscores=False
+            ):
                 return _decode(item[0], self._encoding)
             raise QueueEmptyException
 
-        def size(self) -> int:
+        async def asize(self) -> int:
             """
             Get the current size of the priority queue.
             :return: Number of items in the queue.
             """
-            return self._redis.zcard(self._queue_name)
+            return await self._async_redis().zcard(self._queue_name)
 
-        def clear(self) -> None:
+        async def aclear(self) -> None:
             """
             Clear all items in the queue.
             """
-            self._redis.delete(self._queue_name)
+            await self._async_redis().delete(self._queue_name)
 
 except ImportError:
     pass

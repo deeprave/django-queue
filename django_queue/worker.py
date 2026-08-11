@@ -5,14 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
 from django_queue.backends.base import BaseQueue
 from django_queue.backends.exceptions import QueueEmptyException
-from django_queue.clock import DEFAULT_CLOCK, ClockTime, QueueClock, elapsed_time
+from django_queue.clock import (
+    DEFAULT_CLOCK,
+    ClockTime,
+    QueueClock,
+    QueueClockError,
+    elapsed_time,
+)
 from django_queue.entries import (
     QueueEntry,
     QueueEntryStatus,
@@ -38,6 +45,32 @@ QueueHandler = Callable[[QueueEntry], Coroutine[Any, Any, object]]
 DEFAULT_TIMEOUT_SECONDS = 600
 
 
+@dataclass(slots=True)
+class _ActiveTimeout:
+    timeout: asyncio.Timeout
+    budget: float
+    active: bool = True
+
+
+_active_timeout: ContextVar[_ActiveTimeout | None] = ContextVar(
+    "django_queue_active_timeout", default=None
+)
+
+
+def heartbeat() -> None:
+    """Restart the current handler's execution budget after real progress."""
+    active_timeout = _active_timeout.get()
+    if (
+        active_timeout is None
+        or not active_timeout.active
+        or active_timeout.timeout.expired()
+    ):
+        raise RuntimeError("Queue heartbeat requires an active handler dispatch")
+    active_timeout.timeout.reschedule(
+        asyncio.get_running_loop().time() + active_timeout.budget
+    )
+
+
 class QueueLookup(Protocol):
     """Queue service lookup used by a worker's registered aliases."""
 
@@ -52,7 +85,11 @@ class QueuePersistenceError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class WorkerSnapshot:
-    """Immutable, process-local state for an asynchronous queue worker."""
+    """Immutable, process-local state for an asynchronous queue worker.
+
+    The queue clock determines ``running_for``. A synchronous inspection of a
+    running Redis-backed worker can therefore calibrate its Redis clock.
+    """
 
     worker_id: UUID
     running: bool
@@ -160,7 +197,11 @@ class AsyncQueueWorker:
         """
         if self._started_at is None:
             return None
-        return elapsed_time(self._started_at, self._stopped_at or self._clock.now())
+        try:
+            ended_at = self._stopped_at or self._clock.now()
+        except QueueClockError:
+            return None
+        return elapsed_time(self._started_at, ended_at)
 
     async def run(self) -> None:
         """Dispatch registered queue entries until the caller cancels this task."""
@@ -168,7 +209,7 @@ class AsyncQueueWorker:
         # Start before clearing the stop: a reader caught between these sees a
         # fresh start with a stale stop -- at worst a short duration -- rather
         # than the previous run's start with no stop at all.
-        self._started_at = self._clock.now()
+        self._started_at = await self._clock.anow()
         self._stopped_at = None
         self._log_state_change("started")
         try:
@@ -176,7 +217,7 @@ class AsyncQueueWorker:
                 dispatched = False
                 for name, queue in self._queues.items():
                     try:
-                        entry = await asyncio.to_thread(queue.dequeue_entry)
+                        entry = await queue.adequeue_entry()
                     except QueueEmptyException:
                         continue
                     dispatched = True
@@ -189,7 +230,7 @@ class AsyncQueueWorker:
                     await asyncio.sleep(self._idle_delay)
         finally:
             self._running = False
-            self._stopped_at = self._clock.now()
+            self._stopped_at = await self._clock.anow()
             self._active_entry_id = None
             self._active_queue_name = None
             self._log_state_change("stopped")
@@ -197,16 +238,25 @@ class AsyncQueueWorker:
     async def _dispatch(
         self, queue: BaseQueue, handler: QueueHandler, entry: QueueEntry
     ) -> None:
-        await asyncio.to_thread(queue.mark_running, entry.id)
-        handler_task = asyncio.create_task(handler(entry))
+        await queue.amark_running(entry.id)
+        timeout_seconds = self.resolve_budget(queue, entry)
+        active_timeout: _ActiveTimeout | None = None
+        timeout_token = None
+        handler_task: asyncio.Task[object] | None = None
         try:
             # The budget cancels this await; the shield keeps the handler task
             # alive so the abandon path can stop it deliberately and report it.
             # An outer cancellation arrives as CancelledError instead, which is
             # how shutdown stays distinguishable from a budget that ran out.
-            async with asyncio.timeout(self.resolve_budget(queue, entry)) as budget:
+            async with asyncio.timeout(timeout_seconds) as budget:
+                active_timeout = _ActiveTimeout(budget, timeout_seconds)
+                timeout_token = _active_timeout.set(active_timeout)
+                handler_task = asyncio.create_task(handler(entry))
                 result = await asyncio.shield(handler_task)
         except TimeoutError as exc:
+            if active_timeout is None or handler_task is None:
+                raise
+            active_timeout.active = False
             # TimeoutError is asyncio.TimeoutError, so a handler that wraps its
             # own I/O in a deadline raises the same class this budget expires
             # with. Only the context knows which happened; without asking, an
@@ -217,12 +267,25 @@ class AsyncQueueWorker:
             else:
                 await self._record_failure(queue, entry, exc)
         except asyncio.CancelledError:
+            if active_timeout is None or handler_task is None:
+                raise
+            active_timeout.active = False
             await self._finish_cancellation(queue, entry, handler_task)
             raise
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
+            if active_timeout is not None:
+                active_timeout.active = False
             await self._record_failure(queue, entry, exc)
         else:
+            if active_timeout is None:
+                raise RuntimeError("Queue handler completed without an active timeout")
+            active_timeout.active = False
             await self._record_result(queue, entry, result)
+        finally:
+            if active_timeout is not None:
+                active_timeout.active = False
+            if timeout_token is not None:
+                _active_timeout.reset(timeout_token)
 
     async def _abandon_unresponsive_handler(
         self,
@@ -241,7 +304,7 @@ class AsyncQueueWorker:
         handler_task.add_done_callback(
             lambda task: self._log_late_handler_outcome(entry, task)
         )
-        await self._record_terminal(queue, entry, queue.mark_timed_out)
+        await self._record_terminal(queue, entry, queue.amark_timed_out)
 
     async def _finish_cancellation(
         self,
@@ -288,23 +351,23 @@ class AsyncQueueWorker:
         except TypeError as exc:
             await self._record_failure(queue, entry, exc)
         else:
-            await self._record_terminal(queue, entry, queue.mark_succeeded, result)
+            await self._record_terminal(queue, entry, queue.amark_succeeded, result)
 
     async def _record_failure(
         self, queue: BaseQueue, entry: QueueEntry, error: Exception
     ) -> None:
         logger.exception("Queue handler failed for entry %s", entry.id)
-        await self._record_terminal(queue, entry, queue.mark_failed, error)
+        await self._record_terminal(queue, entry, queue.amark_failed, error)
 
     async def _record_terminal(
         self,
         queue: BaseQueue,
         entry: QueueEntry,
-        update: Callable[..., QueueEntry],
+        update: Callable[..., Awaitable[QueueEntry]],
         *args: object,
     ) -> None:
         try:
-            terminal_entry = await asyncio.to_thread(update, entry.id, *args)
+            terminal_entry = await asyncio.shield(update(entry.id, *args))
         except Exception as exc:
             logger.exception(
                 "Unable to record terminal queue outcome for entry %s", entry.id
@@ -320,7 +383,7 @@ class AsyncQueueWorker:
         self, queue: BaseQueue, entry: QueueEntry
     ) -> QueueEntry | None:
         try:
-            current_entry = await asyncio.to_thread(queue.get_entry, entry.id)
+            current_entry = await queue.aget_entry(entry.id)
         except Exception:
             logger.exception(
                 "Unable to inspect queue entry %s after a persistence failure", entry.id
@@ -329,8 +392,7 @@ class AsyncQueueWorker:
         if current_entry.status is not QueueEntryStatus.RUNNING:
             return current_entry
         try:
-            return await asyncio.to_thread(
-                queue.mark_failed,
+            return await queue.amark_failed(
                 entry.id,
                 QueuePersistenceError("Unable to persist terminal queue outcome"),
             )

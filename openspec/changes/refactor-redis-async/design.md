@@ -89,13 +89,16 @@ called, which is undefined at best. A queue therefore holds no client at
 construction; it acquires one lazily keyed by the identity of the running loop,
 so each loop gets its own pool and disposal is per loop.
 
-Alternatives considered. Creating a fresh client per call is correct but
-discards pooling, which is most of the point of a pool. Forbidding synchronous
-wrappers on Redis backends would keep one loop but breaks the producer API this
-change exists to preserve. Requiring the caller to pass a loop pushes an
-implementation detail into application code.
+Synchronous wrappers run on short-lived bridge loops. They therefore release
+their bridge-loop client and clock after each call rather than retaining a pool
+keyed by a dead loop. This is an accepted producer-path cost: synchronous views
+retain compatibility, while long-lived asynchronous workers retain their
+per-loop pools. Forbidding synchronous wrappers on Redis backends would keep
+one loop but breaks the producer API this change exists to preserve. Requiring
+the caller to pass a loop pushes an implementation detail into application
+code.
 
-### Memory backends convert too, and `apoll` is the one real bridge
+### Memory backends convert too, and `apoll` avoids a cancellable blocking get
 
 A uniform contract is what lets the worker drop `to_thread` entirely; a mixed
 contract would force it to keep both paths, which is the status quo with extra
@@ -104,21 +107,23 @@ methods are `async def` with no internal await. That is ceremony, and it is
 worth it for the single contract.
 
 One memory operation genuinely blocks: `poll()` is `queue.Queue.get(block=True)`
-and waits on a threading primitive. `apoll` is therefore the one place the
-package bridges the other way, with `sync_to_async(thread_sensitive=False)`.
+and waits on a threading primitive. Its async form instead loops over
+`get_nowait()` with a short asynchronous sleep. A cancellable thread-side
+`Queue.get()` could still consume an item after its awaiter has gone away.
 Rewriting the memory queues on `asyncio.Queue` was considered and rejected: they
 are documented as usable from synchronous Django code across threads, and an
 `asyncio.Queue` is not thread-safe. The worker path — `dequeue_entry`,
 `has_pending_entries`, and the `mark_*` transitions — touches only non-blocking
 dictionary and `queue.Queue` operations, so none of it needs a bridge.
 
-### Disposal becomes asynchronous, and the signal receiver bridges
+### Disposal becomes asynchronous, and worker hosts own their loop cleanup
 
 An `redis.asyncio` pool must be closed from the loop that owns it, so `aclose`
-is the real implementation and `close` wraps it. `close_queues` is connected to
-a Django signal and must stay synchronous, so it calls the synchronous wrapper.
-Because clients are keyed per loop, `aclose` disposes the pool for the running
-loop, and `close` disposes what its own bridge loop owns.
+is the real implementation and `close` wraps it. Django has no process-shutdown
+signal that can safely await the loop which owns a worker's resources, so ASGI
+lifespan and `runqueues` await disposal on their own loops. `close_queues`
+remains a synchronous hook for resources created by synchronous wrappers; it
+cannot release a worker loop's resources from another loop.
 
 ### The heartbeat extends the budget, and says that is all it does
 
@@ -176,8 +181,10 @@ the lease is Redis wall time.
   stating the limit in the requirement itself and in the README, and by
   `add-redis-lease-recovery` completing it. Nothing can reclaim an entry today,
   so the gap is not currently reachable.
-- [`sync_to_async` on `apoll` reintroduces a thread] → Accepted and confined to
-  one item-oriented method that blocks by design. No worker path reaches it.
+- [Memory `apoll` wakes while empty] → It uses a short async wait around
+  `get_nowait()` rather than leaving a thread-side `Queue.get()` in flight,
+  because cancellation of that get can consume and lose an item. No worker path
+  reaches this raw-item operation.
 
 ## Implementation Order
 
