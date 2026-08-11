@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue, MemoryStack
@@ -11,12 +13,53 @@ from tests.helpers import FIXED_CLOCK_TIME, CustomQueueEntry, FixedClock
 # assignment rather than inheritance, so the borrow list is only as correct as
 # the coverage that calls through it. Running the lifecycle against both classes
 # catches a method bound to the wrong original, which the abstract base cannot.
-@pytest.fixture(params=[MemoryQueue, MemoryPriorityQueue], ids=["fifo", "priority"])
+@pytest.fixture(
+    params=[MemoryQueue, MemoryPriorityQueue, MemoryStack],
+    ids=["fifo", "priority", "stack"],
+)
 def queue(request):
     return request.param(queue_name="requests", clock=FixedClock())
 
 
 class TestMemoryQueueEntries:
+    def test_synchronous_entry_api_uses_the_asynchronous_implementation(self, queue):
+        entry_id = queue.enqueue({"request_id": 42})
+
+        entry = queue.get_entry(entry_id)
+        dequeued = queue.dequeue_entry()
+        running = queue.mark_running(entry_id)
+        completed = queue.mark_succeeded(entry_id, {"ok": True})
+
+        assert entry.id == entry_id
+        assert dequeued == entry
+        assert running.status is QueueEntryStatus.RUNNING
+        assert completed.status is QueueEntryStatus.SUCCEEDED
+
+    def test_asynchronous_entry_api_matches_the_synchronous_surface(self, queue):
+        async def exercise():
+            entry_id = await queue.aenqueue({"request_id": 42})
+            entry = await queue.aget_entry(entry_id)
+            dequeued = await queue.adequeue_entry()
+            running = await queue.amark_running(entry_id)
+            completed = await queue.amark_succeeded(entry_id, {"ok": True})
+            return entry_id, entry, dequeued, running, completed
+
+        entry_id, entry, dequeued, running, completed = asyncio.run(exercise())
+
+        assert entry.id == entry_id
+        assert dequeued == entry
+        assert running.status is QueueEntryStatus.RUNNING
+        assert completed.status is QueueEntryStatus.SUCCEEDED
+
+    def test_synchronous_entry_api_refuses_to_run_on_an_event_loop(self, queue):
+        async def exercise():
+            with pytest.raises(
+                RuntimeError, match="just await the async function directly"
+            ):
+                queue.enqueue("work")
+
+        asyncio.run(exercise())
+
     def test_enqueue_survives_a_failing_entry_observer(self, queue):
         def failing_receiver(sender, **kwargs):
             raise RuntimeError("observer failed")

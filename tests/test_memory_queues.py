@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from django_queue.backends import (
@@ -31,6 +33,37 @@ class TestMemoryQueueConfiguration:
 
 
 class TestMemoryQueueOperations:
+    def test_poll_does_not_accept_priority_timeout_arguments(self, queue):
+        with pytest.raises(TypeError):
+            queue.poll(timeout=1)
+
+    def test_awaiting_poll_does_not_stall_the_event_loop(self, queue):
+        async def exercise():
+            yielded = asyncio.Event()
+
+            async def confirm_loop_can_run():
+                await asyncio.sleep(0)
+                yielded.set()
+
+            poll_task = asyncio.create_task(queue.apoll())
+            confirmation = asyncio.create_task(confirm_loop_can_run())
+            await asyncio.wait_for(yielded.wait(), timeout=0.1)
+            await queue.aadd("work")
+            assert await asyncio.wait_for(poll_task, timeout=0.1) == "work"
+            await confirmation
+
+        asyncio.run(exercise())
+
+    def test_cancelling_an_awaited_poll_allows_the_event_loop_to_close(self, queue):
+        async def exercise():
+            poll_task = asyncio.create_task(queue.apoll())
+            await asyncio.sleep(0)
+            poll_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await poll_task
+
+        asyncio.run(exercise())
+
     def test_adds_and_removes_an_item(self, queue):
         queue.add("item")
 

@@ -1,3 +1,6 @@
+import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
 
 from django_queue.backends import QueueEmptyException, QueueFullException, RedisQueue
@@ -106,15 +109,31 @@ def test_decode_rejects_a_value_that_is_neither_text_nor_bytes():
 
 def test_get_reports_empty_when_another_consumer_wins_the_race(redis_queue, mocker):
     """size() and pop() are not atomic; a None pop means the queue drained."""
-    redis_queue.add("item1")
-    mocker.patch.object(redis_queue, "pop", return_value=None)
 
-    with pytest.raises(QueueEmptyException):
-        redis_queue.get()
+    async def exercise():
+        await redis_queue.aadd("item1")
+        mocker.patch.object(
+            redis_queue._async_redis(), "lpop", AsyncMock(return_value=None)
+        )
+        with pytest.raises(QueueEmptyException):
+            await redis_queue.aget()
+        await redis_queue.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_poll_reports_empty_when_the_blocking_pop_returns_nothing(redis_queue, mocker):
-    mocker.patch.object(redis_queue, "bpop", return_value=None)
+    async def exercise():
+        mocker.patch.object(
+            redis_queue._async_redis(), "blpop", AsyncMock(return_value=None)
+        )
+        with pytest.raises(QueueEmptyException):
+            await redis_queue.apoll()
+        await redis_queue.aclose()
 
-    with pytest.raises(QueueEmptyException):
-        redis_queue.poll()
+    asyncio.run(exercise())
+
+
+def test_poll_does_not_accept_priority_timeout_arguments(redis_queue):
+    with pytest.raises(TypeError):
+        redis_queue.poll(timeout=1)

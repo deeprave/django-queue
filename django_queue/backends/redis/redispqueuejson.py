@@ -3,8 +3,8 @@ try:
     from .redisqueuejson import _decode, _encode
 
     class RedisPriorityQueueJson(RedisPriorityQueue):
-        def add(self, *items: tuple[int, dict | str]) -> None:
-            super().add(
+        async def aadd(self, *items: tuple[int, dict | str]) -> None:
+            await super().aadd(
                 *(
                     (priority, _encode(item))
                     for priority, item in items
@@ -12,15 +12,15 @@ try:
                 )
             )
 
-        def get(self) -> dict | str:
-            return _decode(super().get())
+        async def aget(self) -> dict | str:
+            return _decode(await super().aget())
 
-        def poll(self, timeout: int = 0, retries: int = 10) -> dict | str:
-            fetched = super().poll(timeout=timeout)
+        async def apoll(self, timeout: int = 0, retries: int = 10) -> dict | str:
+            fetched = await super().apoll(timeout=timeout, retries=retries)
             return _decode(fetched)
 
-        def peek(self) -> dict | str:
-            return _decode(super().peek())
+        async def apeek(self) -> dict | str:
+            return _decode(await super().apeek())
 
 except ImportError:
     pass

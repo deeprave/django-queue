@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from asgiref.sync import async_to_sync
 from django.utils.module_loading import import_string
 
 from django_queue.backends.exceptions import InvalidQueueBackendError
@@ -90,84 +92,151 @@ class BaseQueue(ABC):
     def capacity(self):
         raise NotImplementedError("capacity")
 
-    @abstractmethod
     def add(self, *items):
-        raise NotImplementedError("add")
+        return self._run_synchronously(self.aadd, *items)
 
     @abstractmethod
+    async def aadd(self, *items) -> None:
+        raise NotImplementedError("aadd")
+
     def get(self):
-        raise NotImplementedError("get")
+        return self._run_synchronously(self.aget)
 
     @abstractmethod
+    async def aget(self):
+        raise NotImplementedError("aget")
+
     def poll(self):
-        raise NotImplementedError("poll")
+        return self._run_synchronously(self.apoll)
 
     @abstractmethod
+    async def apoll(self):
+        raise NotImplementedError("apoll")
+
     def peek(self):
-        raise NotImplementedError("peek")
+        return self._run_synchronously(self.apeek)
 
     @abstractmethod
+    async def apeek(self):
+        raise NotImplementedError("apeek")
+
     def size(self):
-        raise NotImplementedError("size")
+        return self._run_synchronously(self.asize)
+
+    @abstractmethod
+    async def asize(self):
+        raise NotImplementedError("asize")
 
     def is_empty(self):
         return self.size() == 0
 
+    async def ais_empty(self) -> bool:
+        return await self.asize() == 0
+
     def clear(self):
+        return self._run_synchronously(self.aclear)
+
+    async def aclear(self) -> None:
         pass
 
     def close(self):
-        pass
+        return async_to_sync(self.aclose)()
+
+    async def aclose(self) -> None:
+        """Release resources owned by the running event loop."""
+
+    def _run_synchronously(
+        self, operation: Callable[..., Awaitable[Any]], *args, **kwargs
+    ):
+        """Run one async API call and release any bridge-loop resources."""
+        return async_to_sync(self._run_and_close)(operation, *args, **kwargs)
+
+    async def _run_and_close(
+        self, operation: Callable[..., Awaitable[Any]], *args, **kwargs
+    ) -> Any:
+        try:
+            return await operation(*args, **kwargs)
+        finally:
+            await self.aclose()
+
+    def enqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+        return self._run_synchronously(
+            self.aenqueue, payload, timeout_seconds=timeout_seconds
+        )
 
     @abstractmethod
-    def enqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+    async def aenqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
         """Store a JSON-serialisable payload and return its queue-owned ID.
 
         An execution budget given here is carried on the entry and persisted
         with it, so it survives enqueue and reaches whichever worker dispatches
         the entry.
         """
-        raise NotImplementedError("enqueue")
+        raise NotImplementedError("aenqueue")
 
-    @abstractmethod
     def get_entry(self, entry_id: UUID) -> QueueEntry:
+        return self._run_synchronously(self.aget_entry, entry_id)
+
+    @abstractmethod
+    async def aget_entry(self, entry_id: UUID) -> QueueEntry:
         """Return the retained entry record for *entry_id*."""
-        raise NotImplementedError("get_entry")
+        raise NotImplementedError("aget_entry")
 
-    @abstractmethod
     def dequeue_entry(self) -> QueueEntry:
+        return self._run_synchronously(self.adequeue_entry)
+
+    @abstractmethod
+    async def adequeue_entry(self) -> QueueEntry:
         """Remove and return the next pending entry (best effort)."""
-        raise NotImplementedError("dequeue_entry")
+        raise NotImplementedError("adequeue_entry")
 
-    @abstractmethod
     def has_pending_entries(self) -> bool:
+        return self._run_synchronously(self.ahas_pending_entries)
+
+    @abstractmethod
+    async def ahas_pending_entries(self) -> bool:
         """Return whether an entry worker can dequeue pending work."""
-        raise NotImplementedError("has_pending_entries")
+        raise NotImplementedError("ahas_pending_entries")
 
-    @abstractmethod
     def mark_running(self, entry_id: UUID) -> QueueEntry:
-        raise NotImplementedError("mark_running")
+        return self._run_synchronously(self.amark_running, entry_id)
 
     @abstractmethod
+    async def amark_running(self, entry_id: UUID) -> QueueEntry:
+        raise NotImplementedError("amark_running")
+
     def mark_succeeded(self, entry_id: UUID, result) -> QueueEntry:
-        raise NotImplementedError("mark_succeeded")
+        return self._run_synchronously(self.amark_succeeded, entry_id, result)
 
     @abstractmethod
+    async def amark_succeeded(self, entry_id: UUID, result) -> QueueEntry:
+        raise NotImplementedError("amark_succeeded")
+
     def mark_failed(self, entry_id: UUID, error: Exception) -> QueueEntry:
-        raise NotImplementedError("mark_failed")
+        return self._run_synchronously(self.amark_failed, entry_id, error)
 
     @abstractmethod
+    async def amark_failed(self, entry_id: UUID, error: Exception) -> QueueEntry:
+        raise NotImplementedError("amark_failed")
+
     def mark_cancelled(self, entry_id: UUID) -> QueueEntry:
-        raise NotImplementedError("mark_cancelled")
+        return self._run_synchronously(self.amark_cancelled, entry_id)
 
     @abstractmethod
+    async def amark_cancelled(self, entry_id: UUID) -> QueueEntry:
+        raise NotImplementedError("amark_cancelled")
+
     def mark_timed_out(self, entry_id: UUID) -> QueueEntry:
+        return self._run_synchronously(self.amark_timed_out, entry_id)
+
+    @abstractmethod
+    async def amark_timed_out(self, entry_id: UUID) -> QueueEntry:
         """Record that a handler exceeded its budget and was abandoned.
 
         Distinct from cancellation, which means the worker stopped the entry
         deliberately and the handler complied.
         """
-        raise NotImplementedError("mark_timed_out")
+        raise NotImplementedError("amark_timed_out")
 
     def __len__(self):
         return self.size()

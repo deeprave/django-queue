@@ -23,6 +23,9 @@ class FixedClock:
     def now(self) -> ClockTime:
         return self.timestamp
 
+    async def anow(self) -> ClockTime:
+        return self.now()
+
 
 class FakeMonotonic:
     def __init__(self, value):

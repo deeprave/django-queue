@@ -6,6 +6,7 @@ from typing import ClassVar
 import pytest
 
 import django_queue
+import django_queue.asgi as queue_asgi
 from django_queue.apps import DjangoQueueConfig
 from django_queue.asgi import with_queue_worker
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue
@@ -54,12 +55,54 @@ class ThreadSharedQueue(MemoryQueue):
 class ThreadRecordingQueue(MemoryQueue):
     pending_check_thread_id: int | None = None
 
-    def has_pending_entries(self) -> bool:
+    async def ahas_pending_entries(self) -> bool:
         type(self).pending_check_thread_id = threading.get_ident()
         return False
 
 
 class TestQueueWorkerASGI:
+    def test_does_not_start_a_worker_when_an_enqueue_is_observed_during_shutdown(
+        self, monkeypatch
+    ):
+        asyncio.run(
+            self._does_not_start_a_worker_when_an_enqueue_is_observed_during_shutdown(
+                monkeypatch
+            )
+        )
+
+    async def _does_not_start_a_worker_when_an_enqueue_is_observed_during_shutdown(
+        self, monkeypatch
+    ):
+        queue = MemoryQueue(queue_name="requests")
+        queue.worker_class = TrackingWorker
+        received = iter(({"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}))
+        original_disconnect = queue_asgi.entry_enqueued.disconnect
+
+        def disconnect_after_observing_enqueue(receiver, **kwargs):
+            queue_asgi.entry_enqueued.send(sender=queue, queue_name="requests")
+            return original_disconnect(receiver, **kwargs)
+
+        monkeypatch.setattr(
+            queue_asgi.entry_enqueued, "disconnect", disconnect_after_observing_enqueue
+        )
+
+        async def application(scope, receive, send):
+            raise AssertionError(f"Unexpected scope: {scope['type']}")
+
+        async def receive():
+            return next(received)
+
+        async def send(message):
+            return None
+
+        await with_queue_worker(
+            application,
+            handlers={"requests": no_op_handler},
+            queues={"requests": queue},
+        )({"type": "lifespan"}, receive, send)
+
+        assert TrackingWorker.instances == 0
+
     def test_starts_a_worker_for_an_entry_enqueued_from_another_thread(self):
         asyncio.run(self._starts_a_worker_for_an_entry_enqueued_from_another_thread())
 
@@ -101,10 +144,10 @@ class TestQueueWorkerASGI:
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
 
-    def test_does_not_start_a_worker_after_lifespan_shutdown(self):
-        asyncio.run(self._does_not_start_a_worker_after_lifespan_shutdown())
+    def test_leaves_an_entry_queued_after_lifespan_shutdown(self):
+        asyncio.run(self._leaves_an_entry_queued_after_lifespan_shutdown())
 
-    async def _does_not_start_a_worker_after_lifespan_shutdown(self):
+    async def _leaves_an_entry_queued_after_lifespan_shutdown(self):
         queue = MemoryQueue(queue_name="requests")
         handled = asyncio.Event()
         received = iter(({"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}))
@@ -120,22 +163,22 @@ class TestQueueWorkerASGI:
             return next(received)
 
         async def send(message):
-            if message["type"] == "lifespan.startup.complete":
-                queue.enqueue("work")
+            return None
 
         await with_queue_worker(
             application, handlers={"requests": handle}, queues={"requests": queue}
         )({"type": "lifespan"}, receive, send)
+        entry_id = await queue.aenqueue("work")
         await asyncio.sleep(0.05)
 
-        entry = queue.get_entry(next(iter(queue._entries)))
+        entry = await queue.aget_entry(entry_id)
         assert handled.is_set() is False
         assert entry.status.value == "queued"
 
-    def test_checks_pending_entries_off_the_event_loop(self):
-        asyncio.run(self._checks_pending_entries_off_the_event_loop())
+    def test_checks_pending_entries_on_the_event_loop(self):
+        asyncio.run(self._checks_pending_entries_on_the_event_loop())
 
-    async def _checks_pending_entries_off_the_event_loop(self):
+    async def _checks_pending_entries_on_the_event_loop(self):
         queue = ThreadRecordingQueue(queue_name="requests")
         ThreadRecordingQueue.pending_check_thread_id = None
         loop_thread_id = threading.get_ident()
@@ -156,7 +199,7 @@ class TestQueueWorkerASGI:
             queues={"requests": queue},
         )({"type": "lifespan"}, receive, send)
 
-        assert ThreadRecordingQueue.pending_check_thread_id != loop_thread_id
+        assert ThreadRecordingQueue.pending_check_thread_id == loop_thread_id
 
     def test_creates_the_configured_worker_only_after_local_enqueue(self, monkeypatch):
         asyncio.run(
@@ -208,13 +251,13 @@ class TestQueueWorkerASGI:
         await asyncio.wait_for(startup_complete.wait(), timeout=1)
         assert TrackingWorker.instances == 0
 
-        entry_id = queue.enqueue("work")
+        entry_id = await queue.aenqueue("work")
         await asyncio.wait_for(handled.wait(), timeout=1)
         assert TrackingWorker.instances == 1
-        await asyncio.wait_for(
-            _wait_until(lambda: queue.get_entry(entry_id).result == "work"), timeout=1
-        )
-        assert queue.get_entry(entry_id).result == "work"
+        async with asyncio.timeout(1):
+            while (await queue.aget_entry(entry_id)).result != "work":
+                await asyncio.sleep(0)
+        assert (await queue.aget_entry(entry_id)).result == "work"
 
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
@@ -252,7 +295,7 @@ class TestQueueWorkerASGI:
             )({"type": "lifespan"}, receive, send)
         )
         await asyncio.wait_for(startup_complete.wait(), timeout=1)
-        queue.enqueue("work")
+        await queue.aenqueue("work")
         await asyncio.wait_for(handled.wait(), timeout=1)
 
         shutdown.set()
@@ -286,7 +329,7 @@ class TestQueueWorkerASGI:
             )({"type": "lifespan"}, receive, send)
         )
         await asyncio.wait_for(startup_complete.wait(), timeout=1)
-        queue.enqueue("work")
+        await queue.aenqueue("work")
 
         with pytest.raises(RuntimeError, match="worker construction failed"):
             await asyncio.wait_for(task, timeout=1)
@@ -314,7 +357,7 @@ class TestQueueWorkerASGI:
         monkeypatch.setattr(django_queue, "queues", configured_queues)
         DjangoQueueConfig("django_queue", django_queue).ready()
         queue = configured_queues["requests"]
-        entry_id = queue.enqueue({"request_id": 42})
+        entry_id = await queue.aenqueue({"request_id": 42})
         shutdown = asyncio.Event()
         messages = []
 
@@ -344,12 +387,11 @@ class TestQueueWorkerASGI:
         # Shut down only once the worker has recorded the entry's outcome: a
         # shutdown may interrupt an in-flight terminal write, so triggering it
         # mid-dispatch would race the very result this asserts.
-        await asyncio.wait_for(
-            _wait_until(
-                lambda: queue.get_entry(entry_id).status is QueueEntryStatus.SUCCEEDED
-            ),
-            timeout=1,
-        )
+        async with asyncio.timeout(1):
+            while (
+                await queue.aget_entry(entry_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0)
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
 
@@ -357,7 +399,7 @@ class TestQueueWorkerASGI:
             {"type": "lifespan.startup.complete"},
             {"type": "lifespan.shutdown.complete"},
         ]
-        assert queue.get_entry(entry_id).result == {"processed": 42}
+        assert (await queue.aget_entry(entry_id)).result == {"processed": 42}
         assert "not supported for production use" in caplog.text
 
     def test_shutdown_waits_for_an_active_handler_to_finish(self):
@@ -365,7 +407,7 @@ class TestQueueWorkerASGI:
 
     async def _shutdown_waits_for_an_active_handler_to_finish(self):
         queue = MemoryQueue(queue_name="requests")
-        queue.enqueue("work")
+        await queue.aenqueue("work")
         started = asyncio.Event()
         release = asyncio.Event()
         shutdown = asyncio.Event()
@@ -544,10 +586,10 @@ class TestQueueWorkerASGI:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        entry_id = queue.enqueue("work after cancellation")
+        entry_id = await queue.aenqueue("work after cancellation")
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(handled.wait(), timeout=0.15)
-        assert queue.get_entry(entry_id).status.value == "queued"
+        assert (await queue.aget_entry(entry_id)).status.value == "queued"
 
     def test_ignores_unexpected_lifespan_messages_until_shutdown(self):
         asyncio.run(self._ignores_unexpected_lifespan_messages_until_shutdown())
@@ -610,7 +652,7 @@ class TestQueueWorkerASGI:
 
         caplog.set_level(logging.ERROR, logger="django_queue.asgi")
         queue = ExplodingQueue(queue_name="requests")
-        queue.enqueue("pending")
+        await queue.aenqueue("pending")
         task = asyncio.create_task(
             with_queue_worker(
                 application,
@@ -667,7 +709,7 @@ class TestQueueWorkerASGI:
 
 
 class ExplodingQueue(MemoryQueue):
-    def dequeue_entry(self):
+    async def adequeue_entry(self):
         raise RuntimeError("backend failed")
 
 

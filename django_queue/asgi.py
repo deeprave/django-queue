@@ -8,6 +8,7 @@ from collections.abc import Callable, Coroutine, Iterable, Mapping
 from typing import Any
 
 import django_queue
+from django_queue.backends.base import BaseQueue
 from django_queue.signals import entry_enqueued
 from django_queue.worker import QueueHandler as QueueEntryHandler
 from django_queue.worker import QueueLookup
@@ -93,11 +94,12 @@ def with_queue_worker(
 
         try:
             for alias, queue in configured_queues.items():
-                if await asyncio.to_thread(queue.has_pending_entries):
+                if await queue.ahas_pending_entries():
                     start_worker(alias)
         except Exception:
             closing = True
             await _stop_workers(worker_tasks.values())
+            await _aclose_queues(configured_queues.values())
             logger.exception("Unable to start ASGI queue worker")
             await send(
                 {
@@ -136,6 +138,7 @@ def with_queue_worker(
                 receive_task.cancel()
             await asyncio.gather(receive_task, return_exceptions=True)
             await _stop_workers(worker_tasks.values())
+            await _aclose_queues(configured_queues.values())
         await send({"type": "lifespan.shutdown.complete"})
 
     return wrapped
@@ -151,6 +154,16 @@ def _log_worker_failure(task: asyncio.Task[None]) -> None:
             "ASGI queue worker stopped unexpectedly and will not be restarted",
             exc_info=(type(exc), exc, exc.__traceback__),
         )
+
+
+async def _aclose_queues(queues: Iterable[BaseQueue]) -> None:
+    """Release resources on the lifespan loop that acquired them."""
+    results = await asyncio.gather(
+        *(queue.aclose() for queue in set(queues)), return_exceptions=True
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error("Unable to dispose ASGI queue resources", exc_info=result)
 
 
 async def _stop_workers(worker_tasks: Iterable[asyncio.Task[None]]) -> None:

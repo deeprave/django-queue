@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
@@ -25,6 +27,25 @@ class HandlerMetadataBackend(MemoryQueue):
         assert "WORKER" not in options
         assert "ENTRY_CLASS" not in options
         super().__init__(location, options)
+
+
+class ClosingMemoryQueue(MemoryQueue):
+    closed = 0
+
+    async def aclose(self):
+        type(self).closed += 1
+
+
+class FailingClosingMemoryQueue(MemoryQueue):
+    async def aclose(self):
+        raise ConnectionError("queue close failed")
+
+
+class RecordingClosingMemoryQueue(MemoryQueue):
+    closed = 0
+
+    async def aclose(self):
+        type(self).closed += 1
 
 
 class TrackingWorker(AsyncQueueWorker):
@@ -57,6 +78,59 @@ def reset_tracking_extension_instances():
 
 
 class TestConfiguredQueueInitialization:
+    def test_asynchronous_disposal_attempts_later_queues_after_a_failure(self, caplog):
+        RecordingClosingMemoryQueue.closed = 0
+        handler = django_queue.QueueHandler(
+            {
+                "broken": {
+                    "BACKEND": "tests.test_configured_queues.FailingClosingMemoryQueue",
+                    "LOCATION": "",
+                },
+                "remaining": {
+                    "BACKEND": "tests.test_configured_queues.RecordingClosingMemoryQueue",
+                    "LOCATION": "",
+                },
+            }
+        )
+        django_queue.initialise_queues(handler)
+
+        asyncio.run(django_queue.aclose_queues(handler))
+
+        assert RecordingClosingMemoryQueue.closed == 1
+        assert "Unable to dispose queue resources" in caplog.text
+
+    def test_asynchronous_disposal_closes_initialised_queues(self):
+        ClosingMemoryQueue.closed = 0
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "tests.test_configured_queues.ClosingMemoryQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        django_queue.initialise_queues(handler)
+
+        asyncio.run(django_queue.aclose_queues(handler))
+
+        assert ClosingMemoryQueue.closed == 1
+
+    def test_synchronous_disposal_remains_a_synchronous_callable(self):
+        ClosingMemoryQueue.closed = 0
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "tests.test_configured_queues.ClosingMemoryQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        django_queue.initialise_queues(handler)
+
+        django_queue.close_queues(handler)
+
+        assert ClosingMemoryQueue.closed == 1
+
     def test_invalid_backend_errors_are_queue_and_django_configuration_errors(self):
         assert issubclass(QueueException, Exception)
         assert issubclass(InvalidQueueBackendError, QueueException)

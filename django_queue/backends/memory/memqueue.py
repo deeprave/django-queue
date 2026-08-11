@@ -1,3 +1,4 @@
+import asyncio
 import queue
 from dataclasses import replace
 from uuid import UUID
@@ -8,6 +9,15 @@ from django_queue.signals import send_entry_enqueued
 
 from ..base import BaseQueue
 from ..exceptions import QueueEmptyException, QueueFullException
+
+
+async def apoll_item(item_queue: queue.Queue):
+    """Wait for a raw item without leaving a cancellable thread-side get."""
+    while True:
+        try:
+            return item_queue.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(0.01)
 
 
 class MemoryQueue(BaseQueue):
@@ -33,43 +43,44 @@ class MemoryQueue(BaseQueue):
     def capacity(self):
         return self._maxsize
 
-    def add(self, *items):
+    async def aadd(self, *items):
         for item in items:
             try:
                 self._queue.put_nowait(item)
             except queue.Full as e:
                 raise QueueFullException from e
 
-    def get(self):
+    async def aget(self):
         try:
             return self._queue.get_nowait()
         except queue.Empty as e:
             raise QueueEmptyException from e
 
-    def poll(self):
-        return self._queue.get(block=True)
+    async def apoll(self):
+        """Wait for a raw item without blocking or losing it on cancellation."""
+        return await apoll_item(self._queue)
 
-    def peek(self):
+    async def apeek(self):
         if self._queue.qsize() == 0:
             raise QueueEmptyException
         return self._queue.queue[0]
 
-    def size(self):
+    async def asize(self):
         return self._queue.qsize()
 
-    def clear(self):
+    async def aclear(self):
         while True:
             try:
-                self.get()
+                await self.aget()
             except QueueEmptyException:
                 break
 
-    def enqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+    async def aenqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
         validate_json_value(payload)
         entry = self.entry_class.create(
             queue=self._queue_name,
             payload=payload,
-            queued_at=self.clock.now(),
+            queued_at=await self.clock.anow(),
             timeout_seconds=timeout_seconds,
         )
         self._entries[entry.id] = entry
@@ -77,64 +88,66 @@ class MemoryQueue(BaseQueue):
         send_entry_enqueued(self, entry=entry)
         return entry.id
 
-    def get_entry(self, entry_id: UUID) -> QueueEntry:
+    async def aget_entry(self, entry_id: UUID) -> QueueEntry:
         try:
             return self._entries[entry_id]
         except KeyError as exc:
             raise QueueEmptyException from exc
 
-    def dequeue_entry(self) -> QueueEntry:
+    async def adequeue_entry(self) -> QueueEntry:
         try:
-            return self.get_entry(self._pending_entries.get_nowait())
+            return await self.aget_entry(self._pending_entries.get_nowait())
         except queue.Empty as exc:
             raise QueueEmptyException from exc
 
-    def has_pending_entries(self) -> bool:
+    async def ahas_pending_entries(self) -> bool:
         return not self._pending_entries.empty()
 
-    def mark_running(self, entry_id: UUID) -> QueueEntry:
-        return self._replace_entry(
-            entry_id, status=QueueEntryStatus.RUNNING, dispatched_at=self.clock.now()
+    async def amark_running(self, entry_id: UUID) -> QueueEntry:
+        return await self._areplace_entry(
+            entry_id,
+            status=QueueEntryStatus.RUNNING,
+            dispatched_at=await self.clock.anow(),
         )
 
-    def mark_succeeded(self, entry_id: UUID, result) -> QueueEntry:
+    async def amark_succeeded(self, entry_id: UUID, result) -> QueueEntry:
         validate_json_value(result)
-        return self._replace_entry(
+        return await self._areplace_entry(
             entry_id,
             status=QueueEntryStatus.SUCCEEDED,
             result=result,
             error=None,
-            finished_at=self.clock.now(),
+            finished_at=await self.clock.anow(),
         )
 
-    def mark_failed(self, entry_id: UUID, error: Exception) -> QueueEntry:
-        return self._replace_entry(
+    async def amark_failed(self, entry_id: UUID, error: Exception) -> QueueEntry:
+        return await self._areplace_entry(
             entry_id,
             status=QueueEntryStatus.FAILED,
             error={"type": type(error).__name__, "message": str(error)},
-            finished_at=self.clock.now(),
+            finished_at=await self.clock.anow(),
         )
 
-    def mark_cancelled(self, entry_id: UUID) -> QueueEntry:
-        return self._replace_entry(
+    async def amark_cancelled(self, entry_id: UUID) -> QueueEntry:
+        return await self._areplace_entry(
             entry_id,
             status=QueueEntryStatus.CANCELLED,
-            finished_at=self.clock.now(),
+            finished_at=await self.clock.anow(),
         )
 
-    def mark_timed_out(self, entry_id: UUID) -> QueueEntry:
-        return self._replace_entry(
+    async def amark_timed_out(self, entry_id: UUID) -> QueueEntry:
+        return await self._areplace_entry(
             entry_id,
             status=QueueEntryStatus.TIMEOUT,
-            finished_at=self.clock.now(),
+            finished_at=await self.clock.anow(),
         )
 
-    def _replace_entry(
+    async def _areplace_entry(
         self, entry_id: UUID, *, status: QueueEntryStatus, **changes
     ) -> QueueEntry:
         if not isinstance(status, QueueEntryStatus):
             raise TypeError("Queue entry status must be a QueueEntryStatus")
-        previous_entry = self.get_entry(entry_id)
+        previous_entry = await self.aget_entry(entry_id)
         if status not in previous_entry.status.next_state():
             raise ValueError(
                 f"Cannot transition queue entry from {previous_entry.status} to {status}"

@@ -1,6 +1,12 @@
+import asyncio
+import threading
 from uuid import uuid4
 
 import pytest
+import redis
+import redis.asyncio as async_redis
+from redis.backoff import ConstantBackoff
+from redis.retry import Retry
 
 from django_queue.backends import (
     RedisPriorityQueue,
@@ -8,9 +14,13 @@ from django_queue.backends import (
     RedisQueueJson,
     RedisStack,
 )
-from django_queue.backends.exceptions import QueueEmptyException
-from django_queue.clock import ClockTime
+from django_queue.backends.exceptions import (
+    InvalidQueueBackendError,
+    QueueEmptyException,
+)
+from django_queue.clock import ClockTime, QueueClockError
 from django_queue.entries import QueueEntryStatus
+from django_queue.worker import AsyncQueueWorker
 from tests.helpers import CustomQueueEntry
 
 
@@ -20,6 +30,145 @@ def redis_entry_queue(redis_client):
 
 
 class TestRedisQueueEntries:
+    def test_uses_distinct_clients_for_a_worker_loop_and_sync_bridge(
+        self, redis_client
+    ):
+        queue = RedisQueue(redis_client, queue_name=f"entry-loops-{uuid4().hex}")
+        clients_by_loop = {}
+        original_async_redis = queue._async_redis
+
+        def record_client():
+            loop = asyncio.get_running_loop()
+            client = original_async_redis()
+            clients_by_loop[loop] = client
+            return client
+
+        queue._async_redis = record_client
+        worker_ready = threading.Event()
+        release_worker = threading.Event()
+        worker_failure = []
+
+        async def handle(entry):
+            return entry.payload
+
+        def run_worker_loop():
+            async def exercise():
+                entry_id = await queue.aenqueue({"from": "worker"})
+                worker = AsyncQueueWorker(
+                    {"requests": queue}, {"requests": handle}, idle_delay=0.001
+                )
+                worker_task = asyncio.create_task(worker.run())
+                while (
+                    await queue.aget_entry(entry_id)
+                ).status is not QueueEntryStatus.SUCCEEDED:
+                    await asyncio.sleep(0.001)
+                worker_ready.set()
+                await asyncio.to_thread(release_worker.wait)
+                worker_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await worker_task
+                await queue.aclose()
+
+            try:
+                asyncio.run(exercise())
+            except Exception as exc:  # noqa: BLE001 - surface thread failures in this test
+                worker_failure.append(exc)
+
+        worker_thread = threading.Thread(target=run_worker_loop)
+        worker_thread.start()
+        try:
+            assert worker_ready.wait(timeout=1)
+            assert not worker_failure
+            worker_client = next(iter(queue._async_redis_by_loop.values()))
+
+            queue.enqueue({"from": "bridge"})
+
+            assert len(clients_by_loop) == 2
+            assert len(set(clients_by_loop.values())) == 2
+            assert list(queue._async_redis_by_loop.values()) == [worker_client]
+        finally:
+            release_worker.set()
+            worker_thread.join(timeout=1)
+
+        assert not worker_thread.is_alive()
+        assert not worker_failure
+
+    def test_uses_tls_when_cloning_a_sync_tls_client(self):
+        source = redis.Redis(host="localhost", ssl=True)
+        queue = RedisQueue(source, queue_name=f"entry-tls-{uuid4().hex}")
+
+        async def exercise():
+            client = queue._async_redis()
+            assert client.connection_pool.connection_class is async_redis.SSLConnection
+            await queue.aclose()
+
+        asyncio.run(exercise())
+        source.close()
+
+    def test_translates_a_sync_retry_policy_when_cloning_a_client(self):
+        source = redis.Redis(retry=Retry(ConstantBackoff(0.1), 3))
+        queue = RedisQueue(source, queue_name=f"entry-retry-{uuid4().hex}")
+
+        async def exercise():
+            retry = queue._async_redis().connection_pool.connection_kwargs["retry"]
+            assert isinstance(retry, async_redis.retry.Retry)
+            assert retry._retries == 3
+            source_retry = source.connection_pool.connection_kwargs["retry"]
+            assert retry._backoff.compute(1) == source_retry._backoff.compute(1)
+            await queue.aclose()
+
+        asyncio.run(exercise())
+        source.close()
+
+    def test_rejects_a_sync_retry_policy_without_cloneable_attributes(self):
+        retry = Retry(ConstantBackoff(0.1), 3)
+        del retry._backoff
+        source = redis.Redis(retry=retry)
+        queue = RedisQueue(source, queue_name=f"entry-retry-{uuid4().hex}")
+
+        async def exercise():
+            queue._async_redis()
+
+        # The client is created before Redis is contacted, so unsupported
+        # retry configuration is reported without requiring a live server.
+        with pytest.raises(
+            InvalidQueueBackendError, match="retry policy is unsupported"
+        ):
+            asyncio.run(exercise())
+        source.close()
+
+    def test_url_configuration_does_not_construct_a_sync_redis_client(self):
+        queue = RedisQueue("redis://localhost:6379/0")
+
+        assert queue._redis is None
+
+    def test_clock_now_requires_async_calibration_on_an_active_loop(
+        self, redis_entry_queue
+    ):
+        async def exercise():
+            with pytest.raises(QueueClockError, match="await queue.clock.anow"):
+                redis_entry_queue.clock.now()
+
+        asyncio.run(exercise())
+
+    def test_awaited_entry_lifecycle_and_loop_local_client_reuse(self, redis_client):
+        queue = RedisQueue(redis_client, queue_name=f"entry-async-{uuid4().hex}")
+
+        async def exercise():
+            entry_id = await queue.aenqueue({"request_id": 42})
+            assert (await queue.adequeue_entry()).id == entry_id
+            assert (
+                await queue.amark_running(entry_id)
+            ).status is QueueEntryStatus.RUNNING
+            completed = await queue.amark_succeeded(entry_id, {"ok": True})
+            assert completed.status is QueueEntryStatus.SUCCEEDED
+            first_client = queue._async_redis()
+            await queue.aclose()
+            assert not queue._async_redis_by_loop
+            assert queue._async_redis() is not first_client
+
+        asyncio.run(exercise())
+
     def test_persists_an_identified_entry_separately_from_raw_queue_values(
         self, redis_entry_queue
     ):
@@ -33,6 +182,22 @@ class TestRedisQueueEntries:
         assert entry.status is QueueEntryStatus.QUEUED
         assert entry.payload == {"request_id": 42}
         assert redis_entry_queue.get() == "raw-value"
+
+    def test_synchronous_entry_api_closes_each_bridge_loop_client(
+        self, redis_entry_queue
+    ):
+        redis_entry_queue.enqueue("work")
+
+        assert not redis_entry_queue._async_redis_by_loop
+
+    def test_synchronous_clock_reads_close_each_bridge_loop_client(
+        self, redis_entry_queue
+    ):
+        redis_entry_queue.clock.now()
+        redis_entry_queue.clock.now()
+
+        assert not redis_entry_queue._async_redis_by_loop
+        assert not redis_entry_queue._clocks_by_loop
 
     def test_dequeues_an_entry_atomically_from_pending_work(self, redis_entry_queue):
         entry_id = redis_entry_queue.enqueue("work")

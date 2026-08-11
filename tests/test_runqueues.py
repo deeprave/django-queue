@@ -2,7 +2,7 @@ import asyncio
 import logging
 import signal
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from io import StringIO
 
 import pytest
@@ -97,22 +97,27 @@ class TestRunQueuesCommand:
         await asyncio.sleep(0)
         assert TrackingWorker.instances == 0
 
-        first_id = queues["first"].enqueue("first")
-        second_id = queues["second"].enqueue("second")
+        first_id = await queues["first"].aenqueue("first")
+        second_id = await queues["second"].aenqueue("second")
+
+        async def entries_completed():
+            first = await queues["first"].aget_entry(first_id)
+            second = await queues["second"].aget_entry(second_id)
+            return first.result is not None and second.result is not None
+
         await asyncio.wait_for(
-            self._wait_until(
-                lambda: all(
-                    queues[name].get_entry(entry_id).result is not None
-                    for name, entry_id in (("first", first_id), ("second", second_id))
-                )
-            ),
+            self._wait_until(entries_completed),
             timeout=1,
         )
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
 
-        assert queues["first"].get_entry(first_id).result == {"handled": "first"}
-        assert queues["second"].get_entry(second_id).result == {"handled": "second"}
+        assert (await queues["first"].aget_entry(first_id)).result == {
+            "handled": "first"
+        }
+        assert (await queues["second"].aget_entry(second_id)).result == {
+            "handled": "second"
+        }
         assert TrackingWorker.instances == 2
         assert set(output.getvalue().splitlines()) == {
             "Started queue handler for first.",
@@ -145,7 +150,7 @@ class TestRunQueuesCommand:
         task = asyncio.create_task(
             command._run_configured_workers(command._create_workers(), shutdown)
         )
-        queues["first"].enqueue("first")
+        await queues["first"].aenqueue("first")
         await asyncio.wait_for(
             self._wait_until(
                 lambda: output.getvalue() == "Started queue handler for first.\n"
@@ -282,9 +287,9 @@ class TestRunQueuesCommand:
     async def _continues_healthy_workers_after_another_worker_fails(self, caplog):
         shutdown = asyncio.Event()
         healthy_queue = MemoryQueue(queue_name="healthy")
-        healthy_queue.enqueue("healthy")
+        await healthy_queue.aenqueue("healthy")
         failed_queue = ExplodingQueue(queue_name="failed")
-        failed_queue.enqueue("failed")
+        await failed_queue.aenqueue("failed")
         caplog.set_level(
             logging.ERROR, logger="django_queue.management.commands.runqueues"
         )
@@ -323,7 +328,7 @@ class TestRunQueuesCommand:
         shutdown = asyncio.Event()
         idle_queue = MemoryQueue(queue_name="idle")
         failed_queue = ExplodingQueue(queue_name="failed")
-        failed_queue.enqueue("failed")
+        await failed_queue.aenqueue("failed")
         caplog.set_level(
             logging.ERROR, logger="django_queue.management.commands.runqueues"
         )
@@ -348,14 +353,14 @@ class TestRunQueuesCommand:
         # configured and still being watched, and must not be torn down.
         assert task.done() is False
 
-        idle_queue.enqueue("idle work")
+        idle_entry_id = await idle_queue.aenqueue("idle work")
+
+        async def idle_entry_completed():
+            entry = await idle_queue.aget_entry(idle_entry_id)
+            return entry.result is not None
+
         await asyncio.wait_for(
-            self._wait_until(
-                lambda: (
-                    idle_queue.get_entry(next(iter(idle_queue._entries))).result
-                    is not None
-                )
-            ),
+            self._wait_until(idle_entry_completed),
             timeout=1,
         )
 
@@ -363,8 +368,11 @@ class TestRunQueuesCommand:
         await asyncio.wait_for(task, timeout=1)
 
     @staticmethod
-    async def _wait_until(condition: Callable[[], bool]) -> None:
-        while not condition():
+    async def _wait_until(condition: Callable[[], Awaitable[bool] | bool]) -> None:
+        while True:
+            result = condition()
+            if result if isinstance(result, bool) else await result:
+                return
             await asyncio.sleep(0)
 
     def test_exits_when_the_last_active_worker_fails(self):
@@ -372,7 +380,7 @@ class TestRunQueuesCommand:
 
     async def _exits_when_the_last_active_worker_fails(self):
         queue = ExplodingQueue(queue_name="default")
-        queue.enqueue("work")
+        await queue.aenqueue("work")
 
         with pytest.raises(RuntimeError, match="backend failed"):
             await Command()._run_configured_workers(
@@ -393,7 +401,7 @@ class TestRunQueuesCommand:
             await release.wait()
             return "done"
 
-        queue.enqueue("work")
+        await queue.aenqueue("work")
         task = asyncio.create_task(
             Command()._run_configured_workers(
                 [ConfiguredWorkerActivation("default", queue, handler)],
@@ -471,6 +479,6 @@ class ExplodingQueue(MemoryQueue):
         super().__init__(*args, **kwargs)
         self.dequeue_started = threading.Event()
 
-    def dequeue_entry(self):
+    async def adequeue_entry(self):
         self.dequeue_started.set()
         raise RuntimeError("backend failed")

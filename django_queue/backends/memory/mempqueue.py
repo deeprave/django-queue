@@ -4,7 +4,7 @@ from django_queue.clock import DEFAULT_CLOCK
 
 from ..base import BaseQueue
 from ..exceptions import QueueEmptyException, QueueFullException
-from .memqueue import MemoryQueue
+from .memqueue import MemoryQueue, apoll_item
 
 
 class MemoryPriorityQueue(BaseQueue):
@@ -22,7 +22,7 @@ class MemoryPriorityQueue(BaseQueue):
     def capacity(self):
         return self._maxsize
 
-    def add(self, *items):
+    async def aadd(self, *items):
         for item in items:
             priority, value = 0, item
             if isinstance(value, (tuple, list)):
@@ -32,36 +32,36 @@ class MemoryPriorityQueue(BaseQueue):
                 raise QueueFullException
             self._queue.put_nowait((-int(priority), value))
 
-    def get(self):
+    async def aget(self):
         if self._queue.empty():
             raise QueueEmptyException
         return self._queue.get_nowait()[1]
 
-    def poll(self):
-        return self._queue.get(block=True)[1]
+    async def apoll(self):
+        return (await apoll_item(self._queue))[1]
 
-    def peek(self):
+    async def apeek(self):
         if self._queue.empty():
             raise QueueEmptyException
         return self._queue.queue[0][1]
 
-    def size(self):
+    async def asize(self):
         return self._queue.qsize()
 
-    def clear(self):
+    async def aclear(self):
         while True:
             try:
-                self.get()
+                await self.aget()
             except QueueEmptyException:
                 break
 
-    enqueue = MemoryQueue.enqueue
-    get_entry = MemoryQueue.get_entry
-    dequeue_entry = MemoryQueue.dequeue_entry
-    has_pending_entries = MemoryQueue.has_pending_entries
-    mark_running = MemoryQueue.mark_running
-    mark_succeeded = MemoryQueue.mark_succeeded
-    mark_failed = MemoryQueue.mark_failed
-    mark_cancelled = MemoryQueue.mark_cancelled
-    mark_timed_out = MemoryQueue.mark_timed_out
-    _replace_entry = MemoryQueue._replace_entry
+    aenqueue = MemoryQueue.aenqueue
+    aget_entry = MemoryQueue.aget_entry
+    adequeue_entry = MemoryQueue.adequeue_entry
+    ahas_pending_entries = MemoryQueue.ahas_pending_entries
+    amark_running = MemoryQueue.amark_running
+    amark_succeeded = MemoryQueue.amark_succeeded
+    amark_failed = MemoryQueue.amark_failed
+    amark_cancelled = MemoryQueue.amark_cancelled
+    amark_timed_out = MemoryQueue.amark_timed_out
+    _areplace_entry = MemoryQueue._areplace_entry
