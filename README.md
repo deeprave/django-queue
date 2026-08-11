@@ -280,8 +280,19 @@ The worker dispatches one entry at a time and runs until cancelled. On
 cancellation it stops accepting new entries, gives an active handler its
 configured grace period, then cancels it if needed. Delivery is best effort:
 an unexpected process failure after dequeue and before the terminal outcome is
-stored can lose that entry. Claim/acknowledge and recovery are planned
-follow-up work.
+stored can lose that entry. Redis queues provide additive claim/acknowledge
+primitives for the later recovery protocol, but workers do not use them yet:
+an unrecovered claim is not redelivered in this release.
+
+A Redis claim atomically transfers one pending entry to a supplied worker ID;
+only that worker may acknowledge it. Claims preserve the original entry ID and
+record Redis-derived ownership metadata. They have no lease expiry, retry or
+requeue behaviour here. `add-redis-lease-recovery` will make workers adopt the
+protocol and add recovery, so claim/acknowledge is not an application delivery
+guarantee today. A claim raises `QueueEmptyException` when no entry is pending,
+`QueueClaimConflictError` when its pending entry is already claimed, and
+`QueueEntryMissingError` when the claimed entry record is unavailable. Redis
+Cluster is not supported by these primitives.
 
 If a terminal outcome cannot be persisted, the worker logs the infrastructure
 failure and continues. When it can still read a `running` entry, it makes one

@@ -1,7 +1,9 @@
 from .exceptions import (
     InvalidQueueBackendError,
+    QueueClaimConflictError,
     QueueEmptyException,
     QueueEncodingException,
+    QueueEntryMissingError,
     QueueFullException,
     QueueValueError,
 )
@@ -20,8 +22,10 @@ __all__ = (
     "MemoryPriorityQueue",
     "MemoryQueue",
     "MemoryStack",
+    "QueueClaimConflictError",
     "QueueEmptyException",
     "QueueEncodingException",
+    "QueueEntryMissingError",
     "QueueFullException",
     "QueueValueError",
     "RedisPriorityQueue",
