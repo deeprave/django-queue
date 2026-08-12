@@ -302,7 +302,7 @@ class TestRedisQueueEntries:
         assert queue.claim_entry(worker_id).id == entry_id
         assert queue.acknowledge_claim(entry_id, worker_id)
 
-    def test_claim_and_acknowledge_entries_with_a_non_utf8_client_encoding(
+    def test_claim_and_acknowledge_stack_entries_with_a_non_utf8_client_encoding(
         self, redis_client
     ):
         client = redis.Redis(
@@ -310,8 +310,9 @@ class TestRedisQueueEntries:
             port=redis_client.connection_pool.connection_kwargs["port"],
             encoding="utf-16",
         )
-        queue = RedisQueue(client, queue_name=f"claim-client-encoding-{uuid4().hex}")
-        entry_id = queue.enqueue("work")
+        queue = RedisStack(client, queue_name=f"claim-client-encoding-{uuid4().hex}")
+        queue.enqueue("first")
+        entry_id = queue.enqueue("latest")
         worker_id = uuid4()
 
         try:
