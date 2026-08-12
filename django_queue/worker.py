@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from uuid import UUID
 
 from django_queue.backends.base import BaseQueue
-from django_queue.backends.exceptions import QueueEmptyException
+from django_queue.backends.exceptions import (
+    QueueClaimConflictError,
+    QueueEmptyException,
+    QueueEntryMissingError,
+)
 from django_queue.clock import (
     DEFAULT_CLOCK,
     ClockTime,
@@ -35,6 +41,11 @@ WORKER_EVENT_MESSAGES: Mapping[str, str] = {
     "terminal_recorded": "Queue worker recorded a terminal outcome",
     "stopped": "Queue worker stopped",
 }
+
+_SHORT_LEASE_SECONDS = 60
+_MEDIUM_LEASE_SECONDS = 600
+_RECOVERY_INTERVAL_SECONDS = 1
+_CLAIM_CONFLICT_LOG_INTERVAL_SECONDS = 60
 
 # A coroutine rather than any awaitable: the worker schedules handlers with
 # asyncio.create_task, and runqueues already rejects non-coroutine handlers.
@@ -120,6 +131,13 @@ class AsyncQueueWorker:
     ) -> None:
         if timeout_seconds is not None:
             validate_budget(timeout_seconds)
+        if type(cancellation_grace_period) not in (int, float) or (
+            not math.isfinite(cancellation_grace_period)
+            or cancellation_grace_period < 0
+        ):
+            raise ValueError(
+                "Cancellation grace period must be a finite non-negative number of seconds"
+            )
         self._timeout_seconds = timeout_seconds
         self._clock: QueueClock = clock or DEFAULT_CLOCK
         self._queues = {name: queues[name] for name in handlers}
@@ -137,6 +155,8 @@ class AsyncQueueWorker:
         self._cancelled_count = 0
         self._timed_out_count = 0
         self._running = False
+        self._last_recovery_at: dict[BaseQueue, float] = {}
+        self._last_claim_conflict_at: dict[UUID, float] = {}
 
     @property
     def running(self) -> bool:
@@ -217,15 +237,26 @@ class AsyncQueueWorker:
                 dispatched = False
                 for name, queue in self._queues.items():
                     try:
-                        entry = await queue.adequeue_entry()
+                        next_entry = await self._next_entry(queue)
                     except QueueEmptyException:
                         continue
+                    except QueueClaimConflictError as exc:
+                        self._log_claim_conflict(exc.entry_id)
+                        continue
+                    except QueueEntryMissingError as exc:
+                        await self._discard_missing_entry_claim(queue, exc.entry_id)
+                        continue
+                    if next_entry is None:
+                        continue
+                    entry, lease_seconds = next_entry
                     dispatched = True
                     self._active_entry_id = entry.id
                     self._active_queue_name = name
                     self._dispatch_count += 1
                     self._log_state_change("dispatch_started")
-                    await self._dispatch(queue, self._handlers[name], entry)
+                    await self._dispatch(
+                        queue, self._handlers[name], entry, lease_seconds
+                    )
                 if not dispatched:
                     await asyncio.sleep(self._idle_delay)
         finally:
@@ -235,14 +266,101 @@ class AsyncQueueWorker:
             self._active_queue_name = None
             self._log_state_change("stopped")
 
-    async def _dispatch(
-        self, queue: BaseQueue, handler: QueueHandler, entry: QueueEntry
+    async def _next_entry(
+        self, queue: BaseQueue
+    ) -> tuple[QueueEntry, float | None] | None:
+        """Get one entry, claiming and leasing it where the backend supports it."""
+        if not queue.supports_claim_leases:
+            return await queue.adequeue_entry(), None
+        now = asyncio.get_running_loop().time()
+        if (
+            now - self._last_recovery_at.get(queue, float("-inf"))
+            >= _RECOVERY_INTERVAL_SECONDS
+        ):
+            self._last_recovery_at[queue] = now
+            recovered_count = await queue.arecover_expired_claims()
+            if recovered_count:
+                logger.warning(
+                    "Recovered %s expired queue claim%s",
+                    recovered_count,
+                    "s" if recovered_count != 1 else "",
+                )
+        entry = await queue.aclaim_entry(self._worker_id)
+        lease_seconds = (
+            self.resolve_budget(queue, entry) + self._cancellation_grace_period
+        )
+        if not await queue.arenew_claim(entry.id, self._worker_id, lease_seconds):
+            logger.warning("Lost claim for queue entry %s before dispatch", entry.id)
+            return None
+        self._last_claim_conflict_at.pop(entry.id, None)
+        return entry, lease_seconds
+
+    async def _discard_missing_entry_claim(
+        self, queue: BaseQueue, entry_id: UUID
     ) -> None:
-        await queue.amark_running(entry.id)
+        """Drop a claimed ID whose durable entry record no longer exists."""
+        try:
+            acknowledged = await queue.aacknowledge_claim(entry_id, self._worker_id)
+        except Exception:
+            logger.exception("Unable to discard missing queue entry %s", entry_id)
+        else:
+            if acknowledged:
+                logger.error("Discarded missing queue entry %s", entry_id)
+            else:
+                logger.warning("Lost claim for missing queue entry %s", entry_id)
+
+    @staticmethod
+    def _renewal_delay(lease_seconds: float) -> float:
+        if lease_seconds <= _SHORT_LEASE_SECONDS:
+            return lease_seconds / 2
+        if lease_seconds <= _MEDIUM_LEASE_SECONDS:
+            return lease_seconds * 2 / 3
+        return lease_seconds * 3 / 4
+
+    async def _renew_claim(
+        self, queue: BaseQueue, entry: QueueEntry, lease_seconds: float
+    ) -> bool:
+        try:
+            while True:
+                await asyncio.sleep(self._renewal_delay(lease_seconds))
+                if not await queue.arenew_claim(
+                    entry.id, self._worker_id, lease_seconds
+                ):
+                    logger.error("Unable to renew claim for queue entry %s", entry.id)
+                    return False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unable to renew claim for queue entry %s", entry.id)
+            return False
+
+    async def _dispatch(
+        self,
+        queue: BaseQueue,
+        handler: QueueHandler,
+        entry: QueueEntry,
+        lease_seconds: float | None = None,
+    ) -> None:
+        if lease_seconds is not None:
+            running_entry = await queue.amark_claim_running(entry.id, self._worker_id)
+            if running_entry is None:
+                logger.warning(
+                    "Lost claim for queue entry %s before dispatch", entry.id
+                )
+                return
+            entry = running_entry
+        else:
+            entry = await queue.amark_running(entry.id)
         timeout_seconds = self.resolve_budget(queue, entry)
         active_timeout: _ActiveTimeout | None = None
         timeout_token = None
         handler_task: asyncio.Task[object] | None = None
+        renewal_task = (
+            asyncio.create_task(self._renew_claim(queue, entry, lease_seconds))
+            if lease_seconds is not None
+            else None
+        )
+        claim_worker_id = self._worker_id if lease_seconds is not None else None
         try:
             # The budget cancels this await; the shield keeps the handler task
             # alive so the abandon path can stop it deliberately and report it.
@@ -252,6 +370,22 @@ class AsyncQueueWorker:
                 active_timeout = _ActiveTimeout(budget, timeout_seconds)
                 timeout_token = _active_timeout.set(active_timeout)
                 handler_task = asyncio.create_task(handler(entry))
+                done, _ = await asyncio.wait(
+                    (handler_task, renewal_task)
+                    if renewal_task is not None
+                    else (handler_task,),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if (
+                    renewal_task is not None
+                    and renewal_task in done
+                    and renewal_task.result() is False
+                ):
+                    handler_task.cancel()
+                    handler_task.add_done_callback(
+                        lambda task: self._log_late_handler_outcome(entry, task)
+                    )
+                    return
                 result = await asyncio.shield(handler_task)
         except TimeoutError as exc:
             if active_timeout is None or handler_task is None:
@@ -263,36 +397,67 @@ class AsyncQueueWorker:
             # ordinary handler failure would be recorded as never having
             # answered and its error discarded.
             if budget.expired():
-                await self._abandon_unresponsive_handler(queue, entry, handler_task)
+                if renewal_task is not None:
+                    await self._stop_renewal_task(renewal_task)
+                await self._abandon_unresponsive_handler(
+                    queue, entry, handler_task, claim_worker_id
+                )
             else:
-                await self._record_failure(queue, entry, exc)
+                if renewal_task is not None:
+                    await self._stop_renewal_task(renewal_task)
+                await self._record_failure(queue, entry, exc, claim_worker_id)
         except asyncio.CancelledError:
             if active_timeout is None or handler_task is None:
                 raise
             active_timeout.active = False
-            await self._finish_cancellation(queue, entry, handler_task)
+            if renewal_task is not None:
+                await self._stop_renewal_task(renewal_task)
+            await self._finish_cancellation(queue, entry, handler_task, claim_worker_id)
             raise
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
             if active_timeout is not None:
                 active_timeout.active = False
-            await self._record_failure(queue, entry, exc)
+            if renewal_task is not None:
+                await self._stop_renewal_task(renewal_task)
+            await self._record_failure(queue, entry, exc, claim_worker_id)
         else:
             if active_timeout is None:
                 raise RuntimeError("Queue handler completed without an active timeout")
             active_timeout.active = False
-            await self._record_result(queue, entry, result)
+            if renewal_task is not None:
+                await self._stop_renewal_task(renewal_task)
+            await self._record_result(queue, entry, result, claim_worker_id)
         finally:
             if active_timeout is not None:
                 active_timeout.active = False
             if timeout_token is not None:
                 _active_timeout.reset(timeout_token)
+            if renewal_task is not None:
+                await self._stop_renewal_task(renewal_task)
+            self._active_entry_id = None
+            self._active_queue_name = None
+
+    async def _stop_renewal_task(self, renewal_task: asyncio.Task[bool]) -> None:
+        """Stop a claim heartbeat before the entry is settled."""
+        renewal_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await renewal_task
+
+    def _log_claim_conflict(self, entry_id: UUID) -> None:
+        """Log each persistent claim conflict at a useful, bounded cadence."""
+        now = asyncio.get_running_loop().time()
+        previous = self._last_claim_conflict_at.get(entry_id)
+        if previous is None or now - previous >= _CLAIM_CONFLICT_LOG_INTERVAL_SECONDS:
+            logger.warning("Queue entry %s is already claimed", entry_id)
+            self._last_claim_conflict_at[entry_id] = now
 
     async def _abandon_unresponsive_handler(
         self,
         queue: BaseQueue,
         entry: QueueEntry,
         handler_task: asyncio.Task[object],
-    ) -> None:
+        claim_worker_id: UUID | None,
+    ) -> QueueEntry:
         """Stop a handler that stopped answering and record it as timed out.
 
         Named for what its two callers have in common rather than for either
@@ -304,14 +469,19 @@ class AsyncQueueWorker:
         handler_task.add_done_callback(
             lambda task: self._log_late_handler_outcome(entry, task)
         )
-        await self._record_terminal(queue, entry, queue.amark_timed_out)
+        if claim_worker_id is not None:
+            return await self._settle_terminal(
+                queue, entry, claim_worker_id, QueueEntryStatus.TIMEOUT
+            )
+        return await self._record_terminal(queue, entry, queue.amark_timed_out)
 
     async def _finish_cancellation(
         self,
         queue: BaseQueue,
         entry: QueueEntry,
         handler_task: asyncio.Task[object],
-    ) -> None:
+        claim_worker_id: UUID | None,
+    ) -> QueueEntry:
         try:
             # asyncio.timeout rather than wait_for for the same reason as the
             # budget: only the context can tell the grace period running out
@@ -320,13 +490,15 @@ class AsyncQueueWorker:
                 result = await asyncio.shield(handler_task)
         except TimeoutError as exc:
             if grace.expired():
-                await self._abandon_unresponsive_handler(queue, entry, handler_task)
+                return await self._abandon_unresponsive_handler(
+                    queue, entry, handler_task, claim_worker_id
+                )
             else:
-                await self._record_failure(queue, entry, exc)
+                return await self._record_failure(queue, entry, exc, claim_worker_id)
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.
-            await self._record_failure(queue, entry, exc)
+            return await self._record_failure(queue, entry, exc, claim_worker_id)
         else:
-            await self._record_result(queue, entry, result)
+            return await self._record_result(queue, entry, result, claim_worker_id)
 
     @staticmethod
     def _log_late_handler_outcome(
@@ -344,20 +516,121 @@ class AsyncQueueWorker:
             )
 
     async def _record_result(
-        self, queue: BaseQueue, entry: QueueEntry, result: object
-    ) -> None:
+        self,
+        queue: BaseQueue,
+        entry: QueueEntry,
+        result: object,
+        claim_worker_id: UUID | None = None,
+    ) -> QueueEntry:
         try:
             validate_json_value(result)
         except TypeError as exc:
-            await self._record_failure(queue, entry, exc)
+            return await self._record_failure(queue, entry, exc, claim_worker_id)
         else:
-            await self._record_terminal(queue, entry, queue.amark_succeeded, result)
+            if claim_worker_id is not None:
+                return await self._settle_terminal(
+                    queue,
+                    entry,
+                    claim_worker_id,
+                    QueueEntryStatus.SUCCEEDED,
+                    result=result,
+                )
+            return await self._record_terminal(
+                queue, entry, queue.amark_succeeded, result
+            )
 
     async def _record_failure(
-        self, queue: BaseQueue, entry: QueueEntry, error: Exception
-    ) -> None:
+        self,
+        queue: BaseQueue,
+        entry: QueueEntry,
+        error: Exception,
+        claim_worker_id: UUID | None = None,
+    ) -> QueueEntry:
         logger.exception("Queue handler failed for entry %s", entry.id)
-        await self._record_terminal(queue, entry, queue.amark_failed, error)
+        if claim_worker_id is not None:
+            return await self._settle_terminal(
+                queue,
+                entry,
+                claim_worker_id,
+                QueueEntryStatus.FAILED,
+                error={"type": type(error).__name__, "message": str(error)},
+            )
+        return await self._record_terminal(queue, entry, queue.amark_failed, error)
+
+    async def _settle_terminal(
+        self,
+        queue: BaseQueue,
+        entry: QueueEntry,
+        worker_id: UUID,
+        status: QueueEntryStatus,
+        *,
+        result: object | None = None,
+        error: dict[str, str] | None = None,
+    ) -> QueueEntry:
+        try:
+            current_entry = await queue.aget_entry(entry.id)
+            terminal_entry = replace(
+                current_entry,
+                status=status,
+                result=result,
+                error=error,
+                finished_at=await queue.clock.anow(),
+            )
+            settled = await queue.asettle_claim(worker_id, terminal_entry)
+        except Exception as exc:
+            logger.exception("Unable to settle claimed queue entry %s", entry.id)
+            return await self._record_claim_persistence_failure(
+                queue, entry, worker_id, exc
+            )
+        if not settled:
+            logger.warning("Lost claim for queue entry %s before settlement", entry.id)
+            return entry
+        self._record_terminal_outcome(terminal_entry)
+        return terminal_entry
+
+    async def _record_claim_persistence_failure(
+        self,
+        queue: BaseQueue,
+        entry: QueueEntry,
+        worker_id: UUID,
+        cause: Exception,
+    ) -> QueueEntry:
+        """Safely record a settlement infrastructure failure while still owner."""
+        try:
+            current_entry = await queue.aget_entry(entry.id)
+        except Exception:
+            logger.exception(
+                "Unable to inspect queue entry %s after settlement failure", entry.id
+            )
+            raise QueuePersistenceError(
+                "Unable to persist terminal queue outcome"
+            ) from cause
+        if current_entry.status is not QueueEntryStatus.RUNNING:
+            return current_entry
+        try:
+            failure_entry = replace(
+                current_entry,
+                status=QueueEntryStatus.FAILED,
+                error={
+                    "type": "QueuePersistenceError",
+                    "message": "Unable to persist terminal queue outcome",
+                },
+                finished_at=await queue.clock.anow(),
+            )
+            settled = await queue.asettle_claim(worker_id, failure_entry)
+        except Exception:
+            logger.exception(
+                "Unable to record settlement failure for entry %s", entry.id
+            )
+            raise QueuePersistenceError(
+                "Unable to persist terminal queue outcome"
+            ) from cause
+        if not settled:
+            raise QueuePersistenceError(
+                "Unable to persist terminal queue outcome"
+            ) from cause
+        self._record_terminal_outcome(failure_entry)
+        return failure_entry
 
     async def _record_terminal(
         self,
@@ -365,7 +638,7 @@ class AsyncQueueWorker:
         entry: QueueEntry,
         update: Callable[..., Awaitable[QueueEntry]],
         *args: object,
-    ) -> None:
+    ) -> QueueEntry:
         try:
             terminal_entry = await asyncio.shield(update(entry.id, *args))
         except Exception as exc:
@@ -378,6 +651,7 @@ class AsyncQueueWorker:
                     "Unable to persist terminal queue outcome"
                 ) from exc
         self._record_terminal_outcome(terminal_entry)
+        return terminal_entry
 
     async def _record_persistence_failure(
         self, queue: BaseQueue, entry: QueueEntry
@@ -416,6 +690,7 @@ class AsyncQueueWorker:
                 return
         self._active_entry_id = None
         self._active_queue_name = None
+        self._last_claim_conflict_at.pop(entry.id, None)
         self._log_state_change("terminal_recorded", entry)
 
     def _log_state_change(self, event: str, entry: QueueEntry | None = None) -> None:

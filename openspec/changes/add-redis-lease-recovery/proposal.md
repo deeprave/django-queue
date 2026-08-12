@@ -6,7 +6,7 @@ the path to Redis at-least-once delivery.
 ## What Changes
 
 - Add expiring claim leases and recovery of expired claims.
-- Update worker dispatch to acknowledge terminal outcomes.
+- Update worker dispatch to atomically settle terminal outcomes with their claims.
 
 ## Capabilities
 
@@ -14,7 +14,8 @@ the path to Redis at-least-once delivery.
 - `redis-claim-leases`: Recover expired Redis claims and provide at-least-once delivery.
 
 ### Modified Capabilities
-None.
+- `queue-entries`: Permit reliable-delivery recovery to return an abandoned
+  running entry to queued work before retrying it.
 
 ## Impact
 

@@ -5,6 +5,7 @@ from .exceptions import (
     QueueEncodingException,
     QueueEntryMissingError,
     QueueFullException,
+    QueueReliableDeliveryUnsupportedError,
     QueueValueError,
 )
 from .memory import MemoryPriorityQueue, MemoryQueue, MemoryStack
@@ -27,6 +28,7 @@ __all__ = (
     "QueueEncodingException",
     "QueueEntryMissingError",
     "QueueFullException",
+    "QueueReliableDeliveryUnsupportedError",
     "QueueValueError",
     "RedisPriorityQueue",
     "RedisPriorityQueueJson",

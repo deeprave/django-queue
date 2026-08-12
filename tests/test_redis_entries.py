@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import threading
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -23,7 +25,7 @@ from django_queue.backends.exceptions import (
 )
 from django_queue.clock import ClockTime, QueueClockError
 from django_queue.entries import QueueEntryStatus
-from django_queue.worker import AsyncQueueWorker
+from django_queue.worker import AsyncQueueWorker, QueuePersistenceError
 from tests.helpers import CustomQueueEntry
 
 
@@ -260,6 +262,8 @@ class TestRedisQueueEntries:
             assert claim["worker_id"] == str(worker_id)
             assert set(claim["claimed_at"]) == {"seconds", "microseconds"}
             assert all(isinstance(value, int) for value in claim["claimed_at"].values())
+            assert isinstance(claim["lease_deadline"], (int, float))
+            assert claim["lease_deadline"] > 0
             await redis_entry_queue.aclose()
 
         asyncio.run(exercise())
@@ -283,12 +287,535 @@ class TestRedisQueueEntries:
 
         asyncio.run(exercise())
 
-    def test_synchronous_claim_and_acknowledgement_wrappers(self, redis_entry_queue):
+    def test_renews_a_claim_only_for_its_owner(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        owner_id = uuid4()
+
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(owner_id, lease_seconds=1)
+
+            assert not await redis_entry_queue.arenew_claim(
+                entry_id, uuid4(), lease_seconds=1
+            )
+            assert await redis_entry_queue.arenew_claim(
+                entry_id, owner_id, lease_seconds=1
+            )
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_uses_a_backend_specific_default_claim_lease(self, redis_client):
+        class ShortLeaseQueue(RedisQueue):
+            default_claim_lease_seconds = 0.001
+
+        queue = ShortLeaseQueue(redis_client, queue_name=f"lease-default-{uuid4().hex}")
+        queue.enqueue("work")
+
+        async def exercise():
+            await queue.aclaim_entry(uuid4())
+            await asyncio.sleep(0.01)
+
+            assert await queue.arecover_expired_claims() == 1
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    @pytest.mark.parametrize(
+        ("queue_type", "first_payload", "second_payload"),
+        [(RedisQueue, "first", "second"), (RedisStack, "second", "first")],
+        ids=["queue-fifo", "stack-lifo"],
+    )
+    def test_recovers_expired_claims_in_queue_order(
+        self, redis_client, queue_type, first_payload, second_payload
+    ):
+        queue = queue_type(redis_client, queue_name=f"lease-order-{uuid4().hex}")
+        first_id = queue.enqueue("first")
+        second_id = queue.enqueue("second")
+
+        async def exercise():
+            first_claim = await queue.aclaim_entry(uuid4(), lease_seconds=0.001)
+            second_claim = await queue.aclaim_entry(uuid4(), lease_seconds=0.001)
+            await asyncio.sleep(0.01)
+
+            assert await queue.arecover_expired_claims() == 2
+            assert {first_claim.id, second_claim.id} == {first_id, second_id}
+            assert (await queue.adequeue_entry()).payload == first_payload
+            assert (await queue.adequeue_entry()).payload == second_payload
+            assert (await queue.aget_entry(first_id)).id == first_id
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_recovers_expired_claims_in_bounded_batches(self, redis_entry_queue):
+        first_id = redis_entry_queue.enqueue("first")
+        second_id = redis_entry_queue.enqueue("second")
+        redis_entry_queue.recovery_batch_size = 1
+
+        async def exercise():
+            first_claim = await redis_entry_queue.aclaim_entry(
+                uuid4(), lease_seconds=0.001
+            )
+            await asyncio.sleep(0.01)
+            second_claim = await redis_entry_queue.aclaim_entry(
+                uuid4(), lease_seconds=0.001
+            )
+            await asyncio.sleep(0.01)
+
+            assert await redis_entry_queue.arecover_expired_claims() == 1
+            assert (await redis_entry_queue.adequeue_entry()).id == first_claim.id
+            assert await redis_entry_queue.arecover_expired_claims() == 1
+            assert (await redis_entry_queue.adequeue_entry()).id == second_claim.id
+            assert {first_claim.id, second_claim.id} == {first_id, second_id}
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    @pytest.mark.parametrize("batch_size", [0, -1, 1.5, True])
+    def test_rejects_an_invalid_recovery_batch_size(
+        self, redis_entry_queue, batch_size
+    ):
+        redis_entry_queue.recovery_batch_size = batch_size
+
+        async def exercise():
+            with pytest.raises(ValueError, match="Recovery batch size"):
+                await redis_entry_queue.arecover_expired_claims()
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_recovers_a_renewed_non_utf8_queue_claim(self, redis_client):
+        queue = RedisQueue(
+            redis_client,
+            queue_name=f"lease-encoding-{uuid4().hex}",
+            encoding="utf-16",
+        )
+        entry_id = queue.enqueue("work")
+        worker_id = uuid4()
+
+        async def exercise():
+            await queue.aclaim_entry(worker_id, lease_seconds=0.001)
+            assert await queue.arenew_claim(entry_id, worker_id, lease_seconds=0.01)
+            await asyncio.sleep(0.02)
+
+            assert await queue.arecover_expired_claims() == 1
+            assert (await queue.adequeue_entry()).id == entry_id
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_does_not_recover_a_renewed_claim(self, redis_entry_queue):
         entry_id = redis_entry_queue.enqueue("work")
         worker_id = uuid4()
 
-        assert redis_entry_queue.claim_entry(worker_id).id == entry_id
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(worker_id, lease_seconds=0.01)
+            assert await redis_entry_queue.arenew_claim(
+                entry_id, worker_id, lease_seconds=1
+            )
+            await asyncio.sleep(0.02)
+
+            assert await redis_entry_queue.arecover_expired_claims() == 0
+            assert not await redis_entry_queue.ahas_pending_entries()
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    @pytest.mark.parametrize(
+        "claim_value", [None, "not json"], ids=["missing", "malformed"]
+    )
+    def test_recovers_an_orphaned_expired_claim_record(
+        self, redis_entry_queue, claim_value
+    ):
+        entry_id = redis_entry_queue.enqueue("work")
+
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(uuid4())
+            client = redis_entry_queue._async_redis()
+            if claim_value is None:
+                await client.delete(redis_entry_queue._entry_claim_key(entry_id))
+            else:
+                await client.set(
+                    redis_entry_queue._entry_claim_key(entry_id), claim_value
+                )
+            await client.zadd(
+                redis_entry_queue._entry_claim_deadlines_name, {str(entry_id): 0}
+            )
+
+            assert await redis_entry_queue.arecover_expired_claims() == 1
+            assert (await redis_entry_queue.adequeue_entry()).id == entry_id
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_logs_a_discarded_orphaned_claim_without_an_entry(
+        self, redis_entry_queue, caplog
+    ):
+        entry_id = redis_entry_queue.enqueue("work")
+
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(uuid4())
+            client = redis_entry_queue._async_redis()
+            await client.delete(redis_entry_queue._entry_key(entry_id))
+            await client.set(redis_entry_queue._entry_claim_key(entry_id), "not json")
+            await client.zadd(
+                redis_entry_queue._entry_claim_deadlines_name, {str(entry_id): 0}
+            )
+
+            with caplog.at_level(
+                logging.ERROR, logger="django_queue.backends.redis.redisqueue"
+            ):
+                assert await redis_entry_queue.arecover_expired_claims() == 0
+            assert "Discarded 1 unrecoverable expired queue claim" in caplog.text
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_marks_claimed_entry_running_only_for_its_owner(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        owner_id = uuid4()
+
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(owner_id)
+
+            assert (
+                await redis_entry_queue.amark_claim_running(entry_id, uuid4()) is None
+            )
+            assert (
+                await redis_entry_queue.aget_entry(entry_id)
+            ).status is QueueEntryStatus.QUEUED
+
+            running = await redis_entry_queue.amark_claim_running(entry_id, owner_id)
+            assert running is not None
+            assert running.status is QueueEntryStatus.RUNNING
+            assert (await redis_entry_queue.aget_entry(entry_id)) == running
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_settles_a_terminal_claim_only_for_its_owner(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        owner_id = uuid4()
+
+        async def exercise():
+            claimed = await redis_entry_queue.aclaim_entry(owner_id)
+            running = await redis_entry_queue.amark_running(entry_id)
+            terminal = replace(
+                running,
+                status=QueueEntryStatus.SUCCEEDED,
+                result="done",
+                finished_at=await redis_entry_queue.clock.anow(),
+            )
+
+            assert not await redis_entry_queue.asettle_claim(uuid4(), terminal)
+            assert (await redis_entry_queue.aget_entry(entry_id)) == running
+            assert await redis_entry_queue.asettle_claim(owner_id, terminal)
+            assert (await redis_entry_queue.aget_entry(claimed.id)) == terminal
+            assert not await redis_entry_queue.aacknowledge_claim(entry_id, owner_id)
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_settles_redis_claim_after_terminal_success(self, redis_client):
+        queue = RedisQueue(redis_client, queue_name=f"lease-worker-{uuid4().hex}")
+
+        async def exercise():
+            entry_id = await queue.aenqueue("work")
+
+            async def handle(entry):
+                return entry.payload
+
+            worker = AsyncQueueWorker(
+                {"requests": queue}, {"requests": handle}, idle_delay=0.001
+            )
+            task = asyncio.create_task(worker.run())
+            while (
+                await queue.aget_entry(entry_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0.001)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert await queue.arecover_expired_claims() == 0
+            with pytest.raises(QueueEmptyException):
+                await queue.aclaim_entry(uuid4())
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_settles_redis_claim_after_handler_failure(self, redis_client):
+        queue = RedisQueue(redis_client, queue_name=f"lease-worker-{uuid4().hex}")
+
+        async def exercise():
+            entry_id = await queue.aenqueue("work")
+
+            async def handle(entry):
+                raise ValueError(entry.payload)
+
+            worker = AsyncQueueWorker(
+                {"requests": queue}, {"requests": handle}, idle_delay=0.001
+            )
+            task = asyncio.create_task(worker.run())
+            while (
+                await queue.aget_entry(entry_id)
+            ).status is not QueueEntryStatus.FAILED:
+                await asyncio.sleep(0.001)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert await queue.arecover_expired_claims() == 0
+            with pytest.raises(QueueEmptyException):
+                await queue.aclaim_entry(uuid4())
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_records_a_claimed_persistence_failure_and_continues(
+        self, redis_client
+    ):
+        class FailingSettlementQueue(RedisQueue):
+            fail_next_settlement = True
+
+            async def asettle_claim(self, worker_id, entry):
+                if self.fail_next_settlement:
+                    self.fail_next_settlement = False
+                    raise ConnectionError("Redis is unavailable")
+                return await super().asettle_claim(worker_id, entry)
+
+        queue = FailingSettlementQueue(
+            redis_client, queue_name=f"lease-persistence-{uuid4().hex}"
+        )
+
+        async def exercise():
+            first_id = await queue.aenqueue("first")
+            second_id = await queue.aenqueue("second")
+
+            async def handle(entry):
+                return entry.payload
+
+            worker = AsyncQueueWorker(
+                {"requests": queue}, {"requests": handle}, idle_delay=0.001
+            )
+            task = asyncio.create_task(worker.run())
+            while (
+                await queue.aget_entry(second_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0.001)
+
+            first = await queue.aget_entry(first_id)
+            assert first.status is QueueEntryStatus.FAILED
+            assert first.error == {
+                "type": "QueuePersistenceError",
+                "message": "Unable to persist terminal queue outcome",
+            }
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_stops_after_an_unrecoverable_claimed_persistence_failure(
+        self, redis_client
+    ):
+        class UnrecoverableSettlementQueue(RedisQueue):
+            async def asettle_claim(self, worker_id, entry):
+                raise ConnectionError("Redis is unavailable")
+
+        queue = UnrecoverableSettlementQueue(
+            redis_client, queue_name=f"lease-unrecoverable-{uuid4().hex}"
+        )
+
+        async def exercise():
+            await queue.aenqueue("first")
+            await queue.aenqueue("second")
+            handled_payloads = []
+
+            async def handle(entry):
+                handled_payloads.append(entry.payload)
+                return entry.payload
+
+            worker = AsyncQueueWorker({"requests": queue}, {"requests": handle})
+            with pytest.raises(
+                QueuePersistenceError, match="Unable to persist terminal queue outcome"
+            ):
+                await worker.run()
+
+            assert handled_payloads == ["first"]
+            assert worker.snapshot.active_entry_id is None
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_stops_when_claim_persistence_fallback_loses_ownership(
+        self, redis_client
+    ):
+        class LostFallbackSettlementQueue(RedisQueue):
+            attempts = 0
+
+            async def asettle_claim(self, worker_id, entry):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise ConnectionError("Redis is unavailable")
+                return False
+
+        queue = LostFallbackSettlementQueue(
+            redis_client, queue_name=f"lease-lost-fallback-{uuid4().hex}"
+        )
+
+        async def exercise():
+            await queue.aenqueue("work")
+
+            async def handle(entry):
+                return entry.payload
+
+            worker = AsyncQueueWorker({"requests": queue}, {"requests": handle})
+            with pytest.raises(
+                QueuePersistenceError, match="Unable to persist terminal queue outcome"
+            ):
+                await worker.run()
+
+            assert queue.attempts == 2
+            await queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_dispatches_a_recovered_running_entry(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(uuid4(), lease_seconds=0.001)
+            running = await redis_entry_queue.amark_running(entry_id)
+            await asyncio.sleep(0.01)
+            assert await redis_entry_queue.arecover_expired_claims() == 1
+            recovered = await redis_entry_queue.aget_entry(entry_id)
+            assert recovered.status is QueueEntryStatus.QUEUED
+            assert recovered.dispatched_at is None
+
+            async def handle(entry):
+                return entry.payload
+
+            worker = AsyncQueueWorker(
+                {"requests": redis_entry_queue},
+                {"requests": handle},
+                idle_delay=0.001,
+            )
+            task = asyncio.create_task(worker.run())
+            while (
+                await redis_entry_queue.aget_entry(entry_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0.001)
+            succeeded = await redis_entry_queue.aget_entry(entry_id)
+            assert succeeded.dispatched_at is not None
+            assert succeeded.dispatched_at > running.dispatched_at
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_continues_after_losing_a_claim_during_dispatch(
+        self, redis_entry_queue
+    ):
+        first_id = redis_entry_queue.enqueue("first")
+        second_id = redis_entry_queue.enqueue("second")
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def exercise():
+            async def handle(entry):
+                if entry.id == first_id:
+                    first_started.set()
+                    await release_first.wait()
+                return entry.payload
+
+            worker = AsyncQueueWorker(
+                {"requests": redis_entry_queue},
+                {"requests": handle},
+                idle_delay=0.001,
+            )
+            task = asyncio.create_task(worker.run())
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            await redis_entry_queue._async_redis().delete(
+                redis_entry_queue._entry_claim_key(first_id)
+            )
+            release_first.set()
+            while (
+                await redis_entry_queue.aget_entry(second_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0.001)
+            while worker.snapshot.active_entry_id is not None:
+                await asyncio.sleep(0.001)
+
+            assert worker.running
+            assert worker.snapshot.active_entry_id is None
+            assert worker.snapshot.active_queue_name is None
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_worker_cancels_a_handler_when_its_claim_is_lost_during_renewal(
+        self, redis_entry_queue
+    ):
+        entry_id = redis_entry_queue.enqueue("work", timeout_seconds=0.01)
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def exercise():
+            async def handle(entry):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            worker = AsyncQueueWorker(
+                {"requests": redis_entry_queue},
+                {"requests": handle},
+                idle_delay=0.001,
+                cancellation_grace_period=0.001,
+            )
+            task = asyncio.create_task(worker.run())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            await redis_entry_queue._async_redis().delete(
+                redis_entry_queue._entry_claim_key(entry_id)
+            )
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_synchronous_claim_lease_wrappers(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        worker_id = uuid4()
+
+        claimed = redis_entry_queue.claim_entry(worker_id, lease_seconds=60)
+        assert claimed.id == entry_id
+        assert redis_entry_queue.renew_claim(entry_id, worker_id, lease_seconds=60)
         assert redis_entry_queue.acknowledge_claim(entry_id, worker_id)
+        assert redis_entry_queue.recover_expired_claims() == 0
+
+        settled_id = redis_entry_queue.enqueue("settled")
+        claimed = redis_entry_queue.claim_entry(worker_id)
+        running = redis_entry_queue.mark_running(settled_id)
+        terminal = replace(
+            running,
+            status=QueueEntryStatus.SUCCEEDED,
+            result="done",
+            finished_at=redis_entry_queue.clock.now(),
+        )
+        assert redis_entry_queue.settle_claim(worker_id, terminal)
+        assert redis_entry_queue.get_entry(claimed.id) == terminal
 
     def test_claim_and_acknowledge_entries_with_the_configured_encoding(
         self, redis_client

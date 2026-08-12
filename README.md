@@ -278,27 +278,33 @@ asyncio.run(worker.run())
 
 The worker dispatches one entry at a time and runs until cancelled. On
 cancellation it stops accepting new entries, gives an active handler its
-configured grace period, then cancels it if needed. Delivery is best effort:
-an unexpected process failure after dequeue and before the terminal outcome is
-stored can lose that entry. Redis queues provide additive claim/acknowledge
-primitives for the later recovery protocol, but workers do not use them yet:
-an unrecovered claim is not redelivered in this release.
+configured grace period, then cancels it if needed.
 
-A Redis claim atomically transfers one pending entry to a supplied worker ID;
-only that worker may acknowledge it. Claims preserve the original entry ID and
-record Redis-derived ownership metadata. They have no lease expiry, retry or
-requeue behaviour here. `add-redis-lease-recovery` will make workers adopt the
-protocol and add recovery, so claim/acknowledge is not an application delivery
-guarantee today. A claim raises `QueueEmptyException` when no entry is pending,
-`QueueClaimConflictError` when its pending entry is already claimed, and
-`QueueEntryMissingError` when the claimed entry record is unavailable. Redis
-Cluster is not supported by these primitives.
+Redis queues use leased claims for at-least-once delivery. A worker claims an
+entry, renews its lease while dispatching, and atomically settles its terminal
+entry outcome only while it still owns that claim. Expired claims return the
+same entry ID to pending work, so a process failure can cause the handler to
+execute more than once. Handlers that make external changes must therefore be
+idempotent. Queue backends without claim-lease support retain best-effort
+delivery.
 
-If a terminal outcome cannot be persisted, the worker logs the infrastructure
-failure and continues. When it can still read a `running` entry, it makes one
-best-effort attempt to record a safe `QueuePersistenceError` failure outcome.
-If it cannot confirm either terminal outcome, the worker raises
-`QueuePersistenceError` rather than accepting further entries.
+Claim, renewal, acknowledgement, recovery, and settlement are backend-neutral
+queue operations; Redis keys, scripts, timestamps, and record layout are not
+part of the public contract. A claim raises `QueueEmptyException` when no entry
+is pending, `QueueClaimConflictError` when its pending entry is already claimed,
+and `QueueEntryMissingError` when the claimed entry record is unavailable.
+Redis Cluster is not supported by these primitives.
+
+If a terminal outcome cannot be persisted because of an infrastructure failure,
+the worker logs the failure and continues. When it can still read a `running`
+entry, it makes one best-effort attempt to record a safe
+`QueuePersistenceError` failure outcome. If it cannot confirm either terminal
+outcome, the worker raises `QueuePersistenceError` rather than accepting
+further entries.
+
+Loss of claim ownership is different: the worker stops handling that entry
+without recording an outcome, then continues serving later work. Recovery or
+the worker that acquired the claim owns the retry and its terminal outcome.
 
 ### Execution budgets
 

@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import threading
+import uuid
 from dataclasses import FrozenInstanceError
 
 import pytest
 
 from django_queue import ClockTime, WorkerSnapshot
 from django_queue.backends import MemoryQueue
+from django_queue.backends.exceptions import QueueReliableDeliveryUnsupportedError
 from django_queue.clock import LocalQueueClock
 from django_queue.entries import QueueEntryStatus
 from django_queue.worker import (
@@ -22,6 +24,42 @@ SKEWED = ClockTime(1_000_000_000)
 
 
 class TestAsyncQueueWorker:
+    @pytest.mark.parametrize(
+        ("lease_seconds", "expected_delay"),
+        [(60, 30), (61, 61 * 2 / 3), (600, 400), (601, 601 * 3 / 4)],
+        ids=["short-boundary", "medium", "medium-boundary", "long"],
+    )
+    def test_adapts_claim_renewal_delay_to_the_lease_window(
+        self, lease_seconds, expected_delay
+    ):
+        assert AsyncQueueWorker._renewal_delay(lease_seconds) == pytest.approx(
+            expected_delay
+        )
+
+    def test_memory_queue_reports_reliable_delivery_as_unsupported(self):
+        queue = MemoryQueue(queue_name="requests")
+
+        assert queue.supports_claim_leases is False
+        with pytest.raises(QueueReliableDeliveryUnsupportedError):
+            queue.claim_entry(uuid.uuid7())
+        with pytest.raises(QueueReliableDeliveryUnsupportedError):
+            queue.mark_claim_running(uuid.uuid7(), uuid.uuid7())
+
+    @pytest.mark.parametrize(
+        "cancellation_grace_period",
+        [-0.001, float("inf"), float("nan"), "one"],
+    )
+    def test_rejects_an_invalid_cancellation_grace_period(
+        self, cancellation_grace_period
+    ):
+        with pytest.raises(ValueError, match="Cancellation grace period"):
+            AsyncQueueWorker(
+                {}, {}, cancellation_grace_period=cancellation_grace_period
+            )
+
+    def test_allows_a_zero_cancellation_grace_period(self):
+        AsyncQueueWorker({}, {}, cancellation_grace_period=0)
+
     def test_complete_dispatch_stays_on_the_event_loop_thread(self):
         asyncio.run(self._complete_dispatch_stays_on_the_event_loop_thread())
 
