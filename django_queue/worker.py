@@ -410,8 +410,6 @@ class AsyncQueueWorker:
             if active_timeout is None or handler_task is None:
                 raise
             active_timeout.active = False
-            if renewal_task is not None:
-                await self._stop_renewal_task(renewal_task)
             await self._finish_cancellation(queue, entry, handler_task, claim_worker_id)
             raise
         except Exception as exc:  # noqa: BLE001 - handlers may raise any application exception.

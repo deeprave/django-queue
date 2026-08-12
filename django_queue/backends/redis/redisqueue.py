@@ -5,7 +5,7 @@ try:
     import json
     import logging
     import uuid
-    from dataclasses import replace
+    from dataclasses import dataclass, replace
 
     import redis
     import redis.asyncio as async_redis
@@ -184,6 +184,17 @@ try:
         return redis.call("DEL", KEYS[1])
     """
 
+    @dataclass(frozen=True, slots=True)
+    class _AsyncScripts:
+        """Registered Lua scripts owned by one asynchronous Redis client."""
+
+        claim_entry: object
+        acknowledge_claim: object
+        renew_claim: object
+        mark_claim_running: object
+        recover_expired_claims: object
+        settle_claim: object
+
     def _encode(item: str, encoding: str) -> bytes:
         try:
             return item.encode(encoding)
@@ -358,13 +369,19 @@ try:
                         async_kwargs["ssl"] = True
                     client = async_redis.Redis(**async_kwargs)
             self._async_redis_by_loop[loop] = client
-            self._async_scripts_by_loop[loop] = (
-                self._register_script(client, _CLAIM_ENTRY_SCRIPT),
-                self._register_script(client, _ACKNOWLEDGE_CLAIM_SCRIPT),
-                self._register_script(client, _RENEW_CLAIM_SCRIPT),
-                self._register_script(client, _MARK_CLAIM_RUNNING_SCRIPT),
-                self._register_script(client, _RECOVER_EXPIRED_CLAIMS_SCRIPT),
-                self._register_script(client, _SETTLE_CLAIM_SCRIPT),
+            self._async_scripts_by_loop[loop] = _AsyncScripts(
+                claim_entry=self._register_script(client, _CLAIM_ENTRY_SCRIPT),
+                acknowledge_claim=self._register_script(
+                    client, _ACKNOWLEDGE_CLAIM_SCRIPT
+                ),
+                renew_claim=self._register_script(client, _RENEW_CLAIM_SCRIPT),
+                mark_claim_running=self._register_script(
+                    client, _MARK_CLAIM_RUNNING_SCRIPT
+                ),
+                recover_expired_claims=self._register_script(
+                    client, _RECOVER_EXPIRED_CLAIMS_SCRIPT
+                ),
+                settle_claim=self._register_script(client, _SETTLE_CLAIM_SCRIPT),
             )
             return client
 
@@ -499,9 +516,9 @@ try:
                 lease_seconds = self.default_claim_lease_seconds
             validate_budget(lease_seconds)
             self._async_redis()
-            claim_entry, _, _, _, _, _ = self._async_scripts_by_loop[
+            claim_entry = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
+            ].claim_entry
             outcome, raw_entry_id = await claim_entry(
                 keys=(
                     self._entry_pending_name,
@@ -533,9 +550,9 @@ try:
             self, entry_id: uuid.UUID, worker_id: uuid.UUID
         ) -> bool:
             self._async_redis()
-            _, acknowledge_claim, _, _, _, _ = self._async_scripts_by_loop[
+            acknowledge_claim = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
+            ].acknowledge_claim
             return bool(
                 await acknowledge_claim(
                     keys=(
@@ -554,9 +571,9 @@ try:
         ) -> bool:
             validate_budget(lease_seconds)
             self._async_redis()
-            _, _, renew_claim, _, _, _ = self._async_scripts_by_loop[
+            renew_claim = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
+            ].renew_claim
             return bool(
                 await renew_claim(
                     keys=(
@@ -578,9 +595,9 @@ try:
             if type(batch_size) is not int or batch_size <= 0:
                 raise ValueError("Recovery batch size must be a positive integer")
             self._async_redis()
-            _, _, _, _, recover_expired_claims, _ = self._async_scripts_by_loop[
+            recover_expired_claims = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
+            ].recover_expired_claims
             recovered, discarded = await recover_expired_claims(
                 keys=(
                     self._entry_claim_deadlines_name,
@@ -611,19 +628,19 @@ try:
                 dispatched_at=await self.clock.anow(),
             )
             self._async_redis()
-            _, _, _, mark_claim_running, _, _ = self._async_scripts_by_loop[
+            mark_claim_running = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
-            marked, raw_entry = await mark_claim_running(
+            ].mark_claim_running
+            marked, _ = await mark_claim_running(
                 keys=(self._entry_claim_key(entry_id), self._entry_key(entry_id)),
                 args=(
                     _encode(str(worker_id), "ascii"),
-                    json.dumps(running_entry.to_dict()),
+                    _encode(json.dumps(running_entry.to_dict()), "ascii"),
                 ),
             )
             if not marked:
                 return None
-            return self.entry_class.from_dict(json.loads(_decode(raw_entry, "ascii")))
+            return running_entry
 
         async def asettle_claim(self, worker_id: uuid.UUID, entry: QueueEntry) -> bool:
             if entry.status not in {
@@ -634,9 +651,9 @@ try:
             }:
                 raise ValueError("A claim can only be settled with a terminal entry")
             self._async_redis()
-            _, _, _, _, _, settle_claim = self._async_scripts_by_loop[
+            settle_claim = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
+            ].settle_claim
             return bool(
                 await settle_claim(
                     keys=(
@@ -647,7 +664,7 @@ try:
                     args=(
                         _encode(str(worker_id), "ascii"),
                         _encode(str(entry.id), "ascii"),
-                        json.dumps(entry.to_dict()),
+                        _encode(json.dumps(entry.to_dict()), "ascii"),
                     ),
                 )
             )
@@ -706,7 +723,7 @@ try:
 
         async def _astore_entry(self, entry: QueueEntry) -> None:
             await self._async_redis().set(
-                self._entry_key(entry.id), json.dumps(entry.to_dict())
+                self._entry_key(entry.id), _encode(json.dumps(entry.to_dict()), "ascii")
             )
 
         async def _areplace_entry(

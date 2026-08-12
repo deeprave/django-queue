@@ -829,7 +829,7 @@ class TestRedisQueueEntries:
         assert queue.claim_entry(worker_id).id == entry_id
         assert queue.acknowledge_claim(entry_id, worker_id)
 
-    def test_claim_and_acknowledge_stack_entries_with_a_non_utf8_client_encoding(
+    def test_claim_mark_and_acknowledge_stack_entries_with_a_non_utf8_client_encoding(
         self, redis_client
     ):
         client = redis.Redis(
@@ -844,6 +844,9 @@ class TestRedisQueueEntries:
 
         try:
             assert queue.claim_entry(worker_id).id == entry_id
+            running = queue.mark_claim_running(entry_id, worker_id)
+            assert running is not None
+            assert running.status is QueueEntryStatus.RUNNING
             assert queue.acknowledge_claim(entry_id, worker_id)
         finally:
             client.close()

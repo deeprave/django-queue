@@ -479,6 +479,42 @@ class TestAsyncQueueWorker:
             "message": "shutdown failure",
         }
 
+    def test_cancellation_renews_a_claim_while_the_handler_uses_its_grace_period(
+        self,
+    ):
+        asyncio.run(
+            self._cancellation_renews_a_claim_while_the_handler_uses_its_grace_period()
+        )
+
+    async def _cancellation_renews_a_claim_while_the_handler_uses_its_grace_period(
+        self,
+    ):
+        queue = RenewalTrackingQueue(queue_name="requests")
+        entry_id = await queue.aenqueue("work", timeout_seconds=0.04)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(entry):
+            started.set()
+            await release.wait()
+            return entry.payload
+
+        worker = AsyncQueueWorker(
+            {"requests": queue},
+            {"requests": handle},
+            idle_delay=0.001,
+            cancellation_grace_period=0.04,
+        )
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.wait_for(queue.renewed.wait(), timeout=1)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
+
     def test_cancellation_during_success_persistence_does_not_repeat_the_transition(
         self,
     ):
@@ -630,6 +666,44 @@ class ThreadRecordingDispatchQueue(MemoryQueue):
     async def amark_succeeded(self, entry_id, result):
         self.thread_ids.append(threading.get_ident())
         return await super().amark_succeeded(entry_id, result)
+
+
+class RenewalTrackingQueue(MemoryQueue):
+    """In-memory reliable queue used to observe worker lease renewal behaviour."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.renewed = asyncio.Event()
+        self._claim_owner: uuid.UUID | None = None
+
+    @property
+    def supports_claim_leases(self):
+        return True
+
+    async def aclaim_entry(self, worker_id, lease_seconds=None):
+        self._claim_owner = worker_id
+        return await super().adequeue_entry()
+
+    async def arenew_claim(self, entry_id, worker_id, lease_seconds):
+        if worker_id != self._claim_owner:
+            return False
+        self.renewed.set()
+        return True
+
+    async def amark_claim_running(self, entry_id, worker_id):
+        if worker_id != self._claim_owner:
+            return None
+        return await super().amark_running(entry_id)
+
+    async def asettle_claim(self, worker_id, entry):
+        if worker_id != self._claim_owner:
+            return False
+        self._entries[entry.id] = entry
+        self._claim_owner = None
+        return True
+
+    async def arecover_expired_claims(self):
+        return 0
 
 
 class SlowEmptyQueue(MemoryQueue):
