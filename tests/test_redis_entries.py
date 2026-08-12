@@ -166,9 +166,13 @@ class TestRedisQueueEntries:
             completed = await queue.amark_succeeded(entry_id, {"ok": True})
             assert completed.status is QueueEntryStatus.SUCCEEDED
             first_client = queue._async_redis()
+            first_scripts = queue._async_scripts_by_loop.copy()
             await queue.aclose()
             assert not queue._async_redis_by_loop
+            assert not queue._async_scripts_by_loop
             assert queue._async_redis() is not first_client
+            assert queue._async_scripts_by_loop != first_scripts
+            await queue.aclose()
 
         asyncio.run(exercise())
 

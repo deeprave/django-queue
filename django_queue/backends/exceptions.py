@@ -18,7 +18,7 @@ class QueueEmptyException(QueueException):
 
 
 class QueueClaimConflictError(QueueException):
-    """A pending entry already has a claim owned by another worker."""
+    """A pending entry already has a claim."""
 
     def __init__(self, entry_id):
         self.entry_id = entry_id

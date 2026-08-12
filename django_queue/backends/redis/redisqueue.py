@@ -131,6 +131,7 @@ try:
             self._redis = None if isinstance(redis_spec, str) else redis_spec
             self._redis_spec = redis_spec
             self._async_redis_by_loop = {}
+            self._async_scripts_by_loop = {}
             options = {} if options is None else options
             options |= kwargs
             if isinstance(redis_spec, str):
@@ -241,7 +242,19 @@ try:
                         async_kwargs["ssl"] = True
                     client = async_redis.Redis(**async_kwargs)
             self._async_redis_by_loop[loop] = client
+            self._async_scripts_by_loop[loop] = (
+                self._register_script(client, _CLAIM_ENTRY_SCRIPT),
+                self._register_script(client, _ACKNOWLEDGE_CLAIM_SCRIPT),
+            )
             return client
+
+        def _register_script(self, client, script):
+            registered_script = client.register_script(script)
+            # Script digests are Redis protocol tokens, not queue values. Keep
+            # them as ASCII bytes so non-UTF-8 Redis client encodings cannot
+            # corrupt EVALSHA's digest argument.
+            registered_script.sha = _encode(registered_script.sha, "ascii")
+            return registered_script
 
         def _async_clock(self):
             loop = asyncio.get_running_loop()
@@ -359,13 +372,14 @@ try:
             return self._run_synchronously(self.aclaim_entry, worker_id)
 
         async def aclaim_entry(self, worker_id: uuid.UUID) -> QueueEntry:
-            outcome, raw_entry_id = await self._async_redis().eval(
-                _CLAIM_ENTRY_SCRIPT,
-                2,
-                self._entry_pending_name,
-                _encode(self._entry_claim_prefix, self._connection_encoding),
-                str(worker_id),
-                "1" if self._stack else "0",
+            self._async_redis()
+            claim_entry, _ = self._async_scripts_by_loop[asyncio.get_running_loop()]
+            outcome, raw_entry_id = await claim_entry(
+                keys=(
+                    self._entry_pending_name,
+                    _encode(self._entry_claim_prefix, self._connection_encoding),
+                ),
+                args=(str(worker_id), "1" if self._stack else "0"),
             )
             outcome = _decode(outcome, "ascii")
             if outcome == "empty":
@@ -386,12 +400,13 @@ try:
         async def aacknowledge_claim(
             self, entry_id: uuid.UUID, worker_id: uuid.UUID
         ) -> bool:
+            self._async_redis()
+            _, acknowledge_claim = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ]
             return bool(
-                await self._async_redis().eval(
-                    _ACKNOWLEDGE_CLAIM_SCRIPT,
-                    1,
-                    self._entry_claim_key(entry_id),
-                    str(worker_id),
+                await acknowledge_claim(
+                    keys=(self._entry_claim_key(entry_id),), args=(str(worker_id),)
                 )
             )
 
@@ -470,6 +485,7 @@ try:
             loop = asyncio.get_running_loop()
             if clock := self._clocks_by_loop.pop(loop, None):
                 await clock.aclose()
+            self._async_scripts_by_loop.pop(loop, None)
             if client := self._async_redis_by_loop.pop(loop, None):
                 await client.aclose(close_connection_pool=True)
 
