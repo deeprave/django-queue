@@ -379,7 +379,10 @@ try:
                     self._entry_pending_name,
                     _encode(self._entry_claim_prefix, self._connection_encoding),
                 ),
-                args=(str(worker_id), "1" if self._stack else "0"),
+                args=(
+                    _encode(str(worker_id), "ascii"),
+                    b"1" if self._stack else b"0",
+                ),
             )
             outcome = _decode(outcome, "ascii")
             if outcome == "empty":
@@ -406,7 +409,8 @@ try:
             ]
             return bool(
                 await acknowledge_claim(
-                    keys=(self._entry_claim_key(entry_id),), args=(str(worker_id),)
+                    keys=(self._entry_claim_key(entry_id),),
+                    args=(_encode(str(worker_id), "ascii"),),
                 )
             )
 
