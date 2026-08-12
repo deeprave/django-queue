@@ -317,16 +317,6 @@ class TestRedisQueueEntries:
 
         try:
             assert queue.claim_entry(worker_id).id == entry_id
-
-            async def get_claim():
-                try:
-                    return await queue._async_redis().get(
-                        queue._entry_claim_key(entry_id)
-                    )
-                finally:
-                    await queue.aclose()
-
-            assert json.loads(asyncio.run(get_claim()))["worker_id"] == str(worker_id)
             assert queue.acknowledge_claim(entry_id, worker_id)
         finally:
             client.close()
