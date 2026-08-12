@@ -25,6 +25,10 @@ class QueueClaimConflictError(QueueException):
         super().__init__(f"Queue entry {entry_id} is already claimed")
 
 
+class QueueReliableDeliveryUnsupportedError(QueueException):
+    """The queue cannot provide claim-based reliable delivery."""
+
+
 class QueueEntryMissingError(QueueException):
     """A claimed entry's record is no longer available."""
 

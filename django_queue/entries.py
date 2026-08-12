@@ -14,7 +14,7 @@ from django_queue.clock import DEFAULT_CLOCK, ClockTime, elapsed_time
 
 
 class QueueEntryStatus(StrEnum):
-    """The lifecycle states supported by the best-effort worker."""
+    """The lifecycle states supported by queue workers."""
 
     QUEUED = "queued"
     RUNNING = "running"
@@ -31,6 +31,7 @@ class QueueEntryStatus(StrEnum):
             case QueueEntryStatus.RUNNING:
                 return frozenset(
                     {
+                        QueueEntryStatus.QUEUED,
                         QueueEntryStatus.SUCCEEDED,
                         QueueEntryStatus.FAILED,
                         QueueEntryStatus.CANCELLED,

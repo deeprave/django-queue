@@ -8,7 +8,10 @@ from uuid import UUID
 from asgiref.sync import async_to_sync
 from django.utils.module_loading import import_string
 
-from django_queue.backends.exceptions import InvalidQueueBackendError
+from django_queue.backends.exceptions import (
+    InvalidQueueBackendError,
+    QueueReliableDeliveryUnsupportedError,
+)
 from django_queue.clock import DEFAULT_CLOCK, QueueClock
 from django_queue.entries import QueueEntry
 
@@ -18,6 +21,7 @@ if TYPE_CHECKING:
 
 
 class BaseQueue(ABC):
+    default_claim_lease_seconds = 600
     entry_class: type[QueueEntry] = QueueEntry
     worker_class: type[AsyncQueueWorker] | str = "django_queue.worker.AsyncQueueWorker"
     # Set by the configured queue registry from the alias's TIMEOUT setting,
@@ -189,6 +193,61 @@ class BaseQueue(ABC):
     async def adequeue_entry(self) -> QueueEntry:
         """Remove and return the next pending entry (best effort)."""
         raise NotImplementedError("adequeue_entry")
+
+    @property
+    def supports_claim_leases(self) -> bool:
+        """Whether this backend can provide claim-based reliable delivery."""
+        return False
+
+    def claim_entry(
+        self, worker_id: UUID, lease_seconds: float | None = None
+    ) -> QueueEntry:
+        return self._run_synchronously(self.aclaim_entry, worker_id, lease_seconds)
+
+    async def aclaim_entry(
+        self, worker_id: UUID, lease_seconds: float | None = None
+    ) -> QueueEntry:
+        raise QueueReliableDeliveryUnsupportedError
+
+    def renew_claim(
+        self, entry_id: UUID, worker_id: UUID, lease_seconds: float
+    ) -> bool:
+        return self._run_synchronously(
+            self.arenew_claim, entry_id, worker_id, lease_seconds
+        )
+
+    async def arenew_claim(
+        self, entry_id: UUID, worker_id: UUID, lease_seconds: float
+    ) -> bool:
+        raise QueueReliableDeliveryUnsupportedError
+
+    def acknowledge_claim(self, entry_id: UUID, worker_id: UUID) -> bool:
+        return self._run_synchronously(self.aacknowledge_claim, entry_id, worker_id)
+
+    async def aacknowledge_claim(self, entry_id: UUID, worker_id: UUID) -> bool:
+        raise QueueReliableDeliveryUnsupportedError
+
+    def settle_claim(self, worker_id: UUID, entry: QueueEntry) -> bool:
+        return self._run_synchronously(self.asettle_claim, worker_id, entry)
+
+    async def asettle_claim(self, worker_id: UUID, entry: QueueEntry) -> bool:
+        """Atomically persist a terminal entry and release its owned claim."""
+        raise QueueReliableDeliveryUnsupportedError
+
+    def recover_expired_claims(self) -> int:
+        return self._run_synchronously(self.arecover_expired_claims)
+
+    async def arecover_expired_claims(self) -> int:
+        raise QueueReliableDeliveryUnsupportedError
+
+    def mark_claim_running(self, entry_id: UUID, worker_id: UUID) -> QueueEntry | None:
+        return self._run_synchronously(self.amark_claim_running, entry_id, worker_id)
+
+    async def amark_claim_running(
+        self, entry_id: UUID, worker_id: UUID
+    ) -> QueueEntry | None:
+        """Mark a queued entry running only while its claim remains owned."""
+        raise QueueReliableDeliveryUnsupportedError
 
     def has_pending_entries(self) -> bool:
         return self._run_synchronously(self.ahas_pending_entries)

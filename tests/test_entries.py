@@ -19,6 +19,7 @@ class TestQueueEntry:
                 QueueEntryStatus.RUNNING,
                 frozenset(
                     {
+                        QueueEntryStatus.QUEUED,
                         QueueEntryStatus.SUCCEEDED,
                         QueueEntryStatus.FAILED,
                         QueueEntryStatus.CANCELLED,

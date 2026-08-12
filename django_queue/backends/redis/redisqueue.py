@@ -3,8 +3,9 @@ try:
     import codecs
     import inspect
     import json
+    import logging
     import uuid
-    from dataclasses import replace
+    from dataclasses import dataclass, replace
 
     import redis
     import redis.asyncio as async_redis
@@ -22,17 +23,27 @@ try:
         QueueFullException,
         QueueValueError,
     )
-    from django_queue.clock import QueueClockError, RedisQueueClock
-    from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
+    from django_queue.clock import (
+        MICROSECONDS_PER_SECOND,
+        QueueClockError,
+        RedisQueueClock,
+    )
+    from django_queue.entries import (
+        QueueEntry,
+        QueueEntryStatus,
+        validate_budget,
+        validate_json_value,
+    )
     from django_queue.signals import send_entry_enqueued
 
     _ASYNC_REDIS_ARGUMENTS = frozenset(
         inspect.signature(async_redis.Redis.__init__).parameters
     ) - {"self"}
+    logger = logging.getLogger(__name__)
 
     _CLAIM_ENTRY_SCRIPT = b"""
         local entry_id
-        if ARGV[2] == "1" then
+        if ARGV[3] == "1" then
             entry_id = redis.call("RPOP", KEYS[1])
         else
             entry_id = redis.call("LPOP", KEYS[1])
@@ -43,17 +54,20 @@ try:
 
         local claim_key = KEYS[2] .. entry_id
         local claimed_at = redis.call("TIME")
+        local deadline = tonumber(claimed_at[1]) * 1000000 + tonumber(claimed_at[2]) + tonumber(ARGV[2])
         local claim = cjson.encode({
             worker_id = ARGV[1],
             claimed_at = {
                 seconds = tonumber(claimed_at[1]),
                 microseconds = tonumber(claimed_at[2])
-            }
+            },
+            lease_deadline = deadline
         })
         if redis.call("SET", claim_key, claim, "NX") then
+            redis.call("ZADD", KEYS[3], deadline, entry_id)
             return {"claimed", entry_id}
         end
-        if ARGV[2] == "1" then
+        if ARGV[3] == "1" then
             redis.call("RPUSH", KEYS[1], entry_id)
         else
             redis.call("LPUSH", KEYS[1], entry_id)
@@ -70,8 +84,116 @@ try:
         if not decoded or type(claim) ~= "table" or claim.worker_id ~= ARGV[1] then
             return 0
         end
+        redis.call("ZREM", KEYS[2], ARGV[2])
         return redis.call("DEL", KEYS[1])
     """
+
+    _RENEW_CLAIM_SCRIPT = b"""
+        local raw_claim = redis.call("GET", KEYS[1])
+        if not raw_claim then
+            return 0
+        end
+        local decoded, claim = pcall(cjson.decode, raw_claim)
+        if not decoded or type(claim) ~= "table" or claim.worker_id ~= ARGV[1] then
+            return 0
+        end
+        local now = redis.call("TIME")
+        local deadline = tonumber(now[1]) * 1000000 + tonumber(now[2]) + tonumber(ARGV[2])
+        claim.lease_deadline = deadline
+        redis.call("SET", KEYS[1], cjson.encode(claim))
+        redis.call("ZADD", KEYS[2], deadline, ARGV[3])
+        return 1
+    """
+
+    _MARK_CLAIM_RUNNING_SCRIPT = b"""
+        local raw_claim = redis.call("GET", KEYS[1])
+        if not raw_claim then
+            return {0, ""}
+        end
+        local decoded, claim = pcall(cjson.decode, raw_claim)
+        if not decoded or type(claim) ~= "table" or claim.worker_id ~= ARGV[1] then
+            return {0, ""}
+        end
+        local raw_entry = redis.call("GET", KEYS[2])
+        local entry_decoded, entry = pcall(cjson.decode, raw_entry)
+        if not entry_decoded or type(entry) ~= "table" or entry.status ~= "queued" then
+            return {0, ""}
+        end
+        redis.call("SET", KEYS[2], ARGV[2])
+        return {1, ARGV[2]}
+    """
+
+    _RECOVER_EXPIRED_CLAIMS_SCRIPT = b"""
+        local now = redis.call("TIME")
+        local deadline = tonumber(now[1]) * 1000000 + tonumber(now[2])
+        local entry_ids = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", deadline, "LIMIT", 0, ARGV[2])
+        local recovered = 0
+        local discarded = 0
+        for index = 1, #entry_ids do
+            local entry_id = entry_ids[index]
+            local claim_key = KEYS[2] .. entry_id
+            local raw_claim = redis.call("GET", claim_key)
+            local decoded, claim = pcall(cjson.decode, raw_claim)
+            local lease_deadline = decoded and type(claim) == "table" and tonumber(claim.lease_deadline)
+            if not lease_deadline or lease_deadline <= deadline then
+                local raw_entry = redis.call("GET", KEYS[4] .. entry_id)
+                local entry_decoded, entry = pcall(cjson.decode, raw_entry)
+                if entry_decoded and type(entry) == "table" and (entry.status == "queued" or entry.status == "running") then
+                    entry.status = "queued"
+                    entry.dispatched_at = cjson.null
+                    entry.finished_at = cjson.null
+                    entry.result = cjson.null
+                    entry.error = cjson.null
+                    redis.call("SET", KEYS[4] .. entry_id, cjson.encode(entry))
+                    if ARGV[1] == "1" then
+                        redis.call("LPUSH", KEYS[3], entry_id)
+                    else
+                        redis.call("RPUSH", KEYS[3], entry_id)
+                    end
+                    recovered = recovered + 1
+                else
+                    discarded = discarded + 1
+                end
+                redis.call("DEL", claim_key)
+            else
+                redis.call("ZADD", KEYS[1], lease_deadline, entry_id)
+            end
+            if not lease_deadline or lease_deadline <= deadline then
+                redis.call("ZREM", KEYS[1], entry_id)
+            end
+        end
+        return {recovered, discarded}
+    """
+
+    _SETTLE_CLAIM_SCRIPT = b"""
+        local raw_claim = redis.call("GET", KEYS[1])
+        if not raw_claim then
+            return 0
+        end
+        local decoded, claim = pcall(cjson.decode, raw_claim)
+        if not decoded or type(claim) ~= "table" or claim.worker_id ~= ARGV[1] then
+            return 0
+        end
+        local raw_entry = redis.call("GET", KEYS[3])
+        local entry_decoded, stored_entry = pcall(cjson.decode, raw_entry)
+        if not entry_decoded or type(stored_entry) ~= "table" or stored_entry.status ~= "running" then
+            return 0
+        end
+        redis.call("SET", KEYS[3], ARGV[3])
+        redis.call("ZREM", KEYS[2], ARGV[2])
+        return redis.call("DEL", KEYS[1])
+    """
+
+    @dataclass(frozen=True, slots=True)
+    class _AsyncScripts:
+        """Registered Lua scripts owned by one asynchronous Redis client."""
+
+        claim_entry: object
+        acknowledge_claim: object
+        renew_claim: object
+        mark_claim_running: object
+        recover_expired_claims: object
+        settle_claim: object
 
     def _encode(item: str, encoding: str) -> bytes:
         try:
@@ -127,6 +249,8 @@ try:
                 await self._queue.aclose()
 
     class RedisQueue(BaseQueue):
+        recovery_batch_size = 100
+
         def __init__(self, redis_spec, options: dict | None = None, **kwargs):
             self._redis = None if isinstance(redis_spec, str) else redis_spec
             self._redis_spec = redis_spec
@@ -159,6 +283,9 @@ try:
             self._queue_name = options.get("queue_name", random_queue_name())
             self._entry_pending_name = f"{self._queue_name}:entries:pending"
             self._entry_claim_prefix = f"{self._queue_name}:entries:claims:"
+            self._entry_claim_deadlines_name = (
+                f"{self._queue_name}:entries:claim-leases"
+            )
             self._connection_encoding = connection_kwargs.get("encoding", "utf-8")
             self._stack = bool(options.pop("stack", False))
             self._maxsize = options.get("maxsize", 0)
@@ -242,9 +369,19 @@ try:
                         async_kwargs["ssl"] = True
                     client = async_redis.Redis(**async_kwargs)
             self._async_redis_by_loop[loop] = client
-            self._async_scripts_by_loop[loop] = (
-                self._register_script(client, _CLAIM_ENTRY_SCRIPT),
-                self._register_script(client, _ACKNOWLEDGE_CLAIM_SCRIPT),
+            self._async_scripts_by_loop[loop] = _AsyncScripts(
+                claim_entry=self._register_script(client, _CLAIM_ENTRY_SCRIPT),
+                acknowledge_claim=self._register_script(
+                    client, _ACKNOWLEDGE_CLAIM_SCRIPT
+                ),
+                renew_claim=self._register_script(client, _RENEW_CLAIM_SCRIPT),
+                mark_claim_running=self._register_script(
+                    client, _MARK_CLAIM_RUNNING_SCRIPT
+                ),
+                recover_expired_claims=self._register_script(
+                    client, _RECOVER_EXPIRED_CLAIMS_SCRIPT
+                ),
+                settle_claim=self._register_script(client, _SETTLE_CLAIM_SCRIPT),
             )
             return client
 
@@ -345,7 +482,7 @@ try:
             )
             await self._astore_entry(entry)
             await self._async_redis().rpush(
-                self._entry_pending_name, _encode(str(entry.id), self._encoding)
+                self._entry_pending_name, _encode(str(entry.id), "ascii")
             )
             send_entry_enqueued(self, entry=entry)
             return entry.id
@@ -364,23 +501,35 @@ try:
             )
             if raw_entry_id is None:
                 raise QueueEmptyException
-            return await self.aget_entry(
-                uuid.UUID(_decode(raw_entry_id, self._encoding))
-            )
+            return await self.aget_entry(uuid.UUID(_decode(raw_entry_id, "ascii")))
 
-        def claim_entry(self, worker_id: uuid.UUID) -> QueueEntry:
-            return self._run_synchronously(self.aclaim_entry, worker_id)
+        @property
+        def supports_claim_leases(self) -> bool:
+            return True
 
-        async def aclaim_entry(self, worker_id: uuid.UUID) -> QueueEntry:
+        async def aclaim_entry(
+            self,
+            worker_id: uuid.UUID,
+            lease_seconds: float | None = None,
+        ) -> QueueEntry:
+            if lease_seconds is None:
+                lease_seconds = self.default_claim_lease_seconds
+            validate_budget(lease_seconds)
             self._async_redis()
-            claim_entry, _ = self._async_scripts_by_loop[asyncio.get_running_loop()]
+            claim_entry = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ].claim_entry
             outcome, raw_entry_id = await claim_entry(
                 keys=(
                     self._entry_pending_name,
                     _encode(self._entry_claim_prefix, self._connection_encoding),
+                    self._entry_claim_deadlines_name,
                 ),
                 args=(
                     _encode(str(worker_id), "ascii"),
+                    _encode(
+                        str(round(lease_seconds * MICROSECONDS_PER_SECOND)), "ascii"
+                    ),
                     b"1" if self._stack else b"0",
                 ),
             )
@@ -389,7 +538,7 @@ try:
                 raise QueueEmptyException
             if outcome not in {"claimed", "conflict"}:
                 raise QueueValueError(f"Unknown Redis claim outcome: {outcome!r}")
-            entry_id = uuid.UUID(_decode(raw_entry_id, self._encoding))
+            entry_id = uuid.UUID(_decode(raw_entry_id, "ascii"))
             if outcome == "conflict":
                 raise QueueClaimConflictError(entry_id)
             try:
@@ -397,20 +546,126 @@ try:
             except QueueEmptyException as exc:
                 raise QueueEntryMissingError(entry_id) from exc
 
-        def acknowledge_claim(self, entry_id: uuid.UUID, worker_id: uuid.UUID) -> bool:
-            return self._run_synchronously(self.aacknowledge_claim, entry_id, worker_id)
-
         async def aacknowledge_claim(
             self, entry_id: uuid.UUID, worker_id: uuid.UUID
         ) -> bool:
             self._async_redis()
-            _, acknowledge_claim = self._async_scripts_by_loop[
+            acknowledge_claim = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
-            ]
+            ].acknowledge_claim
             return bool(
                 await acknowledge_claim(
-                    keys=(self._entry_claim_key(entry_id),),
-                    args=(_encode(str(worker_id), "ascii"),),
+                    keys=(
+                        self._entry_claim_key(entry_id),
+                        self._entry_claim_deadlines_name,
+                    ),
+                    args=(
+                        _encode(str(worker_id), "ascii"),
+                        _encode(str(entry_id), "ascii"),
+                    ),
+                )
+            )
+
+        async def arenew_claim(
+            self, entry_id: uuid.UUID, worker_id: uuid.UUID, lease_seconds: float
+        ) -> bool:
+            validate_budget(lease_seconds)
+            self._async_redis()
+            renew_claim = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ].renew_claim
+            return bool(
+                await renew_claim(
+                    keys=(
+                        self._entry_claim_key(entry_id),
+                        self._entry_claim_deadlines_name,
+                    ),
+                    args=(
+                        _encode(str(worker_id), "ascii"),
+                        _encode(
+                            str(round(lease_seconds * MICROSECONDS_PER_SECOND)), "ascii"
+                        ),
+                        _encode(str(entry_id), "ascii"),
+                    ),
+                )
+            )
+
+        async def arecover_expired_claims(self) -> int:
+            batch_size = self.recovery_batch_size
+            if type(batch_size) is not int or batch_size <= 0:
+                raise ValueError("Recovery batch size must be a positive integer")
+            self._async_redis()
+            recover_expired_claims = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ].recover_expired_claims
+            recovered, discarded = await recover_expired_claims(
+                keys=(
+                    self._entry_claim_deadlines_name,
+                    _encode(self._entry_claim_prefix, self._connection_encoding),
+                    self._entry_pending_name,
+                    _encode(f"{self._queue_name}:entries:", self._connection_encoding),
+                ),
+                args=(
+                    b"1" if self._stack else b"0",
+                    _encode(str(batch_size), "ascii"),
+                ),
+            )
+            if discarded:
+                logger.error(
+                    "Discarded %s unrecoverable expired queue claim%s",
+                    discarded,
+                    "s" if discarded != 1 else "",
+                )
+            return int(recovered)
+
+        async def amark_claim_running(
+            self, entry_id: uuid.UUID, worker_id: uuid.UUID
+        ) -> QueueEntry | None:
+            queued_entry = await self.aget_entry(entry_id)
+            running_entry = replace(
+                queued_entry,
+                status=QueueEntryStatus.RUNNING,
+                dispatched_at=await self.clock.anow(),
+            )
+            self._async_redis()
+            mark_claim_running = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ].mark_claim_running
+            marked, _ = await mark_claim_running(
+                keys=(self._entry_claim_key(entry_id), self._entry_key(entry_id)),
+                args=(
+                    _encode(str(worker_id), "ascii"),
+                    _encode(json.dumps(running_entry.to_dict()), "ascii"),
+                ),
+            )
+            if not marked:
+                return None
+            return running_entry
+
+        async def asettle_claim(self, worker_id: uuid.UUID, entry: QueueEntry) -> bool:
+            if entry.status not in {
+                QueueEntryStatus.SUCCEEDED,
+                QueueEntryStatus.FAILED,
+                QueueEntryStatus.CANCELLED,
+                QueueEntryStatus.TIMEOUT,
+            }:
+                raise ValueError("A claim can only be settled with a terminal entry")
+            self._async_redis()
+            settle_claim = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ].settle_claim
+            return bool(
+                await settle_claim(
+                    keys=(
+                        self._entry_claim_key(entry.id),
+                        self._entry_claim_deadlines_name,
+                        self._entry_key(entry.id),
+                    ),
+                    args=(
+                        _encode(str(worker_id), "ascii"),
+                        _encode(str(entry.id), "ascii"),
+                        _encode(json.dumps(entry.to_dict()), "ascii"),
+                    ),
                 )
             )
 
@@ -464,11 +719,11 @@ try:
         def _entry_claim_key(self, entry_id: uuid.UUID) -> bytes:
             return _encode(
                 self._entry_claim_prefix, self._connection_encoding
-            ) + _encode(str(entry_id), self._encoding)
+            ) + _encode(str(entry_id), "ascii")
 
         async def _astore_entry(self, entry: QueueEntry) -> None:
             await self._async_redis().set(
-                self._entry_key(entry.id), json.dumps(entry.to_dict())
+                self._entry_key(entry.id), _encode(json.dumps(entry.to_dict()), "ascii")
             )
 
         async def _areplace_entry(
