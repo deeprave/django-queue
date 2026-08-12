@@ -760,7 +760,7 @@ class TestRedisQueueEntries:
         asyncio.run(exercise())
 
     def test_worker_cancels_a_handler_when_its_claim_is_lost_during_renewal(
-        self, redis_entry_queue
+        self, redis_entry_queue, caplog
     ):
         entry_id = redis_entry_queue.enqueue("work", timeout_seconds=0.01)
         started = asyncio.Event()
@@ -781,12 +781,13 @@ class TestRedisQueueEntries:
                 idle_delay=0.001,
                 cancellation_grace_period=0.001,
             )
-            task = asyncio.create_task(worker.run())
-            await asyncio.wait_for(started.wait(), timeout=1)
-            await redis_entry_queue._async_redis().delete(
-                redis_entry_queue._entry_claim_key(entry_id)
-            )
-            await asyncio.wait_for(cancelled.wait(), timeout=1)
+            with caplog.at_level(logging.WARNING, logger="django_queue.worker"):
+                task = asyncio.create_task(worker.run())
+                await asyncio.wait_for(started.wait(), timeout=1)
+                await redis_entry_queue._async_redis().delete(
+                    redis_entry_queue._entry_claim_key(entry_id)
+                )
+                await asyncio.wait_for(cancelled.wait(), timeout=1)
 
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -794,6 +795,7 @@ class TestRedisQueueEntries:
             await redis_entry_queue.aclose()
 
         asyncio.run(exercise())
+        assert f"Lost claim for queue entry {entry_id} during renewal" in caplog.text
 
     def test_synchronous_claim_lease_wrappers(self, redis_entry_queue):
         entry_id = redis_entry_queue.enqueue("work")

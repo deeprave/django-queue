@@ -29,10 +29,10 @@ Lease renewal extends the queue heartbeat with ownership validation: a worker
 may renew only the claim it still owns. A lease duration must exceed the entry
 budget by at least the worker cancellation grace period, so an orderly
 cancellation cannot make a still-running handler reclaimable prematurely.
-Workers renew automatically at half of a lease up to 60 seconds, two thirds of
-a lease up to 10 minutes, and three quarters for longer leases. The increasing
-interval avoids unnecessary renewal traffic while retaining a meaningful
-recovery window.
+Workers renew automatically at half of the lease duration for leases up to 60
+seconds, two thirds for leases up to 10 minutes, and three quarters for longer
+leases. The increasing interval avoids unnecessary renewal traffic while
+retaining a meaningful recovery window.
 
 Workers claim with the finite backend default, then immediately renew to the
 resolved execution budget plus cancellation grace before recording `running` or

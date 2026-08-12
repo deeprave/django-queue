@@ -326,7 +326,9 @@ class AsyncQueueWorker:
                 if not await queue.arenew_claim(
                     entry.id, self._worker_id, lease_seconds
                 ):
-                    logger.error("Unable to renew claim for queue entry %s", entry.id)
+                    logger.warning(
+                        "Lost claim for queue entry %s during renewal", entry.id
+                    )
                     return False
         except asyncio.CancelledError:
             raise
