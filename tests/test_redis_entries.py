@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from uuid import uuid4
 
@@ -16,7 +17,9 @@ from django_queue.backends import (
 )
 from django_queue.backends.exceptions import (
     InvalidQueueBackendError,
+    QueueClaimConflictError,
     QueueEmptyException,
+    QueueEntryMissingError,
 )
 from django_queue.clock import ClockTime, QueueClockError
 from django_queue.entries import QueueEntryStatus
@@ -163,9 +166,13 @@ class TestRedisQueueEntries:
             completed = await queue.amark_succeeded(entry_id, {"ok": True})
             assert completed.status is QueueEntryStatus.SUCCEEDED
             first_client = queue._async_redis()
+            first_scripts = queue._async_scripts_by_loop.copy()
             await queue.aclose()
             assert not queue._async_redis_by_loop
+            assert not queue._async_scripts_by_loop
             assert queue._async_redis() is not first_client
+            assert queue._async_scripts_by_loop != first_scripts
+            await queue.aclose()
 
         asyncio.run(exercise())
 
@@ -214,6 +221,240 @@ class TestRedisQueueEntries:
 
         assert redis_entry_queue.dequeue_entry().id == first_id
         assert redis_entry_queue.dequeue_entry().id == latest_id
+
+    def test_claims_one_entry_for_exactly_one_competing_worker(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        first_worker = uuid4()
+        second_worker = uuid4()
+
+        async def exercise():
+            claims = await asyncio.gather(
+                redis_entry_queue.aclaim_entry(first_worker),
+                redis_entry_queue.aclaim_entry(second_worker),
+                return_exceptions=True,
+            )
+
+            claimed = [claim for claim in claims if not isinstance(claim, Exception)]
+            failures = [claim for claim in claims if isinstance(claim, Exception)]
+
+            assert [claim.id for claim in claimed] == [entry_id]
+            assert len(failures) == 1
+            assert isinstance(failures[0], QueueEmptyException)
+            assert not await redis_entry_queue.ahas_pending_entries()
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_records_owner_and_redis_time_for_a_claim(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        worker_id = uuid4()
+
+        async def exercise():
+            claimed = await redis_entry_queue.aclaim_entry(worker_id)
+            raw_claim = await redis_entry_queue._async_redis().get(
+                redis_entry_queue._entry_claim_key(entry_id)
+            )
+
+            assert claimed.id == entry_id
+            claim = json.loads(raw_claim)
+            assert claim["worker_id"] == str(worker_id)
+            assert set(claim["claimed_at"]) == {"seconds", "microseconds"}
+            assert all(isinstance(value, int) for value in claim["claimed_at"].values())
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_acknowledges_a_claim_only_for_its_owner(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        owner_id = uuid4()
+
+        async def exercise():
+            await redis_entry_queue.aclaim_entry(owner_id)
+
+            assert not await redis_entry_queue.aacknowledge_claim(entry_id, uuid4())
+            assert await redis_entry_queue._async_redis().exists(
+                redis_entry_queue._entry_claim_key(entry_id)
+            )
+            assert await redis_entry_queue.aacknowledge_claim(entry_id, owner_id)
+            assert not await redis_entry_queue._async_redis().exists(
+                redis_entry_queue._entry_claim_key(entry_id)
+            )
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_synchronous_claim_and_acknowledgement_wrappers(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        worker_id = uuid4()
+
+        assert redis_entry_queue.claim_entry(worker_id).id == entry_id
+        assert redis_entry_queue.acknowledge_claim(entry_id, worker_id)
+
+    def test_claim_and_acknowledge_entries_with_the_configured_encoding(
+        self, redis_client
+    ):
+        queue = RedisQueue(
+            redis_client, queue_name=f"claim-encoding-{uuid4().hex}", encoding="utf-16"
+        )
+        entry_id = queue.enqueue("work")
+        worker_id = uuid4()
+
+        assert queue.claim_entry(worker_id).id == entry_id
+        assert queue.acknowledge_claim(entry_id, worker_id)
+
+    def test_claim_and_acknowledge_entries_with_a_non_utf8_client_encoding(
+        self, redis_client
+    ):
+        client = redis.Redis(
+            host=redis_client.connection_pool.connection_kwargs["host"],
+            port=redis_client.connection_pool.connection_kwargs["port"],
+            encoding="utf-16",
+        )
+        queue = RedisQueue(client, queue_name=f"claim-client-encoding-{uuid4().hex}")
+        entry_id = queue.enqueue("work")
+        worker_id = uuid4()
+
+        try:
+            assert queue.claim_entry(worker_id).id == entry_id
+            assert queue.acknowledge_claim(entry_id, worker_id)
+        finally:
+            client.close()
+
+    def test_claim_outcomes_with_a_decoding_client(self, redis_client):
+        client = redis.Redis(
+            host=redis_client.connection_pool.connection_kwargs["host"],
+            port=redis_client.connection_pool.connection_kwargs["port"],
+            decode_responses=True,
+        )
+        queue = RedisQueue(client, queue_name=f"claim-decoding-{uuid4().hex}")
+
+        try:
+            claimed_entry_id = queue.enqueue("claimed")
+            assert queue.claim_entry(uuid4()).id == claimed_entry_id
+            with pytest.raises(QueueEmptyException):
+                queue.claim_entry(uuid4())
+
+            conflicted_entry_id = queue.enqueue("conflicted")
+            client.set(queue._entry_claim_key(conflicted_entry_id), "already claimed")
+            with pytest.raises(QueueClaimConflictError) as raised:
+                queue.claim_entry(uuid4())
+
+            assert raised.value.entry_id == conflicted_entry_id
+        finally:
+            client.close()
+
+    @pytest.mark.parametrize("redis_spec_type", ["client", "url"])
+    def test_rejects_a_decoding_client_with_a_non_utf8_queue_encoding(
+        self, redis_client, redis_spec_type
+    ):
+        host = redis_client.connection_pool.connection_kwargs["host"]
+        port = redis_client.connection_pool.connection_kwargs["port"]
+        client = None
+        if redis_spec_type == "client":
+            client = redis.Redis(host=host, port=port, decode_responses=True)
+            redis_spec = client
+        else:
+            redis_spec = f"redis://{host}:{port}/0?decode_responses=true"
+
+        try:
+            with pytest.raises(
+                InvalidQueueBackendError,
+                match="decode_responses.*non-UTF-8 queue encoding",
+            ):
+                RedisQueue(redis_spec, encoding="utf-16")
+        finally:
+            if client is not None:
+                client.close()
+
+    @pytest.mark.parametrize("encoding", ["U8", "cp65001"])
+    def test_accepts_utf8_encoding_aliases_with_a_decoding_client(
+        self, redis_client, encoding
+    ):
+        client = redis.Redis(
+            host=redis_client.connection_pool.connection_kwargs["host"],
+            port=redis_client.connection_pool.connection_kwargs["port"],
+            decode_responses=True,
+        )
+
+        try:
+            RedisQueue(client, encoding=encoding)
+        finally:
+            client.close()
+
+    def test_rejects_an_unknown_queue_encoding(self, redis_client):
+        with pytest.raises(InvalidQueueBackendError, match="Queue encoding is invalid"):
+            RedisQueue(redis_client, encoding="not-an-encoding")
+
+    @pytest.mark.parametrize("redis_url", ["not-a-url", "http://example.com"])
+    def test_rejects_an_invalid_redis_url(self, redis_url):
+        with pytest.raises(InvalidQueueBackendError, match="Redis URL is invalid"):
+            RedisQueue(redis_url)
+
+    def test_does_not_acknowledge_a_malformed_claim_record(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+
+        async def exercise():
+            await redis_entry_queue._async_redis().set(
+                redis_entry_queue._entry_claim_key(entry_id), "not json"
+            )
+
+            assert not await redis_entry_queue.aacknowledge_claim(entry_id, uuid4())
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_claiming_a_missing_entry_record_reports_its_entry_id(
+        self, redis_entry_queue
+    ):
+        entry_id = redis_entry_queue.enqueue("work")
+        worker_id = uuid4()
+
+        async def exercise():
+            await redis_entry_queue._async_redis().delete(
+                redis_entry_queue._entry_key(entry_id)
+            )
+
+            with pytest.raises(QueueEntryMissingError) as raised:
+                await redis_entry_queue.aclaim_entry(worker_id)
+
+            assert raised.value.entry_id == entry_id
+            assert await redis_entry_queue._async_redis().exists(
+                redis_entry_queue._entry_claim_key(entry_id)
+            )
+            await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    @pytest.mark.parametrize(
+        ("queue_type", "claimed_payload", "remaining_payload"),
+        [(RedisQueue, "first", "latest"), (RedisStack, "latest", "first")],
+        ids=["queue-fifo", "stack-lifo"],
+    )
+    def test_preserves_pending_entries_that_are_already_claimed(
+        self, redis_client, queue_type, claimed_payload, remaining_payload
+    ):
+        queue = queue_type(redis_client, queue_name=f"claim-order-{uuid4().hex}")
+        first_entry_id = queue.enqueue("first")
+        latest_entry_id = queue.enqueue("latest")
+        expected_entry_id = latest_entry_id if queue.stack else first_entry_id
+
+        async def exercise():
+            await queue._async_redis().set(
+                queue._entry_claim_key(expected_entry_id), "already claimed"
+            )
+            with pytest.raises(QueueClaimConflictError) as raised:
+                await queue.aclaim_entry(uuid4())
+
+            assert raised.value.entry_id == expected_entry_id
+            assert await queue.ahas_pending_entries()
+            assert await queue._async_redis().exists(
+                queue._entry_claim_key(expected_entry_id)
+            )
+            assert (await queue.adequeue_entry()).payload == claimed_payload
+            assert (await queue.adequeue_entry()).payload == remaining_payload
+            await queue.aclose()
+
+        asyncio.run(exercise())
 
     def test_dequeues_entries_with_the_configured_encoding(self, redis_client):
         queue = RedisQueue(

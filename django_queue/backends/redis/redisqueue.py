@@ -1,5 +1,6 @@
 try:
     import asyncio
+    import codecs
     import inspect
     import json
     import uuid
@@ -14,9 +15,12 @@ try:
     from django_queue.backends.base import BaseQueue
     from django_queue.backends.exceptions import (
         InvalidQueueBackendError,
+        QueueClaimConflictError,
         QueueEmptyException,
         QueueEncodingException,
+        QueueEntryMissingError,
         QueueFullException,
+        QueueValueError,
     )
     from django_queue.clock import QueueClockError, RedisQueueClock
     from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
@@ -25,6 +29,49 @@ try:
     _ASYNC_REDIS_ARGUMENTS = frozenset(
         inspect.signature(async_redis.Redis.__init__).parameters
     ) - {"self"}
+
+    _CLAIM_ENTRY_SCRIPT = b"""
+        local entry_id
+        if ARGV[2] == "1" then
+            entry_id = redis.call("RPOP", KEYS[1])
+        else
+            entry_id = redis.call("LPOP", KEYS[1])
+        end
+        if not entry_id then
+            return {"empty", ""}
+        end
+
+        local claim_key = KEYS[2] .. entry_id
+        local claimed_at = redis.call("TIME")
+        local claim = cjson.encode({
+            worker_id = ARGV[1],
+            claimed_at = {
+                seconds = tonumber(claimed_at[1]),
+                microseconds = tonumber(claimed_at[2])
+            }
+        })
+        if redis.call("SET", claim_key, claim, "NX") then
+            return {"claimed", entry_id}
+        end
+        if ARGV[2] == "1" then
+            redis.call("RPUSH", KEYS[1], entry_id)
+        else
+            redis.call("LPUSH", KEYS[1], entry_id)
+        end
+        return {"conflict", entry_id}
+    """
+
+    _ACKNOWLEDGE_CLAIM_SCRIPT = b"""
+        local raw_claim = redis.call("GET", KEYS[1])
+        if not raw_claim then
+            return 0
+        end
+        local decoded, claim = pcall(cjson.decode, raw_claim)
+        if not decoded or type(claim) ~= "table" or claim.worker_id ~= ARGV[1] then
+            return 0
+        end
+        return redis.call("DEL", KEYS[1])
+    """
 
     def _encode(item: str, encoding: str) -> bytes:
         try:
@@ -84,13 +131,37 @@ try:
             self._redis = None if isinstance(redis_spec, str) else redis_spec
             self._redis_spec = redis_spec
             self._async_redis_by_loop = {}
+            self._async_scripts_by_loop = {}
             options = {} if options is None else options
             options |= kwargs
+            if isinstance(redis_spec, str):
+                try:
+                    connection_kwargs = redis.connection.parse_url(redis_spec)
+                except (AttributeError, ValueError) as exc:
+                    raise InvalidQueueBackendError(
+                        f"Redis URL is invalid: {exc}"
+                    ) from exc
+            else:
+                assert self._redis is not None
+                connection_kwargs = self._redis.connection_pool.connection_kwargs
+            try:
+                self._encoding = codecs.lookup(options.get("encoding", "utf-8")).name
+            except (LookupError, TypeError) as exc:
+                raise InvalidQueueBackendError("Queue encoding is invalid") from exc
+            if (
+                connection_kwargs.get("decode_responses", False)
+                and self._encoding != "utf-8"
+            ):
+                raise InvalidQueueBackendError(
+                    "A Redis client with decode_responses cannot use a non-UTF-8 "
+                    "queue encoding"
+                )
             self._queue_name = options.get("queue_name", random_queue_name())
             self._entry_pending_name = f"{self._queue_name}:entries:pending"
+            self._entry_claim_prefix = f"{self._queue_name}:entries:claims:"
+            self._connection_encoding = connection_kwargs.get("encoding", "utf-8")
             self._stack = bool(options.pop("stack", False))
             self._maxsize = options.get("maxsize", 0)
-            self._encoding = options.get("encoding", "utf-8")
             self._clocks_by_loop = {}
             self._clock = _QueueClockFacade(self)
 
@@ -171,7 +242,19 @@ try:
                         async_kwargs["ssl"] = True
                     client = async_redis.Redis(**async_kwargs)
             self._async_redis_by_loop[loop] = client
+            self._async_scripts_by_loop[loop] = (
+                self._register_script(client, _CLAIM_ENTRY_SCRIPT),
+                self._register_script(client, _ACKNOWLEDGE_CLAIM_SCRIPT),
+            )
             return client
+
+        def _register_script(self, client, script):
+            registered_script = client.register_script(script)
+            # Script digests are Redis protocol tokens, not queue values. Keep
+            # them as ASCII bytes so non-UTF-8 Redis client encodings cannot
+            # corrupt EVALSHA's digest argument.
+            registered_script.sha = _encode(registered_script.sha, "ascii")
+            return registered_script
 
         def _async_clock(self):
             loop = asyncio.get_running_loop()
@@ -285,6 +368,48 @@ try:
                 uuid.UUID(_decode(raw_entry_id, self._encoding))
             )
 
+        def claim_entry(self, worker_id: uuid.UUID) -> QueueEntry:
+            return self._run_synchronously(self.aclaim_entry, worker_id)
+
+        async def aclaim_entry(self, worker_id: uuid.UUID) -> QueueEntry:
+            self._async_redis()
+            claim_entry, _ = self._async_scripts_by_loop[asyncio.get_running_loop()]
+            outcome, raw_entry_id = await claim_entry(
+                keys=(
+                    self._entry_pending_name,
+                    _encode(self._entry_claim_prefix, self._connection_encoding),
+                ),
+                args=(str(worker_id), "1" if self._stack else "0"),
+            )
+            outcome = _decode(outcome, "ascii")
+            if outcome == "empty":
+                raise QueueEmptyException
+            if outcome not in {"claimed", "conflict"}:
+                raise QueueValueError(f"Unknown Redis claim outcome: {outcome!r}")
+            entry_id = uuid.UUID(_decode(raw_entry_id, self._encoding))
+            if outcome == "conflict":
+                raise QueueClaimConflictError(entry_id)
+            try:
+                return await self.aget_entry(entry_id)
+            except QueueEmptyException as exc:
+                raise QueueEntryMissingError(entry_id) from exc
+
+        def acknowledge_claim(self, entry_id: uuid.UUID, worker_id: uuid.UUID) -> bool:
+            return self._run_synchronously(self.aacknowledge_claim, entry_id, worker_id)
+
+        async def aacknowledge_claim(
+            self, entry_id: uuid.UUID, worker_id: uuid.UUID
+        ) -> bool:
+            self._async_redis()
+            _, acknowledge_claim = self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ]
+            return bool(
+                await acknowledge_claim(
+                    keys=(self._entry_claim_key(entry_id),), args=(str(worker_id),)
+                )
+            )
+
         async def ahas_pending_entries(self) -> bool:
             return bool(await self._async_redis().llen(self._entry_pending_name))
 
@@ -332,6 +457,11 @@ try:
         def _entry_key(self, entry_id: uuid.UUID) -> str:
             return f"{self._queue_name}:entries:{entry_id}"
 
+        def _entry_claim_key(self, entry_id: uuid.UUID) -> bytes:
+            return _encode(
+                self._entry_claim_prefix, self._connection_encoding
+            ) + _encode(str(entry_id), self._encoding)
+
         async def _astore_entry(self, entry: QueueEntry) -> None:
             await self._async_redis().set(
                 self._entry_key(entry.id), json.dumps(entry.to_dict())
@@ -355,6 +485,7 @@ try:
             loop = asyncio.get_running_loop()
             if clock := self._clocks_by_loop.pop(loop, None):
                 await clock.aclose()
+            self._async_scripts_by_loop.pop(loop, None)
             if client := self._async_redis_by_loop.pop(loop, None):
                 await client.aclose(close_connection_pool=True)
 

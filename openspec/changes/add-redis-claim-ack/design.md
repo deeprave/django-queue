@@ -7,13 +7,18 @@ the worker that owns the claim.
 
 **Goals:** Atomic pending-to-claimed transition and owner-checked acknowledgement.
 
-**Non-Goals:** Expiry, redelivery, retries, or at-least-once guarantees.
+**Non-Goals:** Expiry, redelivery, retries, at-least-once guarantees, and claim
+inspection. Claim inspection remains internal until lease recovery has a
+consumer; tests deliberately inspect the storage layout directly.
 
 ## Decisions
 
 Redis scripts atomically move an ID from pending storage to a claimed record
 holding worker ID and claim time. Acknowledgement removes it only for its owner.
-The API is additive; workers switch in the later lease-recovery change.
+The API is additive; workers switch in the later lease-recovery change. Claims
+distinguish an empty queue, an existing claim conflict, and a missing claimed
+entry record with `QueueEmptyException`, `QueueClaimConflictError`, and
+`QueueEntryMissingError` respectively.
 
 ## Risks / Trade-offs
 
