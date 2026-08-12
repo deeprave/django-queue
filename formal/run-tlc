@@ -1,0 +1,48 @@
+#!/bin/sh
+# Run TLC using the Java runtime and tools bundled with TLA+ Toolbox.
+set -eu
+
+usage() {
+    cat <<'EOF'
+Usage: formal/run-tlc [TLC option ...] SPEC.tla
+
+Runs TLC with the runtime bundled in TLA+ Toolbox. Pass normal TLC arguments,
+including -config when the model has a separate configuration file.
+
+Set TLA_TOOLBOX_APP to use a Toolbox app outside /Applications.
+
+Examples:
+  formal/run-tlc formal/tla/queue_delivery.tla
+  formal/run-tlc -config formal/tla/queue_delivery.cfg formal/tla/queue_delivery.tla
+EOF
+}
+
+case "${1:-}" in
+    --help|-h)
+        usage
+        exit 0
+        ;;
+esac
+
+[ "$#" -gt 0 ] || { usage >&2; exit 2; }
+
+toolbox_app="${TLA_TOOLBOX_APP:-/Applications/TLA+ Toolbox.app}"
+[ -d "$toolbox_app" ] || {
+    printf '%s\n' "TLA+ Toolbox was not found at: $toolbox_app" >&2
+    printf '%s\n' "Set TLA_TOOLBOX_APP to its application bundle path." >&2
+    exit 1
+}
+
+tools_jar=$(find "$toolbox_app" -type f -name tla2tools.jar -print -quit)
+[ -n "$tools_jar" ] || {
+    printf '%s\n' "No tla2tools.jar was found in: $toolbox_app" >&2
+    exit 1
+}
+
+toolbox_java=$(find "$toolbox_app" -type f -path '*/bin/java' -perm -111 -print -quit)
+[ -n "$toolbox_java" ] || {
+    printf '%s\n' "No executable Java runtime was found in: $toolbox_app" >&2
+    exit 1
+}
+
+exec "$toolbox_java" -cp "$tools_jar" tlc2.TLC "$@"

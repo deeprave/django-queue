@@ -1,0 +1,59 @@
+#!/bin/sh
+# Install the unregistered formal-method skills into an agent skill directory.
+set -eu
+
+usage() {
+    printf '%s\n' "Usage: sh formal/install-agent-skills [--target DIRECTORY] [--force]"
+}
+
+target="${HOME}/.agents/skills"
+force=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target)
+            [ "$#" -gt 1 ] || { usage >&2; exit 2; }
+            target=$2
+            shift 2
+            ;;
+        --force)
+            force=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+source_dir="$script_dir/agents/skills"
+
+[ -d "$source_dir" ] || { printf '%s\n' "Missing skill source: $source_dir" >&2; exit 1; }
+mkdir -p "$target"
+
+for skill in "$source_dir"/*; do
+    [ -d "$skill" ] || continue
+    name=$(basename "$skill")
+    [ -f "$skill/SKILL.md" ] || { printf '%s\n' "Missing SKILL.md: $skill" >&2; exit 1; }
+    if [ -e "$target/$name" ] && [ "$force" != true ]; then
+        printf '%s\n' "Refusing to replace existing skill: $target/$name" >&2
+        printf '%s\n' "Use --force to replace it deliberately." >&2
+        exit 1
+    fi
+done
+
+for skill in "$source_dir"/*; do
+    [ -d "$skill" ] || continue
+    name=$(basename "$skill")
+    if [ -e "$target/$name" ]; then
+        rm -rf "$target/$name"
+    fi
+    cp -R "$skill" "$target/$name"
+    printf '%s\n' "Installed $name -> $target/$name"
+done
