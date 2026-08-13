@@ -30,6 +30,15 @@ class _Registration:
     active: bool = True
     initialising: bool = True
     pending: list[QueueEntry] = field(default_factory=list)
+    started_at_sequence: int = 0
+    bootstrapped_through_sequence: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Delivery:
+    entry: QueueEntry
+    target: _Registration | None = None
+    sequence: int = 0
 
 
 class _QueueObservers:
@@ -39,15 +48,15 @@ class _QueueObservers:
         self.queue = queue
         self.lock = threading.RLock()
         self.registrations: list[_Registration] = []
-        self.events: Queue[tuple[QueueEntry, _Registration | None]] = Queue(
-            maxsize=_EVENT_QUEUE_SIZE
-        )
+        self.events: Queue[_Delivery] = Queue(maxsize=_EVENT_QUEUE_SIZE)
         self.drop_logged = False
+        self.sequence = 0
         self.dispatcher: threading.Thread | None = None
         self.receiver: threading.Thread | None = None
 
     def register(self, registration: _Registration) -> None:
         with self.lock:
+            registration.started_at_sequence = self.sequence
             self.registrations.append(registration)
             if self.dispatcher is None:
                 self.dispatcher = threading.Thread(
@@ -78,12 +87,14 @@ class _QueueObservers:
     def publish(self, entry: QueueEntry) -> None:
         """Snapshot registrations under lock, then publish without it."""
         with self.lock:
+            self.sequence += 1
+            delivery = _Delivery(entry, sequence=self.sequence)
             registrations = tuple(self.registrations)
             for registration in registrations:
                 if registration.initialising:
                     registration.pending.append(entry)
         if any(not registration.initialising for registration in registrations):
-            self._queue_event(entry)
+            self._queue_event(delivery)
 
     def activate(
         self, registration: _Registration, snapshots: list[QueueEntry]
@@ -92,16 +103,15 @@ class _QueueObservers:
         with self.lock:
             snapshots.extend(registration.pending)
             registration.pending.clear()
+            registration.bootstrapped_through_sequence = self.sequence
             registration.initialising = False
         for entry in _order_snapshots(snapshots):
-            self._queue_event(entry, registration)
+            self._queue_event(_Delivery(entry, target=registration))
 
-    def _queue_event(
-        self, entry: QueueEntry, target: _Registration | None = None
-    ) -> None:
+    def _queue_event(self, delivery: _Delivery) -> None:
         """Queue best-effort observer delivery without blocking queue workers."""
         try:
-            self.events.put_nowait((entry, target))
+            self.events.put_nowait(delivery)
         except Full:
             if not self.drop_logged:
                 logger.warning(
@@ -125,31 +135,43 @@ class _QueueObservers:
                 "Queue lifecycle receiver failed",
                 extra={"queue": self.queue.queue_name},
             )
+        finally:
+            with self.lock:
+                self.receiver = None
 
     def _run_dispatcher(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         while True:
-            entry, target = self.events.get()
-            if target is None:
+            delivery = self.events.get()
+            if delivery.target is None:
                 with self.lock:
                     registrations = tuple(self.registrations)
             else:
-                registrations = (target,)
+                registrations = (delivery.target,)
             for registration in registrations:
                 if not registration.active:
                     continue
+                if registration.initialising:
+                    continue
+                if (
+                    delivery.target is None
+                    and registration.started_at_sequence
+                    < delivery.sequence
+                    <= registration.bootstrapped_through_sequence
+                ):
+                    continue
                 if (
                     registration.entry_id is not None
-                    and registration.entry_id != entry.id
+                    and registration.entry_id != delivery.entry.id
                 ):
                     continue
                 try:
                     if inspect.iscoroutinefunction(registration.callback):
-                        result = registration.callback(entry)
+                        result = registration.callback(delivery.entry)
                     else:
                         result = loop.run_until_complete(
-                            sync_to_async(registration.callback)(entry)
+                            sync_to_async(registration.callback)(delivery.entry)
                         )
                     if inspect.isawaitable(result):
                         loop.run_until_complete(result)
@@ -158,7 +180,7 @@ class _QueueObservers:
                         "Queue lifecycle observer failed",
                         extra={
                             "queue": self.queue.queue_name,
-                            "entry_id": str(entry.id),
+                            "entry_id": str(delivery.entry.id),
                         },
                     )
 

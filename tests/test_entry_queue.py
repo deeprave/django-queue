@@ -180,6 +180,16 @@ class TestMemoryQueueEntries:
             "Queue lifecycle observer delivery queue is full; dropping snapshots"
         ]
 
+    def test_observer_receiver_clears_its_queue_registration_on_exit(
+        self, observer_queue
+    ):
+        observers = _observers_for(observer_queue)
+        observers.receiver = threading.current_thread()
+
+        observers._run_receiver(lambda callback: None)
+
+        assert observers.receiver is None
+
     def test_entry_queues_are_async_queue_variants(self, queue):
         assert isinstance(queue, AsyncQueue)
 
