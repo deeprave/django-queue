@@ -7,9 +7,6 @@ from uuid import uuid4
 
 import pytest
 import redis
-import redis.asyncio as async_redis
-from redis.backoff import ConstantBackoff
-from redis.retry import Retry
 
 from django_queue.backends import (
     RedisPriorityQueue,
@@ -23,6 +20,7 @@ from django_queue.backends.exceptions import (
     QueueEmptyException,
     QueueEntryMissingError,
 )
+from django_queue.backends.redis.redisqueue import RedisLifecycleObserverTransport
 from django_queue.clock import ClockTime, QueueClockError
 from django_queue.entries import QueueEntryStatus
 from django_queue.worker import AsyncQueueWorker, QueuePersistenceError
@@ -35,6 +33,80 @@ def redis_entry_queue(redis_client):
 
 
 class TestRedisQueueEntries:
+    def test_observer_transport_continues_to_a_valid_snapshot_after_invalid_data(
+        self, redis_entry_queue, monkeypatch
+    ):
+        entry = redis_entry_queue.entry_class.create(
+            queue=redis_entry_queue.queue_name, payload="work"
+        )
+
+        class FakePubSub:
+            def subscribe(self, channel):
+                self.channel = channel
+
+            def listen(self):
+                yield {"type": "message", "data": b"not-json"}
+                yield {"type": "message", "data": json.dumps(entry.to_dict())}
+
+            def close(self):
+                pass
+
+        class FakeClient:
+            def pubsub(self, **kwargs):
+                return FakePubSub()
+
+            def close(self):
+                pass
+
+        def observer_client():
+            return FakeClient()
+
+        monkeypatch.setattr(
+            redis_entry_queue, "_observer_redis_client", observer_client
+        )
+        received = []
+
+        RedisLifecycleObserverTransport(redis_entry_queue).receive(received.append)
+
+        assert received == [entry]
+
+    def test_persists_entry_when_lifecycle_publication_fails(
+        self, redis_entry_queue, monkeypatch
+    ):
+        async def exercise():
+            client = redis_entry_queue._async_redis()
+
+            async def fail_publish(*args, **kwargs):
+                raise redis.ConnectionError("unavailable")
+
+            monkeypatch.setattr(client, "publish", fail_publish)
+
+            async def handle(entry):
+                return entry.payload
+
+            worker = AsyncQueueWorker(
+                {"requests": redis_entry_queue},
+                {"requests": handle},
+                idle_delay=0.001,
+            )
+            entry_id = await redis_entry_queue.aenqueue("work")
+            task = asyncio.create_task(worker.run())
+            while (
+                await redis_entry_queue.aget_entry(entry_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0.001)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            entry = await redis_entry_queue.aget_entry(entry_id)
+            await redis_entry_queue.aclose()
+            return entry
+
+        entry = asyncio.run(exercise())
+
+        assert entry.status is QueueEntryStatus.SUCCEEDED
+        assert entry.payload == "work"
+
     def test_uses_distinct_clients_for_a_worker_loop_and_sync_bridge(
         self, redis_client
     ):
@@ -98,55 +170,6 @@ class TestRedisQueueEntries:
         assert not worker_thread.is_alive()
         assert not worker_failure
 
-    def test_uses_tls_when_cloning_a_sync_tls_client(self):
-        source = redis.Redis(host="localhost", ssl=True)
-        queue = RedisQueue(source, queue_name=f"entry-tls-{uuid4().hex}")
-
-        async def exercise():
-            client = queue._async_redis()
-            assert client.connection_pool.connection_class is async_redis.SSLConnection
-            await queue.aclose()
-
-        asyncio.run(exercise())
-        source.close()
-
-    def test_translates_a_sync_retry_policy_when_cloning_a_client(self):
-        source = redis.Redis(retry=Retry(ConstantBackoff(0.1), 3))
-        queue = RedisQueue(source, queue_name=f"entry-retry-{uuid4().hex}")
-
-        async def exercise():
-            retry = queue._async_redis().connection_pool.connection_kwargs["retry"]
-            assert isinstance(retry, async_redis.retry.Retry)
-            assert retry._retries == 3
-            source_retry = source.connection_pool.connection_kwargs["retry"]
-            assert retry._backoff.compute(1) == source_retry._backoff.compute(1)
-            await queue.aclose()
-
-        asyncio.run(exercise())
-        source.close()
-
-    def test_rejects_a_sync_retry_policy_without_cloneable_attributes(self):
-        retry = Retry(ConstantBackoff(0.1), 3)
-        del retry._backoff
-        source = redis.Redis(retry=retry)
-        queue = RedisQueue(source, queue_name=f"entry-retry-{uuid4().hex}")
-
-        async def exercise():
-            queue._async_redis()
-
-        # The client is created before Redis is contacted, so unsupported
-        # retry configuration is reported without requiring a live server.
-        with pytest.raises(
-            InvalidQueueBackendError, match="retry policy is unsupported"
-        ):
-            asyncio.run(exercise())
-        source.close()
-
-    def test_url_configuration_does_not_construct_a_sync_redis_client(self):
-        queue = RedisQueue("redis://localhost:6379/0")
-
-        assert queue._redis is None
-
     def test_clock_now_requires_async_calibration_on_an_active_loop(
         self, redis_entry_queue
     ):
@@ -191,6 +214,20 @@ class TestRedisQueueEntries:
         assert entry.status is QueueEntryStatus.QUEUED
         assert entry.payload == {"request_id": 42}
         assert redis_entry_queue.get() == "raw-value"
+
+    def test_lists_retained_entry_snapshots(self, redis_entry_queue):
+        queued_id = redis_entry_queue.enqueue("queued")
+        completed_id = redis_entry_queue.enqueue("completed")
+        redis_entry_queue.mark_running(completed_id)
+        redis_entry_queue.mark_succeeded(completed_id, "done")
+
+        entries = redis_entry_queue.list_entries()
+
+        assert {entry.id for entry in entries} == {queued_id, completed_id}
+        assert {entry.status for entry in entries} == {
+            QueueEntryStatus.QUEUED,
+            QueueEntryStatus.SUCCEEDED,
+        }
 
     def test_synchronous_entry_api_closes_each_bridge_loop_client(
         self, redis_entry_queue
@@ -831,88 +868,36 @@ class TestRedisQueueEntries:
         assert queue.claim_entry(worker_id).id == entry_id
         assert queue.acknowledge_claim(entry_id, worker_id)
 
-    def test_claim_mark_and_acknowledge_stack_entries_with_a_non_utf8_client_encoding(
-        self, redis_client
+    def test_claim_mark_and_acknowledge_stack_entries_with_a_non_utf8_queue_encoding(
+        self, redis_url
     ):
-        client = redis.Redis(
-            host=redis_client.connection_pool.connection_kwargs["host"],
-            port=redis_client.connection_pool.connection_kwargs["port"],
+        queue = RedisStack(
+            redis_url,
+            queue_name=f"claim-queue-encoding-{uuid4().hex}",
             encoding="utf-16",
         )
-        queue = RedisStack(client, queue_name=f"claim-client-encoding-{uuid4().hex}")
         queue.enqueue("first")
         entry_id = queue.enqueue("latest")
         worker_id = uuid4()
 
-        try:
-            assert queue.claim_entry(worker_id).id == entry_id
-            running = queue.mark_claim_running(entry_id, worker_id)
-            assert running is not None
-            assert running.status is QueueEntryStatus.RUNNING
-            assert queue.acknowledge_claim(entry_id, worker_id)
-        finally:
-            client.close()
+        assert queue.claim_entry(worker_id).id == entry_id
+        running = queue.mark_claim_running(entry_id, worker_id)
+        assert running is not None
+        assert running.status is QueueEntryStatus.RUNNING
+        assert queue.acknowledge_claim(entry_id, worker_id)
 
-    def test_claim_outcomes_with_a_decoding_client(self, redis_client):
-        client = redis.Redis(
-            host=redis_client.connection_pool.connection_kwargs["host"],
-            port=redis_client.connection_pool.connection_kwargs["port"],
-            decode_responses=True,
-        )
-        queue = RedisQueue(client, queue_name=f"claim-decoding-{uuid4().hex}")
-
-        try:
-            claimed_entry_id = queue.enqueue("claimed")
-            assert queue.claim_entry(uuid4()).id == claimed_entry_id
-            with pytest.raises(QueueEmptyException):
-                queue.claim_entry(uuid4())
-
-            conflicted_entry_id = queue.enqueue("conflicted")
-            client.set(queue._entry_claim_key(conflicted_entry_id), "already claimed")
-            with pytest.raises(QueueClaimConflictError) as raised:
-                queue.claim_entry(uuid4())
-
-            assert raised.value.entry_id == conflicted_entry_id
-        finally:
-            client.close()
-
-    @pytest.mark.parametrize("redis_spec_type", ["client", "url"])
-    def test_rejects_a_decoding_client_with_a_non_utf8_queue_encoding(
-        self, redis_client, redis_spec_type
-    ):
-        host = redis_client.connection_pool.connection_kwargs["host"]
-        port = redis_client.connection_pool.connection_kwargs["port"]
-        client = None
-        if redis_spec_type == "client":
-            client = redis.Redis(host=host, port=port, decode_responses=True)
-            redis_spec = client
-        else:
-            redis_spec = f"redis://{host}:{port}/0?decode_responses=true"
-
-        try:
-            with pytest.raises(
-                InvalidQueueBackendError,
-                match="decode_responses.*non-UTF-8 queue encoding",
-            ):
-                RedisQueue(redis_spec, encoding="utf-16")
-        finally:
-            if client is not None:
-                client.close()
+    def test_rejects_a_decoding_url_with_a_non_utf8_queue_encoding(self, redis_url):
+        with pytest.raises(
+            InvalidQueueBackendError,
+            match="decode_responses.*non-UTF-8 queue encoding",
+        ):
+            RedisQueue(f"{redis_url}?decode_responses=true", encoding="utf-16")
 
     @pytest.mark.parametrize("encoding", ["U8", "cp65001"])
-    def test_accepts_utf8_encoding_aliases_with_a_decoding_client(
-        self, redis_client, encoding
+    def test_accepts_utf8_encoding_aliases_with_a_decoding_url(
+        self, redis_url, encoding
     ):
-        client = redis.Redis(
-            host=redis_client.connection_pool.connection_kwargs["host"],
-            port=redis_client.connection_pool.connection_kwargs["port"],
-            decode_responses=True,
-        )
-
-        try:
-            RedisQueue(client, encoding=encoding)
-        finally:
-            client.close()
+        RedisQueue(f"{redis_url}?decode_responses=true", encoding=encoding)
 
     def test_rejects_an_unknown_queue_encoding(self, redis_client):
         with pytest.raises(InvalidQueueBackendError, match="Queue encoding is invalid"):

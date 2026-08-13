@@ -9,6 +9,7 @@ from django.utils.module_loading import import_string
 from .backends import InvalidQueueBackendError
 from .clock import ClockTime
 from .entries import QueueEntry, QueueEntryStatus, validate_budget
+from .observers import QueueSubscription, queue_observer
 from .signals import queue_created
 from .worker import AsyncQueueWorker, WorkerSnapshot, heartbeat
 
@@ -19,12 +20,14 @@ __all__ = (
     "ClockTime",
     "QueueEntry",
     "QueueEntryStatus",
+    "QueueSubscription",
     "WorkerSnapshot",
     "aclose_queues",
     "close_queues",
     "heartbeat",
     "initialise_queues",
     "queue",
+    "queue_observer",
     "queues",
 )
 

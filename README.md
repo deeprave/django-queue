@@ -42,6 +42,8 @@ QUEUES = {
 ```
 
 The above configures the queue backend to be redis, storing FIFO data in JSON format.
+Redis-backed queues take a Redis URL as their location and own their asynchronous
+connections; application code does not supply Redis client instances.
 
 To implement a stack (FILO), the `django_queue.backends.RedisStackJson` can be used instead, or a `"stack": True` option added to the options.
 
@@ -245,6 +247,44 @@ entry = queue.get_entry(entry_id)
 
 assert entry.status == "queued"
 ```
+
+### Lifecycle observation
+
+Use `queue_observer` for best-effort, passive task monitoring. A subscription
+receives immutable entry snapshots from a task worker; it cannot affect task
+execution.
+
+```python
+from django_queue import queue_observer
+
+
+def update_dashboard(entry):
+    print(entry.id, entry.status)
+
+
+subscription = queue_observer("default", update_dashboard)
+subscription.unsubscribe()  # stop future local delivery
+```
+
+Memory queues notify only within the same Django process. Redis queues use
+best-effort Pub/Sub: a disconnected observer can miss transitions. Register a
+new observer when a new retained-state bootstrap is needed. Observer callback
+failures are logged and do not affect queue processing. The local observer
+delivery queue holds up to 128 snapshots; later snapshots are dropped when it
+is full, with one warning logged for the process lifetime.
+
+When a worker receives an entry, it first publishes that entry's persisted
+`queued` snapshot, then publishes `running` and its terminal state after each
+state is stored. An entry awaiting a worker is still available in the retained
+snapshots delivered at subscription, but it produces no live
+observation until a worker receives it.
+
+The first Redis observer for a queue starts one daemon receiver for that
+process. It blocks in Pub/Sub while idle rather than polling, consumes no CPU
+while it waits, and does not keep Django alive during shutdown. The receiver is
+intentionally retained for the process lifetime so later subscriptions can
+reuse it. If it exits because Redis fails, it logs the failure and clears its
+registration; a later observer registration starts a fresh receiver.
 
 An entry transitions through `queued`, `running`, and one terminal status:
 `succeeded`, `failed`, or `timeout`. Failed entries expose only an exception

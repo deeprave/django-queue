@@ -31,11 +31,11 @@ try:
             return _decode(await super().apeek())
 
     class RedisStackJson(RedisQueueJson):
-        def __init__(self, redis_spec, options: dict | None = None, **kwargs):
+        def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
             options = {} if options is None else options
             options |= kwargs
             options.setdefault("stack", True)
-            super().__init__(redis_spec, options)
+            super().__init__(redis_url, options)
 
 except ImportError:
     pass

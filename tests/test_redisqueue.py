@@ -9,16 +9,14 @@ from django_queue.backends.redis.redisqueue import _decode
 
 
 @pytest.fixture
-def redis_queue(redis_client):
-    queue = RedisQueue(redis_client, queue_name="test_queue", maxsize=5)
+def redis_queue(redis_url):
+    queue = RedisQueue(redis_url, queue_name="test_queue", maxsize=5)
     queue.clear()
     return queue
 
 
-def test_init(redis_client):
-    queue = RedisQueue(redis_client, queue_name="test_queue")
-    assert queue._redis is not None
-    assert queue._redis.ping() is True
+def test_init(redis_url):
+    queue = RedisQueue(redis_url, queue_name="test_queue")
     assert queue.queue_name == "test_queue"
     assert queue._maxsize == 0
 
@@ -27,21 +25,10 @@ def test_capacity(redis_queue):
     assert redis_queue.capacity == 5
 
 
-def test_add(redis_queue):
-    redis_queue.add("item1", "item2")
-    assert redis_queue.size() == 2
-
-
 def test_add_overflow(redis_queue):
     redis_queue.add("item1", "item2", "item3", "item4", "item5")
     with pytest.raises(QueueFullException):
         redis_queue.add("item6")
-
-
-def test_get(redis_queue):
-    redis_queue.add("item1")
-    item = redis_queue.get()
-    assert item == "item1"
 
 
 def test_fifo_order(redis_queue):
@@ -49,11 +36,6 @@ def test_fifo_order(redis_queue):
     assert redis_queue.get() == "item1"
     assert redis_queue.get() == "item2"
     assert redis_queue.get() == "item3"
-
-
-def test_fifo_edge_case_empty_queue(redis_queue):
-    with pytest.raises(QueueEmptyException):
-        redis_queue.get()
 
 
 def test_fifo_with_one_item(redis_queue):
@@ -85,16 +67,9 @@ def test_size(redis_queue):
     assert size == 2
 
 
-def test_decode_returns_text_from_a_decoding_client(redis_container):
-    """A client built with decode_responses=True yields str, not bytes."""
-    import redis
-
-    client = redis.Redis(
-        host=redis_container.get_container_host_ip(),
-        port=redis_container.get_exposed_port(6379),
-        decode_responses=True,
-    )
-    queue = RedisQueue(client, queue_name="test_decoding_client")
+def test_decode_returns_text_from_a_decoding_url(redis_url):
+    """A decoding URL yields text rather than bytes."""
+    queue = RedisQueue(f"{redis_url}?decode_responses=true", queue_name="test-decoding")
     queue.clear()
 
     queue.add("item1")

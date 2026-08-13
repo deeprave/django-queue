@@ -5,9 +5,10 @@ from uuid import UUID
 
 from django_queue.clock import DEFAULT_CLOCK, QueueClock
 from django_queue.entries import QueueEntry, QueueEntryStatus, validate_json_value
+from django_queue.observers import publish_snapshot
 from django_queue.signals import send_entry_enqueued
 
-from ..base import BaseQueue
+from ..base import AsyncQueue
 from ..exceptions import QueueEmptyException, QueueFullException
 
 
@@ -20,7 +21,7 @@ async def apoll_item(item_queue: queue.Queue):
             await asyncio.sleep(0.01)
 
 
-class MemoryQueue(BaseQueue):
+class MemoryQueue(AsyncQueue):
     def __init__(self, _: str | None = None, options: dict | None = None, **kwargs):
         options = {} if options is None else options
         options |= kwargs
@@ -93,6 +94,12 @@ class MemoryQueue(BaseQueue):
             return self._entries[entry_id]
         except KeyError as exc:
             raise QueueEmptyException from exc
+
+    async def alist_entries(self) -> list[QueueEntry]:
+        return list(self._entries.values())
+
+    async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
+        publish_snapshot(entry)
 
     async def adequeue_entry(self) -> QueueEntry:
         try:

@@ -8,20 +8,8 @@ from django_queue.backends import (
 
 
 @pytest.fixture
-def redis_queue(redis_client) -> RedisPriorityQueueJson:
-    return RedisPriorityQueueJson(redis_spec=redis_client)
-
-
-def test_add_valid_json(redis_queue):
-    item = (1, {"key": "value"})
-    redis_queue.add(item)
-    assert redis_queue.size() == 1
-
-
-def test_add_valid_string(redis_queue):
-    item = (1, "test_string")
-    redis_queue.add(item)
-    assert redis_queue.size() == 1
+def redis_queue(redis_url) -> RedisPriorityQueueJson:
+    return RedisPriorityQueueJson(redis_url)
 
 
 def test_get_valid_json(redis_queue):

@@ -19,10 +19,21 @@ try:
 
     @pytest.fixture(scope="module")
     def redis_client(redis_container):
+        return (
+            f"redis://{redis_container.get_container_host_ip()}:"
+            f"{redis_container.get_exposed_port(6379)}/0"
+        )
+
+    @pytest.fixture(scope="module")
+    def redis_raw_client(redis_container):
         return redis.Redis(
             host=redis_container.get_container_host_ip(),
             port=redis_container.get_exposed_port(6379),
         )
+
+    @pytest.fixture(scope="module")
+    def redis_url(redis_client):
+        return redis_client
 
 except ImportError:
     pass

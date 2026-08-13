@@ -1,7 +1,6 @@
 try:
     import asyncio
     import codecs
-    import inspect
     import json
     import logging
     import uuid
@@ -10,10 +9,8 @@ try:
     import redis
     import redis.asyncio as async_redis
     from asgiref.sync import async_to_sync
-    from redis.asyncio.retry import Retry as AsyncRetry
-    from redis.retry import Retry
 
-    from django_queue.backends.base import BaseQueue
+    from django_queue.backends.base import AsyncQueue
     from django_queue.backends.exceptions import (
         InvalidQueueBackendError,
         QueueClaimConflictError,
@@ -36,9 +33,6 @@ try:
     )
     from django_queue.signals import send_entry_enqueued
 
-    _ASYNC_REDIS_ARGUMENTS = frozenset(
-        inspect.signature(async_redis.Redis.__init__).parameters
-    ) - {"self"}
     logger = logging.getLogger(__name__)
 
     _CLAIM_ENTRY_SCRIPT = b"""
@@ -248,26 +242,21 @@ try:
             finally:
                 await self._queue.aclose()
 
-    class RedisQueue(BaseQueue):
+    class RedisQueue(AsyncQueue):
         recovery_batch_size = 100
 
-        def __init__(self, redis_spec, options: dict | None = None, **kwargs):
-            self._redis = None if isinstance(redis_spec, str) else redis_spec
-            self._redis_spec = redis_spec
+        def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
+            if not isinstance(redis_url, str):
+                raise InvalidQueueBackendError("Redis queues require a Redis URL")
+            self._redis_url = redis_url
             self._async_redis_by_loop = {}
             self._async_scripts_by_loop = {}
             options = {} if options is None else options
             options |= kwargs
-            if isinstance(redis_spec, str):
-                try:
-                    connection_kwargs = redis.connection.parse_url(redis_spec)
-                except (AttributeError, ValueError) as exc:
-                    raise InvalidQueueBackendError(
-                        f"Redis URL is invalid: {exc}"
-                    ) from exc
-            else:
-                assert self._redis is not None
-                connection_kwargs = self._redis.connection_pool.connection_kwargs
+            try:
+                connection_kwargs = redis.connection.parse_url(redis_url)
+            except (AttributeError, ValueError) as exc:
+                raise InvalidQueueBackendError(f"Redis URL is invalid: {exc}") from exc
             try:
                 self._encoding = codecs.lookup(options.get("encoding", "utf-8")).name
             except (LookupError, TypeError) as exc:
@@ -286,6 +275,7 @@ try:
             self._entry_claim_deadlines_name = (
                 f"{self._queue_name}:entries:claim-leases"
             )
+            self._lifecycle_channel = f"{self._queue_name}:entries:lifecycle"
             self._connection_encoding = connection_kwargs.get("encoding", "utf-8")
             self._stack = bool(options.pop("stack", False))
             self._maxsize = options.get("maxsize", 0)
@@ -296,78 +286,7 @@ try:
             loop = asyncio.get_running_loop()
             if client := self._async_redis_by_loop.get(loop):
                 return client
-            if isinstance(self._redis_spec, str):
-                client = async_redis.from_url(self._redis_spec)
-            else:
-                assert self._redis is not None
-                connection_kwargs = dict(self._redis.connection_pool.connection_kwargs)
-                max_connections = self._redis.connection_pool.max_connections
-                connection_class = self._redis.connection_pool.connection_class
-                supported_connection_classes = (
-                    redis.connection.Connection,
-                    redis.connection.SSLConnection,
-                    redis.connection.UnixDomainSocketConnection,
-                )
-                if connection_class not in supported_connection_classes:
-                    raise InvalidQueueBackendError(
-                        "A supplied Redis client must use Redis, SSL, or Unix socket connections; "
-                        "use a Redis URL for custom connection classes"
-                    )
-                unsupported_tls_options = {
-                    name
-                    for name in (
-                        "ssl_validate_ocsp",
-                        "ssl_validate_ocsp_stapled",
-                        "ssl_ocsp_context",
-                        "ssl_ocsp_expected_cert",
-                    )
-                    if connection_kwargs.get(name)
-                }
-                if unsupported_tls_options:
-                    raise InvalidQueueBackendError(
-                        "A supplied Redis client uses unsupported async TLS options: "
-                        f"{', '.join(sorted(unsupported_tls_options))}"
-                    )
-                async_kwargs = {
-                    name: value
-                    for name, value in connection_kwargs.items()
-                    if name in _ASYNC_REDIS_ARGUMENTS
-                }
-                retry = async_kwargs.get("retry")
-                if isinstance(retry, Retry):
-                    # redis-py exposes no public accessors for Retry's policy.
-                    # Keep a version change from surfacing as an unhelpful
-                    # AttributeError while cloning a configured queue client.
-                    try:
-                        async_kwargs["retry"] = AsyncRetry(
-                            retry._backoff, retry._retries, retry._supported_errors
-                        )
-                    except AttributeError as exc:
-                        raise InvalidQueueBackendError(
-                            "A supplied Redis client's retry policy is unsupported"
-                        ) from exc
-                unsupported_async_options = {
-                    name
-                    for name in ("redis_connect_func", "credential_provider")
-                    if async_kwargs.get(name) is not None
-                }
-                if unsupported_async_options:
-                    raise InvalidQueueBackendError(
-                        "A supplied Redis client uses unsupported asynchronous options: "
-                        f"{', '.join(sorted(unsupported_async_options))}"
-                    )
-                async_kwargs["max_connections"] = max_connections
-                if path := connection_kwargs.get("path"):
-                    pool = async_redis.ConnectionPool(
-                        connection_class=async_redis.UnixDomainSocketConnection,
-                        path=path,
-                        **async_kwargs,
-                    )
-                    client = async_redis.Redis(connection_pool=pool)
-                else:
-                    if connection_class is redis.connection.SSLConnection:
-                        async_kwargs["ssl"] = True
-                    client = async_redis.Redis(**async_kwargs)
+            client = async_redis.from_url(self._redis_url)
             self._async_redis_by_loop[loop] = client
             self._async_scripts_by_loop[loop] = _AsyncScripts(
                 claim_entry=self._register_script(client, _CLAIM_ENTRY_SCRIPT),
@@ -384,6 +303,10 @@ try:
                 settle_claim=self._register_script(client, _SETTLE_CLAIM_SCRIPT),
             )
             return client
+
+        def _observer_redis_client(self):
+            """Return a dedicated synchronous client for lifecycle Pub/Sub."""
+            return redis.Redis.from_url(self._redis_url)
 
         def _register_script(self, client, script):
             registered_script = client.register_script(script)
@@ -492,6 +415,20 @@ try:
             if raw_entry is None:
                 raise QueueEmptyException
             return self.entry_class.from_dict(json.loads(raw_entry))
+
+        async def alist_entries(self) -> list[QueueEntry]:
+            client = self._async_redis()
+            entry_keys = []
+            match = f"{self._queue_name}:entries:????????-????-????-????-????????????"
+            async for key in client.scan_iter(match=match):
+                entry_keys.append(key)
+            if not entry_keys:
+                return []
+            return [
+                self.entry_class.from_dict(json.loads(raw_entry))
+                for raw_entry in await client.mget(entry_keys)
+                if raw_entry is not None
+            ]
 
         async def adequeue_entry(self) -> QueueEntry:
             raw_entry_id = await (
@@ -654,7 +591,7 @@ try:
             settle_claim = self._async_scripts_by_loop[
                 asyncio.get_running_loop()
             ].settle_claim
-            return bool(
+            settled = bool(
                 await settle_claim(
                     keys=(
                         self._entry_claim_key(entry.id),
@@ -668,6 +605,7 @@ try:
                     ),
                 )
             )
+            return settled
 
         async def ahas_pending_entries(self) -> bool:
             return bool(await self._async_redis().llen(self._entry_pending_name))
@@ -740,6 +678,16 @@ try:
             await self._astore_entry(entry)
             return entry
 
+        async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
+            try:
+                await self._async_redis().publish(
+                    self._lifecycle_channel, json.dumps(entry.to_dict())
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to publish queue lifecycle snapshot for entry %s", entry.id
+                )
+
         async def aclose(self) -> None:
             loop = asyncio.get_running_loop()
             if clock := self._clocks_by_loop.pop(loop, None):
@@ -748,12 +696,40 @@ try:
             if client := self._async_redis_by_loop.pop(loop, None):
                 await client.aclose(close_connection_pool=True)
 
+    class RedisLifecycleObserverTransport:
+        """Redis-specific Pub/Sub transport used only by lifecycle observers."""
+
+        def __init__(self, queue: RedisQueue) -> None:
+            self._queue = queue
+
+        def receive(self, on_snapshot) -> None:
+            client = self._queue._observer_redis_client()
+            pubsub = client.pubsub(ignore_subscribe_messages=True)
+            try:
+                pubsub.subscribe(self._queue._lifecycle_channel)
+                for message in pubsub.listen():
+                    if message["type"] == "message":
+                        try:
+                            entry = self._queue.entry_class.from_dict(
+                                json.loads(message["data"])
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Ignoring invalid queue lifecycle snapshot",
+                                extra={"queue": self._queue.queue_name},
+                            )
+                            continue
+                        on_snapshot(entry)
+            finally:
+                pubsub.close()
+                client.close()
+
     class RedisStack(RedisQueue):
-        def __init__(self, redis_spec, options: dict | None = None, **kwargs):
+        def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
             options = {} if options is None else options
             options |= kwargs
             options.setdefault("stack", True)
-            super().__init__(redis_spec, options)
+            super().__init__(redis_url, options)
 
 except ImportError:
     pass
