@@ -1,6 +1,4 @@
 try:
-    import redis
-
     from django_queue.backends.exceptions import (
         QueueEmptyException,
         QueueEncodingException,
@@ -10,10 +8,8 @@ try:
     from .redisqueue import RedisQueue, _decode, _encode
 
     class RedisPriorityQueue(RedisQueue):
-        def __init__(
-            self, redis_spec: str | redis.Redis, options: dict | None = None, **kwargs
-        ):
-            super().__init__(redis_spec, options, **kwargs)
+        def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
+            super().__init__(redis_url, options, **kwargs)
 
         @property
         def stack(self):

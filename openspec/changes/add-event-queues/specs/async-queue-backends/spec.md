@@ -1,0 +1,15 @@
+## ADDED Requirements
+
+### Requirement: Separate task and event queue semantics
+The system SHALL provide `AsyncQueue` and `EventQueue` semantic base classes
+beneath `BaseQueue`. Existing Redis and memory queues SHALL retain AsyncQueue task
+semantics. Redis and memory event queue variants SHALL remove consumed,
+rejected, and expired events instead of persisting task terminal states.
+
+#### Scenario: Retain an AsyncQueue outcome
+- **WHEN** an AsyncQueue worker records a terminal outcome
+- **THEN** its entry remains available under the existing lifecycle contract
+
+#### Scenario: Remove a consumed event
+- **WHEN** an event worker acknowledges an event it owns
+- **THEN** the backend removes its pending representation and entry record

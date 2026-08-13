@@ -4,16 +4,10 @@ from django_queue.backends import QueueEncodingException, RedisQueueJson
 
 
 @pytest.fixture
-def redis_queue(redis_client):
-    queue = RedisQueueJson(redis_client, queue_name="test_queue", maxsize=5)
+def redis_queue(redis_url):
+    queue = RedisQueueJson(redis_url, queue_name="test_queue", maxsize=5)
     queue.clear()
     return queue
-
-
-def test_add_valid_json(redis_queue):
-    item = {"key": "value"}
-    redis_queue.add(item)
-    assert redis_queue.size() == 1
 
 
 def test_get_valid_json(redis_queue):

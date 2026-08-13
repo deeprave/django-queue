@@ -1,11 +1,17 @@
 import asyncio
+import threading
 
 import pytest
 
+import django_queue
+from django_queue import queue_observer
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue, MemoryStack
+from django_queue.backends.base import AsyncQueue, EventQueue
 from django_queue.backends.exceptions import QueueEmptyException
 from django_queue.entries import QueueEntryStatus
+from django_queue.observers import _EVENT_QUEUE_SIZE, _observers_for, _Registration
 from django_queue.signals import entry_enqueued
+from django_queue.worker import AsyncQueueWorker
 from tests.helpers import FIXED_CLOCK_TIME, CustomQueueEntry, FixedClock
 
 
@@ -21,7 +27,186 @@ def queue(request):
     return request.param(queue_name="requests", clock=FixedClock())
 
 
+@pytest.fixture(
+    params=[MemoryQueue, MemoryPriorityQueue, MemoryStack],
+    ids=["fifo", "priority", "stack"],
+)
+def observer_queue(request, monkeypatch):
+    handler = django_queue.QueueHandler(
+        {
+            "requests": {
+                "BACKEND": f"django_queue.backends.{request.param.__name__}",
+                "LOCATION": "",
+            }
+        }
+    )
+    monkeypatch.setattr(django_queue, "queues", handler)
+    return handler["requests"]
+
+
+async def _event_queue_noop(*args, **kwargs):
+    return None
+
+
+async def _process_one(queue, queue_name="requests"):
+    async def handle(entry):
+        return entry.payload
+
+    worker = AsyncQueueWorker(
+        {queue_name: queue}, {queue_name: handle}, idle_delay=0.001
+    )
+    entry_id = await queue.aenqueue("work")
+    task = asyncio.create_task(worker.run())
+    while (await queue.aget_entry(entry_id)).status is not QueueEntryStatus.SUCCEEDED:
+        await asyncio.sleep(0.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+class ObserverEventQueue(EventQueue):
+    capacity = 0
+    aadd = aget = apoll = apeek = asize = aenqueue = aget_entry = _event_queue_noop
+    alist_entries = adequeue_entry = ahas_pending_entries = _event_queue_noop
+    amark_running = amark_succeeded = amark_failed = _event_queue_noop
+    amark_cancelled = amark_timed_out = _event_queue_noop
+
+    def __init__(self, _: str, options: dict) -> None:
+        self._queue_name = options.pop("queue_name", "events")
+
+
 class TestMemoryQueueEntries:
+    def test_observer_routes_live_snapshots_by_backend_queue_name(self, monkeypatch):
+        handler = django_queue.QueueHandler(
+            {
+                "alias": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "LOCATION": "",
+                    "queue_name": "physical",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", handler)
+        observed_queue = handler["alias"]
+        delivered = threading.Event()
+
+        subscription = queue_observer("alias", lambda entry: delivered.set())
+        asyncio.run(_process_one(observed_queue, "alias"))
+
+        assert delivered.wait(1)
+        subscription.unsubscribe()
+
+    def test_observers_are_sequential_and_isolate_callback_failure(
+        self, observer_queue, caplog
+    ):
+        delivered = threading.Event()
+        calls = []
+
+        def fail(entry):
+            calls.append(("fail", entry.status))
+            raise RuntimeError("expected observer failure")
+
+        def succeed(entry):
+            calls.append(("succeed", entry.status))
+            if entry.status is QueueEntryStatus.SUCCEEDED:
+                delivered.set()
+
+        first = queue_observer("requests", fail)
+        second = queue_observer("requests", succeed)
+        asyncio.run(_process_one(observer_queue))
+
+        assert delivered.wait(1)
+        first.unsubscribe()
+        second.unsubscribe()
+        assert calls == [
+            ("fail", QueueEntryStatus.QUEUED),
+            ("succeed", QueueEntryStatus.QUEUED),
+            ("fail", QueueEntryStatus.RUNNING),
+            ("succeed", QueueEntryStatus.RUNNING),
+            ("fail", QueueEntryStatus.SUCCEEDED),
+            ("succeed", QueueEntryStatus.SUCCEEDED),
+        ]
+        assert "Queue lifecycle observer failed" in caplog.text
+
+    def test_observer_receives_worker_lifecycle(self, observer_queue):
+        statuses = []
+        completed = threading.Event()
+
+        def callback(entry):
+            statuses.append(entry.status)
+            if entry.status is QueueEntryStatus.SUCCEEDED:
+                completed.set()
+
+        subscription = queue_observer("requests", callback)
+
+        asyncio.run(_process_one(observer_queue))
+
+        assert completed.wait(1)
+        subscription.unsubscribe()
+        assert statuses == [
+            QueueEntryStatus.QUEUED,
+            QueueEntryStatus.RUNNING,
+            QueueEntryStatus.SUCCEEDED,
+        ]
+
+    def test_observer_rejects_event_queue(self, monkeypatch):
+        handler = django_queue.QueueHandler(
+            {
+                "events": {
+                    "BACKEND": "tests.test_entry_queue.ObserverEventQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", handler)
+
+        with pytest.raises(TypeError, match="AsyncQueue"):
+            queue_observer("events", lambda entry: None)
+
+    def test_observer_drops_snapshots_after_its_queue_delivery_queue_is_full(
+        self, observer_queue, caplog
+    ):
+        observers = _observers_for(observer_queue)
+        registration = _Registration(lambda entry: None, None, initialising=False)
+        with observers.lock:
+            observers.registrations.append(registration)
+        entry = observer_queue.get_entry(observer_queue.enqueue("work"))
+
+        for _ in range(_EVENT_QUEUE_SIZE + 2):
+            observers.publish(entry)
+
+        assert observers.events.qsize() == _EVENT_QUEUE_SIZE
+        assert caplog.messages == [
+            "Queue lifecycle observer delivery queue is full; dropping snapshots"
+        ]
+
+    def test_observer_receiver_clears_its_queue_registration_on_exit(
+        self, observer_queue
+    ):
+        observers = _observers_for(observer_queue)
+        observers.receiver = threading.current_thread()
+
+        observers._run_receiver(lambda callback: None)
+
+        assert observers.receiver is None
+
+    def test_entry_queues_are_async_queue_variants(self, queue):
+        assert isinstance(queue, AsyncQueue)
+
+    def test_lists_retained_entry_snapshots(self, queue):
+        queued_id = queue.enqueue("queued")
+        completed_id = queue.enqueue("completed")
+        queue.mark_running(completed_id)
+        queue.mark_succeeded(completed_id, "done")
+
+        entries = queue.list_entries()
+
+        assert {entry.id for entry in entries} == {queued_id, completed_id}
+        assert {entry.status for entry in entries} == {
+            QueueEntryStatus.QUEUED,
+            QueueEntryStatus.SUCCEEDED,
+        }
+
     def test_synchronous_entry_api_uses_the_asynchronous_implementation(self, queue):
         entry_id = queue.enqueue({"request_id": 42})
 

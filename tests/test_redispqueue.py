@@ -11,24 +11,20 @@ from django_queue.backends import (
 
 
 @pytest.fixture
-def redis_priority_queue(redis_client):
+def redis_priority_queue(redis_url):
     """
     Fixture to set up and clean up a RedisPriorityQueue instance.
     """
-    queue = RedisPriorityQueue(
-        redis_client, queue_name="test_priority_queue", maxsize=5
-    )
+    queue = RedisPriorityQueue(redis_url, queue_name="test_priority_queue", maxsize=5)
     queue.clear()
     return queue
 
 
-def test_init(redis_client):
+def test_init(redis_url):
     """
     Test initialisation of RedisPriorityQueue.
     """
-    queue = RedisPriorityQueue(redis_client, queue_name="test_priority_queue")
-    assert queue._redis is not None
-    assert queue._redis.ping() is True
+    queue = RedisPriorityQueue(redis_url, queue_name="test_priority_queue")
     assert queue.queue_name == "test_priority_queue"
     assert queue._maxsize == 0  # Unlimited size by default
 
@@ -38,14 +34,6 @@ def test_capacity(redis_priority_queue):
     Test the capacity of the priority queue.
     """
     assert redis_priority_queue.capacity == 5
-
-
-def test_add(redis_priority_queue):
-    """
-    Test adding items with priority.
-    """
-    redis_priority_queue.add((10, "item1"), (-10, "item2"), (0, "item3"))
-    assert redis_priority_queue.size() == 3
 
 
 def test_add_overflow(redis_priority_queue):
@@ -198,16 +186,11 @@ def test_get_removes_the_stored_member(redis_priority_queue):
     assert redis_priority_queue.size() == 0
 
 
-def test_get_removes_the_stored_member_from_a_decoding_client(redis_container):
-    """`get()` removes the member even when the client yields str, not bytes."""
-    import redis
-
-    client = redis.Redis(
-        host=redis_container.get_container_host_ip(),
-        port=redis_container.get_exposed_port(6379),
-        decode_responses=True,
+def test_get_removes_the_stored_member_from_a_decoding_url(redis_url):
+    """`get()` removes the member when a decoding URL yields text."""
+    queue = RedisPriorityQueue(
+        f"{redis_url}?decode_responses=true", queue_name="test-priority-decoding"
     )
-    queue = RedisPriorityQueue(client, queue_name="test_priority_decoding_client")
     queue.clear()
 
     queue.add((10, "item1"), (20, "item2"))

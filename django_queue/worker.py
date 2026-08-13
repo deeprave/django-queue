@@ -343,6 +343,7 @@ class AsyncQueueWorker:
         entry: QueueEntry,
         lease_seconds: float | None = None,
     ) -> None:
+        await queue.apublish_lifecycle_snapshot(entry)
         if lease_seconds is not None:
             running_entry = await queue.amark_claim_running(entry.id, self._worker_id)
             if running_entry is None:
@@ -353,6 +354,7 @@ class AsyncQueueWorker:
             entry = running_entry
         else:
             entry = await queue.amark_running(entry.id)
+        await queue.apublish_lifecycle_snapshot(entry)
         timeout_seconds = self.resolve_budget(queue, entry)
         active_timeout: _ActiveTimeout | None = None
         timeout_token = None
@@ -585,6 +587,7 @@ class AsyncQueueWorker:
         if not settled:
             logger.warning("Lost claim for queue entry %s before settlement", entry.id)
             return entry
+        await queue.apublish_lifecycle_snapshot(terminal_entry)
         self._record_terminal_outcome(terminal_entry)
         return terminal_entry
 
@@ -629,6 +632,7 @@ class AsyncQueueWorker:
             raise QueuePersistenceError(
                 "Unable to persist terminal queue outcome"
             ) from cause
+        await queue.apublish_lifecycle_snapshot(failure_entry)
         self._record_terminal_outcome(failure_entry)
         return failure_entry
 
@@ -650,6 +654,7 @@ class AsyncQueueWorker:
                 raise QueuePersistenceError(
                     "Unable to persist terminal queue outcome"
                 ) from exc
+        await queue.apublish_lifecycle_snapshot(terminal_entry)
         self._record_terminal_outcome(terminal_entry)
         return terminal_entry
 

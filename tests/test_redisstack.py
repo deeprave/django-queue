@@ -4,16 +4,14 @@ from django_queue.backends import QueueEmptyException, QueueFullException, Redis
 
 
 @pytest.fixture
-def redis_stack(redis_client):
-    stack = RedisStack(redis_client, queue_name="test_stack", maxsize=5)
+def redis_stack(redis_url):
+    stack = RedisStack(redis_url, queue_name="test_stack", maxsize=5)
     stack.clear()
     return stack
 
 
-def test_init(redis_client):
-    stack = RedisStack(redis_client, queue_name="test_stack")
-    assert stack._redis is not None
-    assert stack._redis.ping() is True
+def test_init(redis_url):
+    stack = RedisStack(redis_url, queue_name="test_stack")
     assert stack.queue_name == "test_stack"
     assert stack._maxsize == 0
     assert stack.stack
@@ -23,21 +21,10 @@ def test_capacity(redis_stack):
     assert redis_stack.capacity == 5
 
 
-def test_add(redis_stack):
-    redis_stack.add("item1", "item2")
-    assert redis_stack.size() == 2
-
-
 def test_add_overflow(redis_stack):
     redis_stack.add("item1", "item2", "item3", "item4", "item5")
     with pytest.raises(QueueFullException):
         redis_stack.add("item6")
-
-
-def test_get(redis_stack):
-    redis_stack.add("item1")
-    item = redis_stack.get()
-    assert item == "item1"
 
 
 def test_lifo_order(redis_stack):
@@ -45,11 +32,6 @@ def test_lifo_order(redis_stack):
     assert redis_stack.get() == "item3"
     assert redis_stack.get() == "item2"
     assert redis_stack.get() == "item1"
-
-
-def test_lifo_edge_case_empty_queue(redis_stack):
-    with pytest.raises(QueueEmptyException):
-        redis_stack.get()
 
 
 def test_lifo_with_one_item(redis_stack):

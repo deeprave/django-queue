@@ -2,12 +2,12 @@ import queue
 
 from django_queue.clock import DEFAULT_CLOCK
 
-from ..base import BaseQueue
+from ..base import AsyncQueue
 from ..exceptions import QueueEmptyException, QueueFullException
 from .memqueue import MemoryQueue, apoll_item
 
 
-class MemoryPriorityQueue(BaseQueue):
+class MemoryPriorityQueue(AsyncQueue):
     def __init__(self, _: str | None = None, options: dict | None = None, **kwargs):
         options = {} if options is None else options
         options |= kwargs
@@ -17,6 +17,7 @@ class MemoryPriorityQueue(BaseQueue):
         self._clock = options.pop("clock", DEFAULT_CLOCK)
         self._entries = {}
         self._pending_entries = queue.Queue()
+        self._initialise_lifecycle_observers()
 
     @property
     def capacity(self):
@@ -57,6 +58,8 @@ class MemoryPriorityQueue(BaseQueue):
 
     aenqueue = MemoryQueue.aenqueue
     aget_entry = MemoryQueue.aget_entry
+    alist_entries = MemoryQueue.alist_entries
+    apublish_lifecycle_snapshot = MemoryQueue.apublish_lifecycle_snapshot
     adequeue_entry = MemoryQueue.adequeue_entry
     ahas_pending_entries = MemoryQueue.ahas_pending_entries
     amark_running = MemoryQueue.amark_running

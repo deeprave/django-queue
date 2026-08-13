@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -186,6 +187,18 @@ class BaseQueue(ABC):
         """Return the retained entry record for *entry_id*."""
         raise NotImplementedError("aget_entry")
 
+    def list_entries(self) -> list[QueueEntry]:
+        """Return the queue's retained entry snapshots."""
+        return self._run_synchronously(self.alist_entries)
+
+    @abstractmethod
+    async def alist_entries(self) -> list[QueueEntry]:
+        """Return the queue's retained entry snapshots."""
+        raise NotImplementedError("alist_entries")
+
+    async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
+        """Best-effort publish one worker-observed lifecycle snapshot."""
+
     def dequeue_entry(self) -> QueueEntry:
         return self._run_synchronously(self.adequeue_entry)
 
@@ -302,3 +315,16 @@ class BaseQueue(ABC):
 
     def __bool__(self):
         return not self.is_empty()
+
+
+class AsyncQueue(BaseQueue):
+    """A queue whose worker persists task lifecycle outcomes."""
+
+    def _initialise_lifecycle_observers(self) -> None:
+        """Initialise the process-local observer state owned by this queue."""
+        self._lifecycle_observer_lock = threading.RLock()
+        self._lifecycle_observers = None
+
+
+class EventQueue(BaseQueue):
+    """A queue whose listeners consume transient events."""

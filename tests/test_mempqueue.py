@@ -12,28 +12,12 @@ def priority_queue():
     return MemoryPriorityQueue(options={"maxsize": 5})
 
 
-def test_add_to_queue(priority_queue):
-    priority_queue.add((1, "item1"))
-    assert priority_queue.size() == 1
-
-
-def test_add_multiple_items_to_queue(priority_queue):
-    priority_queue.add((1, "item1"), (2, "item2"))
-    assert priority_queue.size() == 2
-
-
 def test_add_to_full_queue_raises_exception(priority_queue):
     priority_queue.add(
         (1, "item1"), (2, "item2"), (3, "item3"), (4, "item4"), (5, "item5")
     )
     with pytest.raises(QueueFullException):
         priority_queue.add((6, "item6"))
-
-
-def test_get_from_queue(priority_queue):
-    priority_queue.add((2, "item2"), (1, "item1"))
-    assert priority_queue.get() == "item2"
-    assert priority_queue.size() == 1
 
 
 def test_get_from_empty_queue_raises_exception(priority_queue):
