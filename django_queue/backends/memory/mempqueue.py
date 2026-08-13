@@ -58,7 +58,7 @@ class MemoryPriorityQueue(AsyncQueue):
 
     aenqueue = MemoryQueue.aenqueue
     aget_entry = MemoryQueue.aget_entry
-    alist_entries = MemoryQueue.alist_entries
+    _alist_entries = MemoryQueue._alist_entries
     apublish_lifecycle_snapshot = MemoryQueue.apublish_lifecycle_snapshot
     adequeue_entry = MemoryQueue.adequeue_entry
     ahas_pending_entries = MemoryQueue.ahas_pending_entries

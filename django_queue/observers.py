@@ -282,7 +282,7 @@ def queue_observer(
     observers.register(registration)
     subscription = QueueSubscription(configured_queue, registration)
     try:
-        snapshots = configured_queue.list_entries()
+        snapshots = configured_queue._list_entries()
     except Exception:
         observers.unregister(registration)
         raise

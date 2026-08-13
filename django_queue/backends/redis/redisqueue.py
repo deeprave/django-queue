@@ -417,7 +417,7 @@ try:
                 raise QueueEmptyException
             return self.entry_class.from_dict(json.loads(raw_entry))
 
-        async def alist_entries(self) -> list[QueueEntry]:
+        async def _alist_entries(self) -> list[QueueEntry]:
             client = self._async_redis()
             entry_keys = []
             match = f"{self._queue_name}:entries:????????-????-????-????-????????????"

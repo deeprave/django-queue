@@ -96,7 +96,7 @@ class MemoryQueue(AsyncQueue):
         except KeyError as exc:
             raise QueueEmptyException from exc
 
-    async def alist_entries(self) -> list[QueueEntry]:
+    async def _alist_entries(self) -> list[QueueEntry]:
         return list(self._entries.values())
 
     async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:

@@ -215,13 +215,13 @@ class TestRedisQueueEntries:
         assert entry.payload == {"request_id": 42}
         assert redis_entry_queue.get() == "raw-value"
 
-    def test_lists_retained_entry_snapshots(self, redis_entry_queue):
+    def test_observer_bootstrap_lists_retained_entry_snapshots(self, redis_entry_queue):
         queued_id = redis_entry_queue.enqueue("queued")
         completed_id = redis_entry_queue.enqueue("completed")
         redis_entry_queue.mark_running(completed_id)
         redis_entry_queue.mark_succeeded(completed_id, "done")
 
-        entries = redis_entry_queue.list_entries()
+        entries = redis_entry_queue._list_entries()
 
         assert {entry.id for entry in entries} == {queued_id, completed_id}
         assert {entry.status for entry in entries} == {
