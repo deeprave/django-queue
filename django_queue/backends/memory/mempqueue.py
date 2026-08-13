@@ -17,6 +17,7 @@ class MemoryPriorityQueue(AsyncQueue):
         self._clock = options.pop("clock", DEFAULT_CLOCK)
         self._entries = {}
         self._pending_entries = queue.Queue()
+        self._initialise_lifecycle_observers()
 
     @property
     def capacity(self):

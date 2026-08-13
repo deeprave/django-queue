@@ -281,6 +281,7 @@ try:
             self._maxsize = options.get("maxsize", 0)
             self._clocks_by_loop = {}
             self._clock = _QueueClockFacade(self)
+            self._initialise_lifecycle_observers()
 
         def _async_redis(self):
             loop = asyncio.get_running_loop()

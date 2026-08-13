@@ -35,6 +35,7 @@ class MemoryQueue(AsyncQueue):
         self._entries: dict[UUID, QueueEntry] = {}
         pending_entry_queue = queue.LifoQueue if self._stack else queue.Queue
         self._pending_entries: queue.Queue[UUID] = pending_entry_queue()
+        self._initialise_lifecycle_observers()
 
     @property
     def stack(self):
@@ -99,7 +100,7 @@ class MemoryQueue(AsyncQueue):
         return list(self._entries.values())
 
     async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
-        publish_snapshot(entry)
+        publish_snapshot(self, entry)
 
     async def adequeue_entry(self) -> QueueEntry:
         try:

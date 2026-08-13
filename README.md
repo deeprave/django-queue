@@ -269,9 +269,10 @@ subscription.unsubscribe()  # stop future local delivery
 Memory queues notify only within the same Django process. Redis queues use
 best-effort Pub/Sub: a disconnected observer can miss transitions. Register a
 new observer when a new retained-state bootstrap is needed. Observer callback
-failures are logged and do not affect queue processing. The local observer
-delivery queue holds up to 128 snapshots; later snapshots are dropped when it
-is full, with one warning logged for the process lifetime.
+failures are logged and do not affect queue processing. Each observed queue's
+local delivery queue holds up to 128 snapshots; later snapshots are dropped
+when it is full, with one warning logged for that queue's process-local
+lifetime.
 
 When a worker receives an entry, it first publishes that entry's persisted
 `queued` snapshot, then publishes `running` and its terminal state after each

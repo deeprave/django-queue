@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -318,6 +319,11 @@ class BaseQueue(ABC):
 
 class AsyncQueue(BaseQueue):
     """A queue whose worker persists task lifecycle outcomes."""
+
+    def _initialise_lifecycle_observers(self) -> None:
+        """Initialise the process-local observer state owned by this queue."""
+        self._lifecycle_observer_lock = threading.RLock()
+        self._lifecycle_observers = None
 
 
 class EventQueue(BaseQueue):

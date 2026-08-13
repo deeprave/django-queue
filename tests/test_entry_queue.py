@@ -9,7 +9,7 @@ from django_queue.backends import MemoryPriorityQueue, MemoryQueue, MemoryStack
 from django_queue.backends.base import AsyncQueue, EventQueue
 from django_queue.backends.exceptions import QueueEmptyException
 from django_queue.entries import QueueEntryStatus
-from django_queue.observers import _EVENT_QUEUE_SIZE, _ObserverRuntime, _Registration
+from django_queue.observers import _EVENT_QUEUE_SIZE, _observers_for, _Registration
 from django_queue.signals import entry_enqueued
 from django_queue.worker import AsyncQueueWorker
 from tests.helpers import FIXED_CLOCK_TIME, CustomQueueEntry, FixedClock
@@ -163,18 +163,19 @@ class TestMemoryQueueEntries:
         with pytest.raises(TypeError, match="AsyncQueue"):
             queue_observer("events", lambda entry: None)
 
-    def test_observer_drops_snapshots_after_its_delivery_queue_is_full(
+    def test_observer_drops_snapshots_after_its_queue_delivery_queue_is_full(
         self, observer_queue, caplog
     ):
-        runtime = _ObserverRuntime()
+        observers = _observers_for(observer_queue)
         registration = _Registration(lambda entry: None, None, initialising=False)
-        runtime._registrations["requests"] = [registration]
+        with observers.lock:
+            observers.registrations.append(registration)
         entry = observer_queue.get_entry(observer_queue.enqueue("work"))
 
         for _ in range(_EVENT_QUEUE_SIZE + 2):
-            runtime.publish(entry)
+            observers.publish(entry)
 
-        assert runtime._events.qsize() == _EVENT_QUEUE_SIZE
+        assert observers.events.qsize() == _EVENT_QUEUE_SIZE
         assert caplog.messages == [
             "Queue lifecycle observer delivery queue is full; dropping snapshots"
         ]

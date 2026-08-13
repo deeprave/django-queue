@@ -126,8 +126,8 @@ must record it themselves rather than rely on a callback.
 - [A slow callback delays later local callbacks for the same entry] → Document
   sequential lifecycle delivery and isolate/log callback failures; applications
   can hand work off to their own executor or queue. The local runtime retains
-  at most 128 pending snapshots; excess snapshots are dropped, with one warning
-  logged for the process lifetime.
+  at most 128 pending snapshots per observed queue; excess snapshots are
+  dropped, with one warning logged for that queue's process-local lifetime.
 - [Redis endpoint discovery may encounter invalid or unavailable queue
   configuration] → Reuse configured queue construction and log notification
   runtime failures without changing a completed entry's outcome.
