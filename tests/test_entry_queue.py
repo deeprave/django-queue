@@ -67,7 +67,7 @@ async def _process_one(queue, queue_name="requests"):
 class ObserverEventQueue(EventQueue):
     capacity = 0
     aadd = aget = apoll = apeek = asize = aenqueue = aget_entry = _event_queue_noop
-    alist_entries = adequeue_entry = ahas_pending_entries = _event_queue_noop
+    adequeue_entry = ahas_pending_entries = _event_queue_noop
     amark_running = amark_succeeded = amark_failed = _event_queue_noop
     amark_cancelled = amark_timed_out = _event_queue_noop
 
@@ -193,13 +193,13 @@ class TestMemoryQueueEntries:
     def test_entry_queues_are_async_queue_variants(self, queue):
         assert isinstance(queue, AsyncQueue)
 
-    def test_lists_retained_entry_snapshots(self, queue):
+    def test_observer_bootstrap_lists_retained_entry_snapshots(self, queue):
         queued_id = queue.enqueue("queued")
         completed_id = queue.enqueue("completed")
         queue.mark_running(completed_id)
         queue.mark_succeeded(completed_id, "done")
 
-        entries = queue.list_entries()
+        entries = queue._list_entries()
 
         assert {entry.id for entry in entries} == {queued_id, completed_id}
         assert {entry.status for entry in entries} == {
