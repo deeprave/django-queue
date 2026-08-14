@@ -64,9 +64,7 @@ lock-protected row dictionary, and Django `StreamingHttpResponse`.
   Replace `state()` with `events()`, returning:
 
   ```python
-  response = StreamingHttpResponse(
-      projection.events(), content_type="text/event-stream"
-  )
+  response = StreamingHttpResponse(projection.events(), content_type="text/event-stream")
   response["Cache-Control"] = "no-cache"
   response["X-Accel-Buffering"] = "no"
   return response

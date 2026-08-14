@@ -49,6 +49,7 @@ payload = {
     ],
 }
 
+
 class DemoQueueWorker(AsyncQueueWorker):
     async def _next_entry(self, queue):
         entry = await queue.adequeue_entry()

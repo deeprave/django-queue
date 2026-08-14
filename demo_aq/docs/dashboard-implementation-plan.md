@@ -52,9 +52,7 @@ and `DashboardProjection.rows()` for the local `demo` observer.
       "message": entry.payload.get("message", ""),
       "metadata": entry.payload,
       "queued_at": entry.queued_at.to_timestamp(),
-      "finished_at": (
-          entry.finished_at.to_timestamp() if entry.finished_at else None
-      ),
+      "finished_at": (entry.finished_at.to_timestamp() if entry.finished_at else None),
       "timeout_seconds": entry.timeout_seconds,
   }
   ```
