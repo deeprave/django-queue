@@ -37,6 +37,14 @@ class QueueEntryMissingError(QueueException):
         super().__init__(f"Queue entry {entry_id} is missing")
 
 
+class QueueEntryNotFoundError(QueueException):
+    """A requested retained entry does not exist."""
+
+    def __init__(self, entry_id):
+        self.entry_id = entry_id
+        super().__init__(f"Queue entry {entry_id} was not found")
+
+
 class QueueEncodingException(QueueException):
     pass
 

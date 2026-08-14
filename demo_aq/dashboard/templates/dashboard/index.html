@@ -23,11 +23,7 @@
         color: var(--pico-primary);
       }
       .table-wrap { width: 100%; }
-      table { table-layout: fixed; width: 100%; }
-      th:nth-child(1), td:nth-child(1) { width: 14%; }
-      th:nth-child(2), td:nth-child(2) { width: 10%; }
-      th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { width: 16%; }
-      th:nth-child(6), td:nth-child(6) { width: 8%; }
+      table { width: 100%; }
       .entry-id {
         display: block;
         max-width: 11rem;
@@ -69,8 +65,8 @@
               <th>State</th>
               <th>Message</th>
               <th>Queued</th>
+              <th>Started</th>
               <th>Finished</th>
-              <th>Timeout</th>
             </tr>
           </thead>
           <tbody id="entries"></tbody>
@@ -86,10 +82,6 @@
           : new Date(value * 1000).toISOString().slice(0, 19) + "Z";
       }
 
-      function timeout(value) {
-        return value === null ? "—" : `${value}s`;
-      }
-
       function render(entry) {
         let row = entries.querySelector(`[data-entry-id="${entry.id}"]`);
         if (!row) {
@@ -100,6 +92,7 @@
           }
           row.cells[3].classList.add("timestamp");
           row.cells[4].classList.add("timestamp");
+          row.cells[5].classList.add("timestamp");
           row.cells[2].classList.add("message");
           row.cells[0].append(document.createElement("span"));
           row.cells[1].append(document.createElement("span"));
@@ -114,13 +107,20 @@
         state.textContent = entry.state;
         row.cells[2].textContent = entry.message;
         row.cells[3].textContent = timestamp(entry.queued_at);
-        row.cells[4].textContent = timestamp(entry.finished_at);
-        row.cells[5].textContent = timeout(entry.timeout_seconds);
+        row.cells[4].textContent = timestamp(entry.started_at);
+        row.cells[5].textContent = timestamp(entry.finished_at);
       }
 
       const stream = new EventSource("{% url 'events' %}");
       stream.onmessage = ({ data }) => {
-        JSON.parse(data).entries.forEach(render);
+        const snapshot = JSON.parse(data).entries;
+        const entryIds = new Set(snapshot.map((entry) => entry.id));
+        entries.querySelectorAll("tr").forEach((row) => {
+          if (!entryIds.has(row.dataset.entryId)) {
+            row.remove();
+          }
+        });
+        snapshot.forEach(render);
       };
       stream.onerror = (error) => console.error(error);
     </script>

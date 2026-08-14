@@ -13,11 +13,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from uuid import UUID
 
-from django_queue.backends.base import BaseQueue
+from django_queue.backends.base import AsyncQueue, BaseQueue
 from django_queue.backends.exceptions import (
     QueueClaimConflictError,
     QueueEmptyException,
     QueueEntryMissingError,
+    QueueEntryNotFoundError,
 )
 from django_queue.clock import (
     DEFAULT_CLOCK,
@@ -156,6 +157,9 @@ class AsyncQueueWorker:
         self._timed_out_count = 0
         self._running = False
         self._last_recovery_at: dict[BaseQueue, float] = {}
+        self._last_retention_cleanup_at: dict[AsyncQueue, float] = {}
+        self._last_first_seen_scan_at: dict[AsyncQueue, float] = {}
+        self._last_observed_entry_id: dict[AsyncQueue, UUID] = {}
         self._last_claim_conflict_at: dict[UUID, float] = {}
 
     @property
@@ -236,6 +240,8 @@ class AsyncQueueWorker:
             while True:
                 dispatched = False
                 for name, queue in self._queues.items():
+                    await self._publish_first_seen_entries(queue)
+                    await self._prune_expired_entries(queue)
                     try:
                         next_entry = await self._next_entry(queue)
                     except QueueEmptyException:
@@ -246,6 +252,9 @@ class AsyncQueueWorker:
                     except QueueEntryMissingError as exc:
                         await self._discard_missing_entry_claim(queue, exc.entry_id)
                         continue
+                    except QueueEntryNotFoundError as exc:
+                        self._log_missing_entry(exc.entry_id)
+                        continue
                     if next_entry is None:
                         continue
                     entry, lease_seconds = next_entry
@@ -254,9 +263,14 @@ class AsyncQueueWorker:
                     self._active_queue_name = name
                     self._dispatch_count += 1
                     self._log_state_change("dispatch_started")
-                    await self._dispatch(
-                        queue, self._handlers[name], entry, lease_seconds
-                    )
+                    try:
+                        await self._dispatch(
+                            queue, self._handlers[name], entry, lease_seconds
+                        )
+                    except QueueEntryNotFoundError as exc:
+                        self._log_missing_entry(exc.entry_id)
+                        if lease_seconds is not None:
+                            await self._discard_missing_entry_claim(queue, exc.entry_id)
                 if not dispatched:
                     await asyncio.sleep(self._idle_delay)
         finally:
@@ -265,6 +279,38 @@ class AsyncQueueWorker:
             self._active_entry_id = None
             self._active_queue_name = None
             self._log_state_change("stopped")
+
+    async def _publish_first_seen_entries(self, queue: BaseQueue) -> None:
+        """Publish snapshots beyond this worker's completed-scan UUIDv7 cursor."""
+        if not isinstance(queue, AsyncQueue):
+            return
+        now = asyncio.get_running_loop().time()
+        if now - self._last_first_seen_scan_at.get(queue, float("-inf")) < 1:
+            return
+        self._last_first_seen_scan_at[queue] = now
+        entries = await queue._alist_entries()
+        previous_entry_id = self._last_observed_entry_id.get(queue)
+        new_entries = [
+            entry
+            for entry in entries
+            if previous_entry_id is None or entry.id > previous_entry_id
+        ]
+        for entry in sorted(new_entries, key=lambda entry: entry.id):
+            await queue.apublish_lifecycle_snapshot(entry)
+        if entries:
+            largest_entry_id = max(entry.id for entry in entries)
+            if previous_entry_id is None or largest_entry_id > previous_entry_id:
+                self._last_observed_entry_id[queue] = largest_entry_id
+
+    async def _prune_expired_entries(self, queue: BaseQueue) -> None:
+        """Periodically remove expired AsyncQueue terminal records."""
+        if not isinstance(queue, AsyncQueue) or queue.retention_timeout is None:
+            return
+        now = asyncio.get_running_loop().time()
+        if now - self._last_retention_cleanup_at.get(queue, float("-inf")) < 1:
+            return
+        self._last_retention_cleanup_at[queue] = now
+        await queue._aprune_expired_entries()
 
     async def _next_entry(
         self, queue: BaseQueue
@@ -310,6 +356,11 @@ class AsyncQueueWorker:
                 logger.warning("Lost claim for missing queue entry %s", entry_id)
 
     @staticmethod
+    def _log_missing_entry(entry_id: UUID) -> None:
+        """Report an entry removed outside the queue lifecycle without stopping."""
+        logger.error("Queue entry %s was unexpectedly removed", entry_id)
+
+    @staticmethod
     def _renewal_delay(lease_seconds: float) -> float:
         if lease_seconds <= _SHORT_LEASE_SECONDS:
             return lease_seconds / 2
@@ -343,7 +394,8 @@ class AsyncQueueWorker:
         entry: QueueEntry,
         lease_seconds: float | None = None,
     ) -> None:
-        await queue.apublish_lifecycle_snapshot(entry)
+        if not self._entry_was_observed(queue, entry):
+            await queue.apublish_lifecycle_snapshot(entry)
         if lease_seconds is not None:
             running_entry = await queue.amark_claim_running(entry.id, self._worker_id)
             if running_entry is None:
@@ -438,6 +490,14 @@ class AsyncQueueWorker:
                 await self._stop_renewal_task(renewal_task)
             self._active_entry_id = None
             self._active_queue_name = None
+
+    def _entry_was_observed(self, queue: BaseQueue, entry: QueueEntry) -> bool:
+        """Return whether an AsyncQueue scan already published this entry."""
+        return (
+            isinstance(queue, AsyncQueue)
+            and (entry_id := self._last_observed_entry_id.get(queue)) is not None
+            and entry.id <= entry_id
+        )
 
     async def _stop_renewal_task(self, renewal_task: asyncio.Task[bool]) -> None:
         """Stop a claim heartbeat before the entry is settled."""
@@ -579,6 +639,10 @@ class AsyncQueueWorker:
                 finished_at=await queue.clock.anow(),
             )
             settled = await queue.asettle_claim(worker_id, terminal_entry)
+        except QueueEntryNotFoundError:
+            self._log_missing_entry(entry.id)
+            await self._discard_missing_entry_claim(queue, entry.id)
+            return entry
         except Exception as exc:
             logger.exception("Unable to settle claimed queue entry %s", entry.id)
             return await self._record_claim_persistence_failure(

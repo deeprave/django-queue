@@ -83,12 +83,20 @@ restored without further work. Django validates and imports entry types during q
 `runqueues` startup. A worker is constructed only when its queue first becomes
 active; an entry only when it is enqueued, restored, or updated.
 
+`RETENTION_TIMEOUT` controls how long terminal entry records remain available.
+It defaults to 600 seconds; set it to `None` to explicitly disable automatic
+retention cleanup. A running worker removes expired terminal records during its
+normal loop. `prune_entry(entry_id)` and `await aprune_entry(entry_id)` remove
+one terminal record immediately.
+
 Custom queue backends that support identified entry dispatch must implement
 `has_pending_entries()`, returning whether `dequeue_entry()` can immediately
-return an entry. To support local ASGI activation, they must also call
-`send_entry_enqueued()` after durably enqueueing an entry. Built-in backends
-expose `queue_name`, their stable entry namespace, which local ASGI enqueue
-observation uses to match entries to an
+return an entry. They must also implement `aprune_entry()` and
+`_aprune_expired_entries()`: pruning rejects non-terminal entries, removes the
+durable record, and publishes an observer-only `terminated` snapshot. To support
+local ASGI activation, they must also call `send_entry_enqueued()` after durably
+enqueueing an entry. Built-in backends expose `queue_name`, their stable entry
+namespace, which local ASGI enqueue observation uses to match entries to an
 alias.
 
 ## Usage
@@ -194,7 +202,8 @@ elapsed time is meaningless rather than merely small.
 
 The `a`-prefixed entry operations are the primary API in asynchronous code:
 `aenqueue`, `aget_entry`, `adequeue_entry`, `ahas_pending_entries`, and the
-`amark_*` lifecycle operations. Built-in queues also expose `aadd`, `aget`,
+`amark_*` lifecycle operations. AsyncQueue backends also expose `aprune_entry`
+for explicit retained-entry removal. Built-in queues also expose `aadd`, `aget`,
 `apoll`, `apeek`, `asize`, and `aclear` for raw queue values. Await these from
 an ASGI view, a handler, or another coroutine:
 
@@ -276,9 +285,20 @@ lifetime.
 
 When a worker receives an entry, it first publishes that entry's persisted
 `queued` snapshot, then publishes `running` and its terminal state after each
-state is stored. An entry awaiting a worker is still available in the retained
-snapshots delivered at subscription, but it produces no live
-observation until a worker receives it.
+state is stored. A running worker also scans retained entries once per second
+and publishes snapshots it has not previously seen, using the queue-owned
+UUIDv7 IDs as its cursor. This makes entries changed outside the worker's own
+dispatch path observable; when the entry is later dispatched, the cursor avoids
+republishing its queued snapshot. An entry awaiting a worker remains available
+in the retained snapshots delivered at subscription.
+
+Retention cleanup and explicit pruning remove a terminal record and publish one
+final immutable entry-shaped snapshot to its observers with
+`status == "terminated"`. This final snapshot is never persisted as a retained
+record, although `terminated` is the final lifecycle state after any completed
+state. Dashboards can use it to remove the entry from their projection. A later
+`get_entry()` or `aget_entry()` for the removed ID raises
+`QueueEntryNotFoundError`.
 
 The first Redis observer for a queue starts one daemon receiver for that
 process. It blocks in Pub/Sub while idle rather than polling, consumes no CPU
@@ -287,13 +307,19 @@ intentionally retained for the process lifetime so later subscriptions can
 reuse it. If it exits because Redis fails, it logs the failure and clears its
 registration; a later observer registration starts a fresh receiver.
 
-An entry transitions through `queued`, `running`, and one terminal status:
-`succeeded`, `failed`, or `timeout`. Failed entries expose only an exception
-type and safe message; the worker logs the traceback for diagnosis. A fourth
-terminal status, `cancelled`, exists on the backend contract but no worker path
-produces it: a handler that finishes during shutdown is recorded by what it
-returned, and one that overruns is recorded as `timeout`. It is reserved for a
-deliberate per-entry cancellation the queue does not yet offer.
+An entry normally transitions through `queued`, `running`, and one completed
+status: `succeeded`, `failed`, or `timeout`. Each completed status transitions
+to `terminated` when pruning removes its retained record. Failed entries expose
+only an exception type and safe message; the worker logs the traceback for
+diagnosis. A fourth completed status, `cancelled`, exists on the backend
+contract but no worker path produces it: a handler that finishes during
+shutdown is recorded by what it returned, and one that overruns is recorded as
+`timeout`. It is reserved for a deliberate per-entry cancellation the queue
+does not yet offer.
+
+`failed` may also be recorded directly from `queued` when dispatch cannot
+begin, for example after queue-side validation or transport failure. Such an
+entry has `finished_at` but no `dispatched_at`.
 
 ### Asynchronous worker
 
@@ -565,6 +591,8 @@ All queues conform to the following interface:
 - clear(): remove all items from the queue.
 - close(): closes and destroys the queue.
 - has_pending_entries(): returns whether `dequeue_entry()` can return an entry.
+- prune_entry(): removes one retained terminal entry; AsyncQueue only.
+- aprune_entry(): asynchronous equivalent of `prune_entry()`; AsyncQueue only.
 - enqueue(): custom entry-capable backends must call `send_entry_enqueued()`
   after durable enqueue when local ASGI activation is required.
 - the queue itself can be used in the context of a boolean: True if there are items in the queue else False.
@@ -575,5 +603,6 @@ All queues conform to the following interface:
   with the Django `QUEUES` configuration.
 - QueueFullException: operation (addition) attempted on a queue that has reached capacity
 - QueueEmptyException: operation (get, peek or timed out poll) accepted on an empty queue
+- QueueEntryNotFoundError: lookup or pruning requested a retained entry that no longer exists
 - QueueEncodingException: error occurred in encoding the item
 - QueueValueError: error occurred in decoding an item

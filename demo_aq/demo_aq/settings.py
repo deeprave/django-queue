@@ -41,6 +41,7 @@ QUEUES = {
         "BACKEND": "django_queue.backends.RedisQueueJson",
         "LOCATION": os.environ.get("DEMO_REDIS_URL", "redis://127.0.0.1:16379/0"),
         "TIMEOUT": 300,
+        "RETENTION_TIMEOUT": 30,
         "HANDLER": "dashboard.demo_worker.handle_demo_entry",
         "WORKER": "dashboard.demo_worker.DemoQueueWorker",
     }

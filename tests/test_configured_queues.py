@@ -358,3 +358,40 @@ class TestConfiguredQueueInitialization:
         django_queue.initialise_queues(handler)
 
         assert handler["default"].timeout_seconds == 30
+
+    def test_defaults_terminal_entry_retention_to_ten_minutes(self):
+        handler = django_queue.QueueHandler(
+            {"default": {"BACKEND": "django_queue.backends.MemoryQueue"}}
+        )
+
+        django_queue.initialise_queues(handler)
+
+        assert handler["default"].retention_timeout == 600
+
+    def test_allows_explicit_terminal_entry_retention_opt_out(self):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "RETENTION_TIMEOUT": None,
+                }
+            }
+        )
+
+        django_queue.initialise_queues(handler)
+
+        assert handler["default"].retention_timeout is None
+
+    @pytest.mark.parametrize("retention_timeout", [-1, "600", True, float("nan")])
+    def test_rejects_an_invalid_terminal_entry_retention(self, retention_timeout):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "RETENTION_TIMEOUT": retention_timeout,
+                }
+            }
+        )
+
+        with pytest.raises(InvalidQueueBackendError, match="RETENTION_TIMEOUT"):
+            django_queue.initialise_queues(handler)

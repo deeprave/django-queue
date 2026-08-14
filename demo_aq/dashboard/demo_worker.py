@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import random
 import time
 from collections.abc import Mapping
+
+from faker import Faker
 
 from django_queue.backends.base import BaseQueue
 from django_queue.entries import QueueEntry, QueueEntryStatus
@@ -13,6 +17,10 @@ from django_queue.worker import AsyncQueueWorker
 
 _QUEUED_DELAY_SECONDS = (10, 30)
 _RUNNING_DELAY_SECONDS = (30, 60)
+_FOLLOW_UP_DELAY_SECONDS = (5, 20)
+
+logger = logging.getLogger(__name__)
+_faker = Faker("en_US")
 
 
 class DemoQueueWorker(AsyncQueueWorker):
@@ -21,15 +29,36 @@ class DemoQueueWorker(AsyncQueueWorker):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._handler_tasks: set[asyncio.Task[None]] = set()
+        self._injection_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
+        self._injection_task = asyncio.create_task(
+            self._inject_follow_up_entries(self._queues["demo"])
+        )
         try:
             await super().run()
         finally:
+            if self._injection_task is not None:
+                self._injection_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._injection_task
             tasks = tuple(self._handler_tasks)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _inject_follow_up_entries(self, queue: BaseQueue) -> None:
+        """Inject normal demo work at independently randomized intervals."""
+        while True:
+            await asyncio.sleep(random.uniform(*_FOLLOW_UP_DELAY_SECONDS))
+            try:
+                await queue.aenqueue(
+                    build_demo_payload(
+                        generate_demo_message(), should_fail=random.randrange(8) == 0
+                    )
+                )
+            except Exception:
+                logger.exception("Unable to enqueue a follow-up demo entry")
 
     async def _next_entry(
         self, queue: BaseQueue
@@ -73,7 +102,13 @@ class DemoQueueWorker(AsyncQueueWorker):
         except Exception as exc:  # noqa: BLE001 - demo failures are intentional.
             await self._record_failure(queue, entry, exc)
         else:
-            await self._record_result(queue, entry, result)
+            if entry.payload["should_fail"]:
+                failed_entry = await queue.amark_failed(
+                    entry.id, RuntimeError("Intentional demo failure")
+                )
+                await queue.apublish_lifecycle_snapshot(failed_entry)
+            else:
+                await self._record_result(queue, entry, result)
 
 
 async def handle_demo_entry(entry: QueueEntry) -> dict[str, str]:
@@ -84,9 +119,12 @@ async def handle_demo_entry(entry: QueueEntry) -> dict[str, str]:
         else QueueEntryStatus.SUCCEEDED
     )
     await asyncio.sleep(max(0, _transition_at(entry, terminal_state) - time.time()))
-    if entry.payload["should_fail"]:
-        raise RuntimeError("Intentional demo failure")
     return {"message": entry.payload["message"], "status": "processed"}
+
+
+def generate_demo_message() -> str:
+    """Return one short, English message for a demo entry."""
+    return _faker.sentence(nb_words=random.randint(5, 12))
 
 
 def build_demo_payload(message: str, should_fail: bool) -> dict:
@@ -95,7 +133,7 @@ def build_demo_payload(message: str, should_fail: bool) -> dict:
     terminal_state = "failed" if should_fail else "succeeded"
     return {
         "message": message,
-        "source": "man -k .",
+        "source": "faker",
         "should_fail": should_fail,
         "transitions": [
             {"at": running_at, "state": "running"},

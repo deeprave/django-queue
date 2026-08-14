@@ -1,15 +1,25 @@
 import asyncio
 import threading
+from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 
 import django_queue
 from django_queue import queue_observer
 from django_queue.backends import MemoryPriorityQueue, MemoryQueue, MemoryStack
-from django_queue.backends.base import AsyncQueue, EventQueue
-from django_queue.backends.exceptions import QueueEmptyException
+from django_queue.backends.base import AsyncQueue, BaseQueue, EventQueue
+from django_queue.backends.exceptions import (
+    QueueEmptyException,
+    QueueEntryNotFoundError,
+)
 from django_queue.entries import QueueEntryStatus
-from django_queue.observers import _EVENT_QUEUE_SIZE, _observers_for, _Registration
+from django_queue.observers import (
+    _EVENT_QUEUE_SIZE,
+    _observers_for,
+    _order_snapshots,
+    _Registration,
+)
 from django_queue.signals import entry_enqueued
 from django_queue.worker import AsyncQueueWorker
 from tests.helpers import FIXED_CLOCK_TIME, CustomQueueEntry, FixedClock
@@ -149,6 +159,107 @@ class TestMemoryQueueEntries:
             QueueEntryStatus.SUCCEEDED,
         ]
 
+    def test_worker_publishes_a_first_seen_terminal_entry(self, observer_queue):
+        observed = threading.Event()
+        statuses = []
+
+        def callback(entry):
+            statuses.append(entry.status)
+            if entry.status is QueueEntryStatus.FAILED:
+                observed.set()
+
+        subscription = queue_observer("requests", callback)
+        entry_id = observer_queue.enqueue("work")
+        observer_queue.mark_failed(entry_id, ValueError("dispatch unavailable"))
+
+        async def exercise():
+            worker = AsyncQueueWorker(
+                {"requests": observer_queue},
+                {"requests": lambda entry: asyncio.sleep(0)},
+                idle_delay=0.001,
+            )
+            task = asyncio.create_task(worker.run())
+            assert await asyncio.to_thread(observed.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        try:
+            asyncio.run(exercise())
+        finally:
+            subscription.unsubscribe()
+
+        assert statuses == [QueueEntryStatus.FAILED]
+
+    def test_worker_publishes_every_entry_created_between_scans(self, queue):
+        observed_ids = []
+
+        async def exercise():
+            worker = AsyncQueueWorker(
+                {"requests": queue},
+                {"requests": lambda entry: asyncio.sleep(0)},
+            )
+
+            async def publish(entry):
+                observed_ids.append(entry.id)
+
+            queue.apublish_lifecycle_snapshot = publish
+            first_id = await queue.aenqueue("first")
+            await worker._publish_first_seen_entries(queue)
+            second_id = await queue.aenqueue("second")
+            third_id = await queue.aenqueue("third")
+            worker._last_first_seen_scan_at[queue] = float("-inf")
+            await worker._publish_first_seen_entries(queue)
+            return first_id, second_id, third_id
+
+        first_id, second_id, third_id = asyncio.run(exercise())
+
+        assert observed_ids == [first_id, second_id, third_id]
+
+    def test_worker_throttles_first_seen_scans_per_queue(self, queue):
+        async def exercise():
+            worker = AsyncQueueWorker(
+                {"requests": queue},
+                {"requests": lambda entry: asyncio.sleep(0)},
+            )
+            scan_count = 0
+            original_list_entries = queue._alist_entries
+
+            async def list_entries():
+                nonlocal scan_count
+                scan_count += 1
+                return await original_list_entries()
+
+            queue._alist_entries = list_entries
+            await worker._publish_first_seen_entries(queue)
+            await worker._publish_first_seen_entries(queue)
+            return scan_count
+
+        assert asyncio.run(exercise()) == 1
+
+    def test_worker_skips_a_pending_id_whose_entry_was_removed(self, queue):
+        async def exercise():
+            stale_id = await queue.aenqueue("stale")
+            del queue._entries[stale_id]
+            entry_id = await queue.aenqueue("work")
+
+            async def handle(entry):
+                return entry.payload
+
+            worker = AsyncQueueWorker(
+                {"requests": queue}, {"requests": handle}, idle_delay=0.001
+            )
+            task = asyncio.create_task(worker.run())
+            while (
+                await queue.aget_entry(entry_id)
+            ).status is not QueueEntryStatus.SUCCEEDED:
+                await asyncio.sleep(0.001)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(exercise())
+
     def test_observer_rejects_event_queue(self, monkeypatch):
         handler = django_queue.QueueHandler(
             {
@@ -206,6 +317,23 @@ class TestMemoryQueueEntries:
             QueueEntryStatus.QUEUED,
             QueueEntryStatus.SUCCEEDED,
         }
+
+    def test_observer_orders_a_terminated_snapshot_during_bootstrap(self, queue):
+        entry_id = queue.enqueue("completed")
+        queued = queue.get_entry(entry_id)
+        running = queue.mark_running(entry_id)
+        succeeded = queue.mark_succeeded(entry_id, "done")
+        terminated = replace(
+            succeeded,
+            status=QueueEntryStatus.TERMINATED,
+        )
+
+        assert _order_snapshots([terminated, succeeded, queued, running]) == [
+            queued,
+            running,
+            succeeded,
+            terminated,
+        ]
 
     def test_synchronous_entry_api_uses_the_asynchronous_implementation(self, queue):
         entry_id = queue.enqueue({"request_id": 42})
@@ -299,6 +427,157 @@ class TestMemoryQueueEntries:
 
         assert failed.status is QueueEntryStatus.FAILED
         assert failed.error == {"type": "ValueError", "message": "invalid request"}
+
+    def test_records_a_pre_dispatch_failure_without_a_dispatch_timestamp(self, queue):
+        entry_id = queue.enqueue("work")
+
+        failed = queue.mark_failed(entry_id, ValueError("transport unavailable"))
+
+        assert failed.status is QueueEntryStatus.FAILED
+        assert failed.dispatched_at is None
+        assert failed.finished_at == FIXED_CLOCK_TIME
+        assert not queue.has_pending_entries()
+
+    def test_get_entry_reports_a_missing_retained_entry(self, queue):
+        with pytest.raises(QueueEntryNotFoundError):
+            queue.get_entry(uuid4())
+
+    def test_prune_removes_a_terminal_entry_and_notifies_observers(
+        self, observer_queue
+    ):
+        terminated = threading.Event()
+        snapshots = []
+        subscription = queue_observer(
+            "requests",
+            lambda entry: (
+                snapshots.append(entry),
+                terminated.set()
+                if entry.status is QueueEntryStatus.TERMINATED
+                else None,
+            ),
+        )
+        try:
+            entry_id = observer_queue.enqueue("work")
+            observer_queue.dequeue_entry()
+            observer_queue.mark_running(entry_id)
+            observer_queue.mark_succeeded(entry_id, "done")
+
+            observer_queue.prune_entry(entry_id)
+
+            assert terminated.wait(1)
+            assert snapshots[-1].status is QueueEntryStatus.TERMINATED
+            with pytest.raises(QueueEntryNotFoundError):
+                observer_queue.get_entry(entry_id)
+        finally:
+            subscription.unsubscribe()
+
+    def test_prune_removes_the_durable_entry_before_publishing_termination(
+        self, queue, monkeypatch
+    ):
+        entry_id = queue.enqueue("work")
+        queue.mark_running(entry_id)
+        queue.mark_succeeded(entry_id, "done")
+        snapshots = []
+
+        async def publish(entry):
+            with pytest.raises(QueueEntryNotFoundError):
+                await queue.aget_entry(entry.id)
+            snapshots.append(entry)
+
+        monkeypatch.setattr(queue, "apublish_lifecycle_snapshot", publish)
+
+        queue.prune_entry(entry_id)
+
+        assert snapshots[-1].status is QueueEntryStatus.TERMINATED
+
+    def test_prune_refuses_a_non_terminal_entry(self, queue):
+        entry_id = queue.enqueue("work")
+
+        with pytest.raises(ValueError, match="terminal"):
+            queue.prune_entry(entry_id)
+
+        assert queue.get_entry(entry_id).status is QueueEntryStatus.QUEUED
+
+    def test_prune_reports_an_absent_entry(self, queue):
+        with pytest.raises(QueueEntryNotFoundError):
+            queue.prune_entry(uuid4())
+
+    def test_expired_terminal_entries_are_pruned(self):
+        clock = FixedClock()
+        queue = MemoryQueue(queue_name="requests", clock=clock)
+        queue.retention_timeout = 10
+        entry_id = queue.enqueue("work")
+        queue.mark_running(entry_id)
+        queue.mark_succeeded(entry_id, "done")
+        clock.timestamp = FIXED_CLOCK_TIME + 10
+
+        assert asyncio.run(queue._aprune_expired_entries()) == 1
+        with pytest.raises(QueueEntryNotFoundError):
+            queue.get_entry(entry_id)
+
+    def test_expired_pre_dispatch_failures_are_pruned(self):
+        clock = FixedClock()
+        queue = MemoryQueue(queue_name="requests", clock=clock)
+        queue.retention_timeout = 10
+        entry_id = queue.enqueue("work")
+        queue.mark_failed(entry_id, ValueError("transport unavailable"))
+        clock.timestamp = FIXED_CLOCK_TIME + 10
+
+        assert asyncio.run(queue._aprune_expired_entries()) == 1
+        with pytest.raises(QueueEntryNotFoundError):
+            queue.get_entry(entry_id)
+
+    def test_worker_prunes_expired_terminal_entries(self, observer_queue):
+        terminated = threading.Event()
+        subscription = queue_observer(
+            "requests",
+            lambda entry: (
+                terminated.set()
+                if entry.status is QueueEntryStatus.TERMINATED
+                else None
+            ),
+        )
+        try:
+            observer_queue.retention_timeout = 0
+            entry_id = observer_queue.enqueue("work")
+            observer_queue.mark_running(entry_id)
+            observer_queue.mark_succeeded(entry_id, "done")
+
+            async def handler(entry):
+                return entry.payload
+
+            async def exercise():
+                worker = AsyncQueueWorker(
+                    {"requests": observer_queue},
+                    {"requests": handler},
+                    idle_delay=0.001,
+                )
+                task = asyncio.create_task(worker.run())
+                assert await asyncio.to_thread(terminated.wait, 1)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            asyncio.run(exercise())
+            with pytest.raises(QueueEntryNotFoundError):
+                observer_queue.get_entry(entry_id)
+        finally:
+            subscription.unsubscribe()
+
+    def test_explicit_retention_opt_out_leaves_terminal_entries(self):
+        queue = MemoryQueue(queue_name="requests", clock=FixedClock())
+        queue.retention_timeout = None
+        entry_id = queue.enqueue("work")
+        queue.mark_running(entry_id)
+        queue.mark_succeeded(entry_id, "done")
+
+        assert asyncio.run(queue._aprune_expired_entries()) == 0
+        assert queue.get_entry(entry_id).status is QueueEntryStatus.SUCCEEDED
+
+    def test_only_async_queues_expose_entry_pruning(self):
+        assert hasattr(AsyncQueue, "prune_entry")
+        assert not hasattr(BaseQueue, "prune_entry")
+        assert not hasattr(EventQueue, "prune_entry")
 
     def test_rejects_invalid_lifecycle_transitions(self, queue):
         entry_id = queue.enqueue("work")

@@ -2,12 +2,15 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from dataclasses import replace
 from uuid import uuid4
 
 import pytest
 import redis
 
+import django_queue
+from django_queue import queue_observer
 from django_queue.backends import (
     RedisPriorityQueue,
     RedisQueue,
@@ -19,6 +22,7 @@ from django_queue.backends.exceptions import (
     QueueClaimConflictError,
     QueueEmptyException,
     QueueEntryMissingError,
+    QueueEntryNotFoundError,
 )
 from django_queue.backends.redis.redisqueue import RedisLifecycleObserverTransport
 from django_queue.clock import ClockTime, QueueClockError
@@ -33,6 +37,146 @@ def redis_entry_queue(redis_client):
 
 
 class TestRedisQueueEntries:
+    def test_get_entry_reports_a_missing_retained_entry(self, redis_entry_queue):
+        with pytest.raises(QueueEntryNotFoundError):
+            redis_entry_queue.get_entry(uuid4())
+
+    def test_prunes_a_terminal_entry(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+        redis_entry_queue.mark_running(entry_id)
+        redis_entry_queue.mark_succeeded(entry_id, "done")
+
+        redis_entry_queue.prune_entry(entry_id)
+
+        with pytest.raises(QueueEntryNotFoundError):
+            redis_entry_queue.get_entry(entry_id)
+
+    def test_prune_reports_an_absent_entry(self, redis_entry_queue):
+        with pytest.raises(QueueEntryNotFoundError):
+            redis_entry_queue.prune_entry(uuid4())
+
+    def test_prune_refuses_a_non_terminal_entry(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+
+        with pytest.raises(ValueError, match="terminal"):
+            redis_entry_queue.prune_entry(entry_id)
+
+        assert redis_entry_queue.get_entry(entry_id).status is QueueEntryStatus.QUEUED
+
+    def test_pruning_preserves_an_empty_array_payload_in_terminated_snapshot(
+        self, redis_entry_queue, monkeypatch
+    ):
+        observed = []
+        entry_id = redis_entry_queue.enqueue([])
+        redis_entry_queue.mark_running(entry_id)
+        redis_entry_queue.mark_succeeded(entry_id, "done")
+
+        async def publish(entry):
+            observed.append(entry)
+
+        monkeypatch.setattr(redis_entry_queue, "apublish_lifecycle_snapshot", publish)
+        redis_entry_queue.prune_entry(entry_id)
+
+        assert observed[-1].status is QueueEntryStatus.TERMINATED
+        assert observed[-1].payload == []
+
+    def test_scheduled_expiry_prunes_a_terminal_entry(self, redis_entry_queue):
+        async def exercise():
+            try:
+                redis_entry_queue.retention_timeout = 0
+                entry_id = await redis_entry_queue.aenqueue("work")
+                await redis_entry_queue.amark_running(entry_id)
+                await redis_entry_queue.amark_succeeded(entry_id, "done")
+
+                assert await redis_entry_queue._aprune_expired_entries() == 1
+                with pytest.raises(QueueEntryNotFoundError):
+                    await redis_entry_queue.aget_entry(entry_id)
+            finally:
+                await redis_entry_queue.aclose()
+
+        asyncio.run(exercise())
+
+    def test_pruning_publishes_a_terminated_snapshot_to_a_redis_observer(
+        self, redis_client, monkeypatch
+    ):
+        queue_name = f"entry-observer-{uuid4().hex}"
+        handler = django_queue.QueueHandler(
+            {
+                "requests": {
+                    "BACKEND": "django_queue.backends.RedisQueue",
+                    "LOCATION": redis_client,
+                    "queue_name": queue_name,
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", handler)
+        queue = handler["requests"]
+        terminated = threading.Event()
+        snapshots = []
+        subscription = queue_observer(
+            "requests",
+            lambda entry: (
+                snapshots.append(entry),
+                terminated.set()
+                if entry.status is QueueEntryStatus.TERMINATED
+                else None,
+            ),
+        )
+        try:
+            entry_id = queue.enqueue([])
+            queue.mark_running(entry_id)
+            queue.mark_succeeded(entry_id, "done")
+            time.sleep(0.05)
+            queue.prune_entry(entry_id)
+
+            assert terminated.wait(1)
+            assert snapshots[-1].status is QueueEntryStatus.TERMINATED
+            assert snapshots[-1].payload == []
+        finally:
+            subscription.unsubscribe()
+
+    def test_pre_dispatch_failure_removes_pending_work(self, redis_entry_queue):
+        entry_id = redis_entry_queue.enqueue("work")
+
+        failed = redis_entry_queue.mark_failed(entry_id, ValueError("unavailable"))
+
+        assert failed.dispatched_at is None
+        assert not redis_entry_queue.has_pending_entries()
+
+    def test_observer_transport_accepts_a_terminated_snapshot(
+        self, redis_entry_queue, monkeypatch
+    ):
+        entry = replace(
+            redis_entry_queue.entry_class.create(
+                queue=redis_entry_queue.queue_name, payload="work"
+            ),
+            status=QueueEntryStatus.TERMINATED,
+        )
+
+        class FakePubSub:
+            def subscribe(self, channel):
+                self.channel = channel
+
+            def listen(self):
+                yield {"type": "message", "data": json.dumps(entry.to_dict())}
+
+            def close(self):
+                pass
+
+        class FakeClient:
+            def pubsub(self, **kwargs):
+                return FakePubSub()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(redis_entry_queue, "_observer_redis_client", FakeClient)
+        received = []
+
+        RedisLifecycleObserverTransport(redis_entry_queue).receive(received.append)
+
+        assert received == [entry]
+
     def test_observer_transport_continues_to_a_valid_snapshot_after_invalid_data(
         self, redis_entry_queue, monkeypatch
     ):
