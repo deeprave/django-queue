@@ -5,6 +5,7 @@ description = "Minimal Django dashboard for the django-queue async queue observe
 requires-python = ">=3.14"
 dependencies = [
     "django-queue",
+    "faker>=40.36.0",
     "redis>=5.2.1",
 ]
 

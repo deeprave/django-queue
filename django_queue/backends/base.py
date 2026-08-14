@@ -311,6 +311,8 @@ class BaseQueue(ABC):
 class AsyncQueue(BaseQueue):
     """A queue whose worker persists task lifecycle outcomes."""
 
+    retention_timeout: float | None = 600
+
     def _list_entries(self) -> list[QueueEntry]:
         """Return retained task snapshots for lifecycle-observer bootstrap."""
         return self._run_synchronously(self._alist_entries)
@@ -319,6 +321,20 @@ class AsyncQueue(BaseQueue):
     async def _alist_entries(self) -> list[QueueEntry]:
         """Return retained task snapshots for lifecycle-observer bootstrap."""
         raise NotImplementedError("_alist_entries")
+
+    def prune_entry(self, entry_id: UUID) -> None:
+        """Remove one retained terminal entry and publish its final snapshot."""
+        return self._run_synchronously(self.aprune_entry, entry_id)
+
+    @abstractmethod
+    async def aprune_entry(self, entry_id: UUID) -> None:
+        """Remove one retained terminal entry and publish its final snapshot."""
+        raise NotImplementedError("aprune_entry")
+
+    @abstractmethod
+    async def _aprune_expired_entries(self) -> int:
+        """Remove terminal entries whose configured retention has elapsed."""
+        raise NotImplementedError("_aprune_expired_entries")
 
     def _initialise_lifecycle_observers(self) -> None:
         """Initialise the process-local observer state owned by this queue."""

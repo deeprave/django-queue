@@ -14,7 +14,10 @@ class TestQueueEntry:
     @pytest.mark.parametrize(
         ("status", "next_states"),
         [
-            (QueueEntryStatus.QUEUED, frozenset({QueueEntryStatus.RUNNING})),
+            (
+                QueueEntryStatus.QUEUED,
+                frozenset({QueueEntryStatus.RUNNING, QueueEntryStatus.FAILED}),
+            ),
             (
                 QueueEntryStatus.RUNNING,
                 frozenset(
@@ -27,14 +30,23 @@ class TestQueueEntry:
                     }
                 ),
             ),
-            (QueueEntryStatus.SUCCEEDED, frozenset()),
-            (QueueEntryStatus.FAILED, frozenset()),
-            (QueueEntryStatus.CANCELLED, frozenset()),
-            (QueueEntryStatus.TIMEOUT, frozenset()),
+            (QueueEntryStatus.SUCCEEDED, frozenset({QueueEntryStatus.TERMINATED})),
+            (QueueEntryStatus.FAILED, frozenset({QueueEntryStatus.TERMINATED})),
+            (QueueEntryStatus.CANCELLED, frozenset({QueueEntryStatus.TERMINATED})),
+            (QueueEntryStatus.TIMEOUT, frozenset({QueueEntryStatus.TERMINATED})),
+            (QueueEntryStatus.TERMINATED, frozenset()),
         ],
     )
     def test_lists_valid_next_states(self, status, next_states):
         assert status.next_state() == next_states
+
+    def test_round_trips_a_terminated_snapshot(self):
+        entry = replace(
+            QueueEntry.create(queue="requests", payload="work"),
+            status=QueueEntryStatus.TERMINATED,
+        )
+
+        assert QueueEntry.from_dict(entry.to_dict()) == entry
 
     def test_serialises_a_queued_entry_as_a_complete_json_record(self):
         entry = QueueEntry.create(queue="requests", payload={"request_id": 42})

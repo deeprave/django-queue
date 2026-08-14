@@ -9,7 +9,11 @@ from django_queue.observers import publish_snapshot
 from django_queue.signals import send_entry_enqueued
 
 from ..base import AsyncQueue
-from ..exceptions import QueueEmptyException, QueueFullException
+from ..exceptions import (
+    QueueEmptyException,
+    QueueEntryNotFoundError,
+    QueueFullException,
+)
 
 
 async def apoll_item(item_queue: queue.Queue):
@@ -94,10 +98,35 @@ class MemoryQueue(AsyncQueue):
         try:
             return self._entries[entry_id]
         except KeyError as exc:
-            raise QueueEmptyException from exc
+            raise QueueEntryNotFoundError(entry_id) from exc
 
     async def _alist_entries(self) -> list[QueueEntry]:
         return list(self._entries.values())
+
+    async def aprune_entry(self, entry_id: UUID) -> None:
+        entry = await self.aget_entry(entry_id)
+        if QueueEntryStatus.TERMINATED not in entry.status.next_state():
+            raise ValueError("Only terminal queue entries can be pruned")
+        await self.apublish_lifecycle_snapshot(
+            replace(entry, status=QueueEntryStatus.TERMINATED)
+        )
+        del self._entries[entry_id]
+        self._remove_pending_entry(entry_id)
+
+    async def _aprune_expired_entries(self) -> int:
+        if self.retention_timeout is None:
+            return 0
+        now = await self.clock.anow()
+        expired_entry_ids = [
+            entry.id
+            for entry in self._entries.values()
+            if QueueEntryStatus.TERMINATED in entry.status.next_state()
+            and entry.finished_at is not None
+            and now - entry.finished_at >= self.retention_timeout
+        ]
+        for entry_id in expired_entry_ids:
+            await self.aprune_entry(entry_id)
+        return len(expired_entry_ids)
 
     async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
         publish_snapshot(self, entry)
@@ -155,6 +184,10 @@ class MemoryQueue(AsyncQueue):
     ) -> QueueEntry:
         if not isinstance(status, QueueEntryStatus):
             raise TypeError("Queue entry status must be a QueueEntryStatus")
+        if status is QueueEntryStatus.TERMINATED:
+            raise ValueError(
+                "Terminated queue entry snapshots are only published by pruning"
+            )
         previous_entry = await self.aget_entry(entry_id)
         if status not in previous_entry.status.next_state():
             raise ValueError(
@@ -162,7 +195,20 @@ class MemoryQueue(AsyncQueue):
             )
         entry = replace(previous_entry, status=status, **changes)
         self._entries[entry_id] = entry
+        if (
+            previous_entry.status is QueueEntryStatus.QUEUED
+            and status is QueueEntryStatus.FAILED
+        ):
+            self._remove_pending_entry(entry_id)
         return entry
+
+    def _remove_pending_entry(self, entry_id: UUID) -> None:
+        """Discard one pending ID when its durable record leaves the queue."""
+        with self._pending_entries.mutex:
+            try:
+                self._pending_entries.queue.remove(entry_id)
+            except ValueError:
+                pass
 
 
 class MemoryStack(MemoryQueue):

@@ -59,6 +59,8 @@ class MemoryPriorityQueue(AsyncQueue):
     aenqueue = MemoryQueue.aenqueue
     aget_entry = MemoryQueue.aget_entry
     _alist_entries = MemoryQueue._alist_entries
+    aprune_entry = MemoryQueue.aprune_entry
+    _aprune_expired_entries = MemoryQueue._aprune_expired_entries
     apublish_lifecycle_snapshot = MemoryQueue.apublish_lifecycle_snapshot
     adequeue_entry = MemoryQueue.adequeue_entry
     ahas_pending_entries = MemoryQueue.ahas_pending_entries
@@ -68,3 +70,4 @@ class MemoryPriorityQueue(AsyncQueue):
     amark_cancelled = MemoryQueue.amark_cancelled
     amark_timed_out = MemoryQueue.amark_timed_out
     _areplace_entry = MemoryQueue._areplace_entry
+    _remove_pending_entry = MemoryQueue._remove_pending_entry

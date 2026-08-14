@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from collections.abc import Mapping
 
 from django.conf import settings as django_settings
@@ -7,6 +8,7 @@ from django.utils.connection import BaseConnectionHandler, ConnectionProxy
 from django.utils.module_loading import import_string
 
 from .backends import InvalidQueueBackendError
+from .backends.base import AsyncQueue
 from .clock import ClockTime
 from .entries import QueueEntry, QueueEntryStatus, validate_budget
 from .observers import QueueSubscription, queue_observer
@@ -70,6 +72,10 @@ class QueueHandler(BaseConnectionHandler):
             )
             if "TIMEOUT" in configured_options:
                 _resolve_timeout(alias, configured_options["TIMEOUT"])
+            if "RETENTION_TIMEOUT" in configured_options:
+                _resolve_retention_timeout(
+                    alias, configured_options["RETENTION_TIMEOUT"]
+                )
             configured_queues[alias] = configured_options
         return configured_queues
 
@@ -84,6 +90,9 @@ class QueueHandler(BaseConnectionHandler):
             _resolve_timeout(alias, params.pop("TIMEOUT"))
             if "TIMEOUT" in params
             else None
+        )
+        retention_timeout = _resolve_retention_timeout(
+            alias, params.pop("RETENTION_TIMEOUT", 600)
         )
         entry_class = _resolve_extension_class(
             alias, "ENTRY_CLASS", params.pop("ENTRY_CLASS", None), QueueEntry
@@ -102,6 +111,8 @@ class QueueHandler(BaseConnectionHandler):
             ) from exc
         queue.entry_class = entry_class
         queue.timeout_seconds = timeout_seconds
+        if isinstance(queue, AsyncQueue):
+            queue.retention_timeout = retention_timeout
         if worker_class is not None:
             queue.worker_class = worker_class
         queue_created.send(self, name=params.get("queue_name", alias), instance=queue)
@@ -154,6 +165,25 @@ def _resolve_timeout(alias: str, value: object) -> float:
     except (TypeError, ValueError) as exc:
         raise InvalidQueueBackendError(
             f"Queue alias '{alias}' TIMEOUT is invalid: {exc}"
+        ) from exc
+
+
+def _resolve_retention_timeout(alias: str, value: object) -> float | None:
+    """Validate terminal-entry retention, allowing explicit opt-out."""
+    if value is None:
+        return None
+    try:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("must be a non-negative number of seconds or None")
+        return float(value)
+    except ValueError as exc:
+        raise InvalidQueueBackendError(
+            f"Queue alias '{alias}' RETENTION_TIMEOUT is invalid: {exc}"
         ) from exc
 
 

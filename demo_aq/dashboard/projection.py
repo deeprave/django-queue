@@ -8,7 +8,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from django_queue import QueueSubscription, queue_observer
-from django_queue.entries import QueueEntry
+from django_queue.entries import QueueEntry, QueueEntryStatus
 
 
 class DashboardProjection:
@@ -40,18 +40,28 @@ class DashboardProjection:
         self.start()
 
     def update(self, entry: QueueEntry) -> None:
-        """Replace one retained row with its latest observer snapshot."""
+        """Replace one retained row, or remove it after observer cleanup."""
+        entry_id = str(entry.id)
+        with self._changed:
+            if entry.status is QueueEntryStatus.TERMINATED:
+                self._rows.pop(entry_id, None)
+                self._version += 1
+                self._changed.notify_all()
+                return
+
         payload = entry.payload if isinstance(entry.payload, Mapping) else {}
         row = {
-            "id": str(entry.id),
+            "id": entry_id,
             "state": entry.status.value,
             "message": payload.get("message", ""),
             "metadata": entry.payload,
             "queued_at": entry.queued_at.to_timestamp(),
+            "started_at": (
+                entry.dispatched_at.to_timestamp() if entry.dispatched_at else None
+            ),
             "finished_at": (
                 entry.finished_at.to_timestamp() if entry.finished_at else None
             ),
-            "timeout_seconds": entry.timeout_seconds,
         }
         with self._changed:
             self._rows[row["id"]] = row

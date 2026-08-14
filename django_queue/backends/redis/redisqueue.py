@@ -17,6 +17,7 @@ try:
         QueueEmptyException,
         QueueEncodingException,
         QueueEntryMissingError,
+        QueueEntryNotFoundError,
         QueueFullException,
         QueueValueError,
     )
@@ -178,6 +179,26 @@ try:
         return redis.call("DEL", KEYS[1])
     """
 
+    _PRUNE_ENTRY_SCRIPT = b"""
+        local raw_entry = redis.call("GET", KEYS[1])
+        if not raw_entry then
+            return 0
+        end
+        local decoded, entry = pcall(cjson.decode, raw_entry)
+        if not decoded or type(entry) ~= "table" then
+            return 0
+        end
+        if entry.status ~= "succeeded" and entry.status ~= "failed"
+            and entry.status ~= "cancelled" and entry.status ~= "timeout" then
+            return -1
+        end
+        redis.call("LREM", KEYS[2], 0, ARGV[1])
+        if redis.call("DEL", KEYS[1]) == 0 then
+            return 0
+        end
+        return raw_entry
+    """
+
     @dataclass(frozen=True, slots=True)
     class _AsyncScripts:
         """Registered Lua scripts owned by one asynchronous Redis client."""
@@ -188,6 +209,7 @@ try:
         mark_claim_running: object
         recover_expired_claims: object
         settle_claim: object
+        prune_entry: object
 
     def _encode(item: str, encoding: str) -> bytes:
         try:
@@ -302,6 +324,7 @@ try:
                     client, _RECOVER_EXPIRED_CLAIMS_SCRIPT
                 ),
                 settle_claim=self._register_script(client, _SETTLE_CLAIM_SCRIPT),
+                prune_entry=self._register_script(client, _PRUNE_ENTRY_SCRIPT),
             )
             return client
 
@@ -414,7 +437,7 @@ try:
         async def aget_entry(self, entry_id: uuid.UUID) -> QueueEntry:
             raw_entry = await self._async_redis().get(self._entry_key(entry_id))
             if raw_entry is None:
-                raise QueueEmptyException
+                raise QueueEntryNotFoundError(entry_id)
             return self.entry_class.from_dict(json.loads(raw_entry))
 
         async def _alist_entries(self) -> list[QueueEntry]:
@@ -430,6 +453,50 @@ try:
                 for raw_entry in await client.mget(entry_keys)
                 if raw_entry is not None
             ]
+
+        async def aprune_entry(self, entry_id: uuid.UUID) -> None:
+            entry = await self.aget_entry(entry_id)
+            if QueueEntryStatus.TERMINATED not in entry.status.next_state():
+                raise ValueError("Only terminal queue entries can be pruned")
+            self._async_redis()
+            outcome = await self._async_scripts_by_loop[
+                asyncio.get_running_loop()
+            ].prune_entry(
+                keys=(
+                    self._entry_key(entry_id),
+                    self._entry_pending_name,
+                ),
+                args=(_encode(str(entry_id), "ascii"),),
+            )
+            if outcome == 0:
+                raise QueueEntryNotFoundError(entry_id)
+            if outcome == -1:
+                raise ValueError("Only terminal queue entries can be pruned")
+            terminated_entry = replace(
+                self.entry_class.from_dict(json.loads(outcome)),
+                status=QueueEntryStatus.TERMINATED,
+            )
+            await self.apublish_lifecycle_snapshot(terminated_entry)
+
+        async def _aprune_expired_entries(self) -> int:
+            if self.retention_timeout is None:
+                return 0
+            now = await self.clock.anow()
+            expired_entry_ids = [
+                entry.id
+                for entry in await self._alist_entries()
+                if QueueEntryStatus.TERMINATED in entry.status.next_state()
+                and entry.finished_at is not None
+                and now - entry.finished_at >= self.retention_timeout
+            ]
+            pruned = 0
+            for entry_id in expired_entry_ids:
+                try:
+                    await self.aprune_entry(entry_id)
+                except QueueEntryNotFoundError:
+                    continue
+                pruned += 1
+            return pruned
 
         async def adequeue_entry(self) -> QueueEntry:
             raw_entry_id = await (
@@ -481,7 +548,7 @@ try:
                 raise QueueClaimConflictError(entry_id)
             try:
                 return await self.aget_entry(entry_id)
-            except QueueEmptyException as exc:
+            except QueueEntryNotFoundError as exc:
                 raise QueueEntryMissingError(entry_id) from exc
 
         async def aacknowledge_claim(
@@ -661,6 +728,8 @@ try:
             ) + _encode(str(entry_id), "ascii")
 
         async def _astore_entry(self, entry: QueueEntry) -> None:
+            if entry.status is QueueEntryStatus.TERMINATED:
+                raise TypeError("Terminated queue entry snapshots cannot be stored")
             await self._async_redis().set(
                 self._entry_key(entry.id), _encode(json.dumps(entry.to_dict()), "ascii")
             )
@@ -670,6 +739,10 @@ try:
         ) -> QueueEntry:
             if not isinstance(status, QueueEntryStatus):
                 raise TypeError("Queue entry status must be a QueueEntryStatus")
+            if status is QueueEntryStatus.TERMINATED:
+                raise ValueError(
+                    "Terminated queue entry snapshots are only published by pruning"
+                )
             previous_entry = await self.aget_entry(entry_id)
             if status not in previous_entry.status.next_state():
                 raise ValueError(
@@ -677,6 +750,13 @@ try:
                 )
             entry = replace(previous_entry, status=status, **changes)
             await self._astore_entry(entry)
+            if (
+                previous_entry.status is QueueEntryStatus.QUEUED
+                and status is QueueEntryStatus.FAILED
+            ):
+                await self._async_redis().lrem(
+                    self._entry_pending_name, 0, _encode(str(entry_id), "ascii")
+                )
             return entry
 
         async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:

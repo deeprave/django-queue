@@ -236,12 +236,13 @@ def _order_snapshots(snapshots: list[QueueEntry]) -> list[QueueEntry]:
         "failed": 2,
         "cancelled": 2,
         "timeout": 2,
+        "terminated": 3,
     }
     return sorted(
         snapshots,
         key=lambda entry: (
             entry.id,
-            order[entry.status.value],
+            order[entry.status],
             _state_timestamp(entry),
         ),
     )
@@ -255,7 +256,10 @@ def _queue_for_name(queue_name: str) -> AsyncQueue:
 
 
 def publish_snapshot(queue: AsyncQueue, entry: QueueEntry) -> None:
-    """Submit a persisted task-entry snapshot to one queue's local observers."""
+    """Submit a lifecycle snapshot to one queue's local observers.
+
+    A final ``terminated`` snapshot is observer-only and is never retained.
+    """
     _observers_for(queue).publish(entry)
 
 

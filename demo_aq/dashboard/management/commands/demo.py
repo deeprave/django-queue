@@ -1,15 +1,14 @@
-"""Publish a random batch of scheduled manual-page entries."""
+"""Publish a random batch of generated demo entries."""
 
 from __future__ import annotations
 
 import asyncio
 import random
-import subprocess
 from collections.abc import Sequence
 
 from django.core.management.base import BaseCommand, CommandError
 
-from dashboard.demo_worker import build_demo_payload
+from dashboard.demo_worker import build_demo_payload, generate_demo_message
 from django_queue import queues
 
 
@@ -21,13 +20,13 @@ class Command(BaseCommand):
             "--min",
             type=int,
             default=6,
-            help="Minimum number of manual-page entries to publish (default: 6).",
+            help="Minimum number of generated entries to publish (default: 6).",
         )
         parser.add_argument(
             "--max",
             type=int,
             default=16,
-            help="Maximum number of manual-page entries to publish (default: 16).",
+            help="Maximum number of generated entries to publish (default: 16).",
         )
 
     def handle(self, *args, **options) -> None:
@@ -44,11 +43,9 @@ class Command(BaseCommand):
     async def _run(self, messages: Sequence[str]) -> None:
         queue = queues["demo"]
         await _clear_demo_queue(queue)
-        failure_count = _failure_count(len(messages))
-        failing_indices = set(random.sample(range(len(messages)), failure_count))
         payloads = [
-            build_demo_payload(message, index in failing_indices)
-            for index, message in enumerate(messages)
+            build_demo_payload(message, should_fail=random.randrange(8) == 0)
+            for message in messages
         ]
 
         await asyncio.gather(*(queue.aenqueue(payload) for payload in payloads))
@@ -56,30 +53,8 @@ class Command(BaseCommand):
 
 
 def _random_messages(min_entries: int, max_entries: int) -> list[str]:
-    """Return a random-sized batch selected from the manual-page keyword index."""
-    try:
-        result = subprocess.run(
-            ["man", "-k", "."],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as exc:
-        raise CommandError("'man' is required to generate demo entries") from exc
-    except subprocess.CalledProcessError as exc:
-        raise CommandError("'man -k .' could not generate demo entries") from exc
-
-    messages = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not messages:
-        raise CommandError("'man -k .' did not return any demo entries")
-
     count = random.randint(min_entries, max_entries)
-    return random.choices(messages, k=count)
-
-
-def _failure_count(entry_count: int) -> int:
-    """Return one failure for small batches and two for larger demo batches."""
-    return 1 if entry_count < 10 else 2
+    return [generate_demo_message() for _ in range(count)]
 
 
 async def _clear_demo_queue(queue) -> None:

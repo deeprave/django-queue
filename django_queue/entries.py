@@ -22,12 +22,13 @@ class QueueEntryStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
+    TERMINATED = "terminated"
 
     def next_state(self) -> frozenset[QueueEntryStatus]:
         """Return the lifecycle states this status may transition to."""
         match self:
             case QueueEntryStatus.QUEUED:
-                return frozenset({QueueEntryStatus.RUNNING})
+                return frozenset({QueueEntryStatus.RUNNING, QueueEntryStatus.FAILED})
             case QueueEntryStatus.RUNNING:
                 return frozenset(
                     {
@@ -44,6 +45,8 @@ class QueueEntryStatus(StrEnum):
                 | QueueEntryStatus.CANCELLED
                 | QueueEntryStatus.TIMEOUT
             ):
+                return frozenset({QueueEntryStatus.TERMINATED})
+            case QueueEntryStatus.TERMINATED:
                 return frozenset()
 
 
