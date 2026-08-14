@@ -61,15 +61,28 @@ entry recorded as `timeout`.
 - **THEN** the worker cancels that handler, records its entry as `timeout`,
   reports `running` as `False`, and does not dispatch another entry
 
-### Requirement: Provide explicit best-effort delivery semantics
-The worker SHALL remove a pending entry before invoking its handler and SHALL
-document that a process failure after removal can lose that entry. It MUST NOT
-claim at-least-once delivery in this change.
+### Requirement: Provide delivery semantics by backend capability
+The worker SHALL remove a pending entry before invoking its handler. A backend
+without claim-lease support SHALL provide best-effort delivery and document
+that a process failure after removal can lose that entry.
 
-#### Scenario: Entry is removed before dispatch
-- **WHEN** a worker obtains an entry for dispatch
+Redis queues with claim-lease support SHALL provide at-least-once delivery: a
+worker claims an entry before dispatch, expired unacknowledged claims become
+pending again, and a recovered entry can execute more than once. The system
+MUST document that handlers which make external changes need idempotent
+effects.
+
+#### Scenario: Dispatch on a best-effort backend
+- **WHEN** a worker obtains an entry from a backend without claim-lease support
 - **THEN** the entry is no longer available as a pending item before its handler
   starts
+- **AND** a process failure after removal can lose that entry
+
+#### Scenario: Dispatch on a Redis reliable-delivery backend
+- **WHEN** a worker serves a Redis queue with claim-lease support
+- **THEN** it claims an entry before dispatching it
+- **AND** recovery can return an expired unacknowledged claim to pending work
+- **AND** the entry may execute more than once
 
 ### Requirement: Continue after terminal outcome persistence failures
 The worker SHALL log a failure to persist a terminal outcome and continue
@@ -90,6 +103,13 @@ another entry.
   outcome can be recorded
 - **THEN** the worker raises `QueuePersistenceError` and does not dispatch
   another entry
+
+#### Scenario: Hand off a lost claim
+- **WHEN** a reliable-delivery worker loses ownership before it can settle an
+  entry's outcome
+- **THEN** it stops handling that entry without recording a terminal outcome
+- **AND** it may continue dispatching later entries while recovery or the new
+  owner handles the retry
 
 ### Requirement: Activate configured worker types per queue
 The `runqueues` command SHALL ask each configured queue to resolve its `WORKER`
@@ -130,3 +150,22 @@ different process.
   lifespan
 - **THEN** the wrapper starts that alias's resolved worker and does not create a
   second worker for later local enqueues
+
+### Requirement: Publish lifecycle observations
+The asynchronous worker SHALL publish a best-effort lifecycle observation after
+it receives an already persisted queued entry and after it confirms running or
+terminal states have been recorded. It MUST NOT publish an observation before
+the relevant state is stored, and it MUST NOT change queue delivery or
+terminal-persistence behaviour because publication fails.
+
+#### Scenario: Publish queued, then recorded transitions
+- **WHEN** a worker receives a persisted queued entry and successfully records
+  it as running and then terminal
+- **THEN** it publishes queued, running, and terminal lifecycle observations in
+  that order
+
+#### Scenario: Publication failure after terminal persistence
+- **WHEN** a worker cannot publish a completion observation after recording an
+  entry's terminal outcome
+- **THEN** it logs the publication failure and continues according to its
+  existing worker failure policy
