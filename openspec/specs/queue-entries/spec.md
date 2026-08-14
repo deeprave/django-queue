@@ -108,15 +108,18 @@ duration, not an instant, and SHALL remain a plain count of seconds.
 
 ### Requirement: Record entry lifecycle outcomes
 The system SHALL represent lifecycle status with a string enum and SHALL
-transition an entry only from `queued` to `running`, then from `running` to
-exactly one terminal status of `succeeded`, `failed`, `cancelled`, or `timeout`.
-Terminal statuses SHALL have no valid successor. The system MUST set
-`dispatched_at` when it marks an entry running and MUST set `finished_at` when
-it records a terminal outcome. The system SHALL reject any status value outside
-this set when restoring an entry from its durable representation.
+transition an entry only from `queued` to `running` or `failed`. A `running`
+entry MAY transition back to `queued`, or transition to exactly one completed
+status of `succeeded`, `failed`, `cancelled`, or `timeout`. Each completed
+status SHALL transition only to `terminated`, and `terminated` SHALL have no
+valid successor. The system MUST set `dispatched_at` when it marks an entry
+running and MUST set `finished_at` when it records a completed outcome. A
+direct `queued` to `failed` transition MUST leave `dispatched_at` absent. The
+system SHALL reject any status value outside this set when restoring an entry
+from its durable representation.
 
 #### Scenario: Record successful handling
-- **WHEN** a worker completes an entry handler with a JSON-serialisable value
+- **WHEN** a worker handler returns a result for a running entry
 - **THEN** the entry is stored with status `succeeded`, its `result` value, and a
   non-null `finished_at` timestamp
 
@@ -125,6 +128,12 @@ this set when restoring an entry from its durable representation.
 - **THEN** the entry is stored with status `failed`, a structured error value
   containing only a safe exception class and message, and a non-null
   `finished_at` timestamp
+
+#### Scenario: Record a failure before handler dispatch
+- **WHEN** queue processing detects a validation, transport, or other
+  pre-dispatch failure for a queued entry
+- **THEN** the entry is stored with status `failed`, a structured error value,
+  a non-null `finished_at` timestamp, and no `dispatched_at` timestamp
 
 #### Scenario: Record cancelled handling
 - **WHEN** a caller marks a running entry cancelled through the backend contract
@@ -139,6 +148,11 @@ this set when restoring an entry from its durable representation.
 - **WHEN** a worker abandons a handler that exceeded its execution budget
 - **THEN** the entry is stored with status `timeout` and a non-null
   `finished_at` timestamp, and no further transition is permitted
+
+#### Scenario: Recover an abandoned running entry
+- **WHEN** reliable-delivery recovery reclaims an expired running entry
+- **THEN** it resets the entry to `queued` and clears its execution timestamps
+- **AND** its next worker attempt records a new `dispatched_at` timestamp
 
 ### Requirement: Use queue-authoritative lifecycle time
 Redis-backed queues SHALL source lifecycle timestamps from a Redis-aligned UTC

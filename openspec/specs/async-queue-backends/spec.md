@@ -11,7 +11,8 @@ surface.
 Queue backends SHALL expose every operation that performs storage work as an
 awaitable method named with an `a` prefix: `aenqueue`, `aget_entry`,
 `adequeue_entry`, `ahas_pending_entries`, `amark_running`, `amark_succeeded`,
-`amark_failed`, `amark_cancelled`, `amark_timed_out`, and `aclose`. These
+`amark_failed`, `amark_cancelled`, `amark_timed_out`, `aprune_entry`, and
+`aclose`. These
 SHALL be the implementations, not wrappers. A backend supporting identified
 entry dispatch MUST implement all of them.
 
@@ -69,3 +70,35 @@ belonging to the loop that disposes them.
 - **WHEN** a caller closes a queue
 - **THEN** the connection resources for that loop are released and the queue
   can acquire fresh resources if used again
+
+### Requirement: List retained entry snapshots
+Each AsyncQueue backend SHALL provide synchronous and asynchronous operations
+that return its currently retained immutable QueueEntry snapshots for observer
+bootstrap. The operations SHALL return queued, running, and terminal entries.
+
+#### Scenario: List an AsyncQueue's retained entries
+- **WHEN** an observer runtime requests the snapshots for an AsyncQueue
+- **THEN** it receives every retained entry snapshot in that queue
+
+### Requirement: Prune a retained AsyncQueue entry
+`AsyncQueue` SHALL expose `aprune_entry(entry_id)` and its synchronous
+counterpart `prune_entry(entry_id)` for removing one retained terminal entry.
+`BaseQueue` and `EventQueue` SHALL NOT expose these entry-retention operations.
+Scheduled cleanup and explicit pruning SHALL use the same removal behavior.
+
+#### Scenario: Prune from synchronous application code
+- **WHEN** synchronous application code prunes one terminal AsyncQueue entry
+- **THEN** it observes the same removal and exception behavior as
+  `aprune_entry`
+
+### Requirement: Report an identified AsyncQueue entry that does not exist
+AsyncQueue entry lookup and explicit pruning SHALL raise
+`QueueEntryNotFoundError` when the requested retained entry ID has no durable
+record. `QueueEmptyException` SHALL remain reserved for queue-dequeue
+operations, and `QueueEntryMissingError` SHALL remain specific to
+reliable-delivery claim settlement.
+
+#### Scenario: Look up an absent entry
+- **WHEN** a caller retrieves an AsyncQueue entry ID whose retained record does
+  not exist
+- **THEN** the backend raises `QueueEntryNotFoundError`
