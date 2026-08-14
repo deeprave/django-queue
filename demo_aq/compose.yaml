@@ -1,0 +1,19 @@
+services:
+  redis:
+    image: redis:8-alpine
+    command: redis-server --port 16379
+    ports:
+      - "127.0.0.1:16379:16379"
+
+  dashboard:
+    profiles:
+      - dashboard
+    build:
+      context: ..
+      dockerfile: demo_aq/Dockerfile
+    environment:
+      DEMO_REDIS_URL: redis://redis:16379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis

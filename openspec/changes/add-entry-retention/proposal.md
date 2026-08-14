@@ -6,7 +6,8 @@ unbounded.
 ## What Changes
 
 - Add configurable retention for terminal entry records.
-- Provide explicit cleanup for backends that cannot expire records natively.
+- Provide explicit cleanup that emits an AsyncQueue observer event before a
+  retained record is removed.
 
 ## Capabilities
 
@@ -18,4 +19,5 @@ None.
 
 ## Impact
 
-Adds queue configuration and cleanup behavior without changing pending work.
+Adds queue configuration, observable cleanup behavior, and an observer-only
+termination event without changing pending work or durable queue states.

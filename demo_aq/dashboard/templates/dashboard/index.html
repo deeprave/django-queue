@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Async Queue Demo</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+      main { max-width: none; width: 100%; }
+      .dashboard-header {
+        align-items: center;
+        background: var(--pico-primary-background);
+        color: var(--pico-primary-inverse);
+        gap: 1rem;
+        padding: 1rem var(--pico-spacing);
+      }
+      .dashboard-header h1 { margin-bottom: 0; }
+      .dashboard-header form { margin-bottom: 0; }
+      .dashboard-header button {
+        background: var(--pico-primary-inverse);
+        border-color: var(--pico-primary-inverse);
+        color: var(--pico-primary);
+      }
+      .table-wrap { width: 100%; }
+      table { table-layout: fixed; width: 100%; }
+      th:nth-child(1), td:nth-child(1) { width: 14%; }
+      th:nth-child(2), td:nth-child(2) { width: 10%; }
+      th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { width: 16%; }
+      th:nth-child(6), td:nth-child(6) { width: 8%; }
+      .entry-id {
+        display: block;
+        max-width: 11rem;
+        overflow: hidden;
+        font-family: var(--pico-font-family-monospace);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .timestamp { white-space: nowrap; }
+      .message {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .state {
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+      .state-queued { color: var(--pico-primary); }
+      .state-running { color: #b8860b; }
+      .state-succeeded { color: var(--pico-ins-color); }
+      .state-failed, .state-timeout { color: var(--pico-del-color); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="dashboard-header">
+        <h1>Async Queue Demo</h1>
+        <form action="{% url 'refresh' %}" method="post">
+          {% csrf_token %}
+          <button type="submit">Refresh</button>
+        </form>
+      </header>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>State</th>
+              <th>Message</th>
+              <th>Queued</th>
+              <th>Finished</th>
+              <th>Timeout</th>
+            </tr>
+          </thead>
+          <tbody id="entries"></tbody>
+        </table>
+      </div>
+    </main>
+    <script>
+      const entries = document.querySelector("#entries");
+
+      function timestamp(value) {
+        return value === null
+          ? "—"
+          : new Date(value * 1000).toISOString().slice(0, 19) + "Z";
+      }
+
+      function timeout(value) {
+        return value === null ? "—" : `${value}s`;
+      }
+
+      function render(entry) {
+        let row = entries.querySelector(`[data-entry-id="${entry.id}"]`);
+        if (!row) {
+          row = document.createElement("tr");
+          row.dataset.entryId = entry.id;
+          for (let index = 0; index < 6; index += 1) {
+            row.append(document.createElement("td"));
+          }
+          row.cells[3].classList.add("timestamp");
+          row.cells[4].classList.add("timestamp");
+          row.cells[2].classList.add("message");
+          row.cells[0].append(document.createElement("span"));
+          row.cells[1].append(document.createElement("span"));
+          entries.append(row);
+        }
+
+        const id = row.cells[0].firstElementChild;
+        id.className = "entry-id";
+        id.textContent = entry.id;
+        const state = row.cells[1].firstElementChild;
+        state.className = `state state-${entry.state}`;
+        state.textContent = entry.state;
+        row.cells[2].textContent = entry.message;
+        row.cells[3].textContent = timestamp(entry.queued_at);
+        row.cells[4].textContent = timestamp(entry.finished_at);
+        row.cells[5].textContent = timeout(entry.timeout_seconds);
+      }
+
+      const stream = new EventSource("{% url 'events' %}");
+      stream.onmessage = ({ data }) => {
+        JSON.parse(data).entries.forEach(render);
+      };
+      stream.onerror = (error) => console.error(error);
+    </script>
+  </body>
+</html>
