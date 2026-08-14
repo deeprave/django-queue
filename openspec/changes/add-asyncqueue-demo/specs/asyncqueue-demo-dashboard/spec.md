@@ -23,10 +23,10 @@ times, and normal queue timeout.
 
 ### Requirement: Observe and update dashboard entries
 The dashboard SHALL create a queue observer for `demo` when its local
-dashboard service starts. It SHALL use lifecycle snapshots to add or update
-displayed entry rows without altering the queue entry itself. A terminal
-lifecycle snapshot SHALL update its corresponding displayed row with the
-terminal state and finished time.
+dashboard receives its first page or event-stream request. It SHALL use
+lifecycle snapshots to add or update displayed entry rows without altering the
+queue entry itself. A terminal lifecycle snapshot SHALL update its corresponding
+displayed row with the terminal state and finished time.
 
 #### Scenario: Receive a lifecycle update
 - **WHEN** the demo queue observer receives a snapshot for an entry

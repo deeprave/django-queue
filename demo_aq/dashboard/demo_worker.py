@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from collections.abc import Mapping
 
 from django_queue.backends.base import BaseQueue
 from django_queue.entries import QueueEntry, QueueEntryStatus
@@ -34,7 +35,13 @@ class DemoQueueWorker(AsyncQueueWorker):
         self, queue: BaseQueue
     ) -> tuple[QueueEntry, float | None] | None:
         entry = await queue.adequeue_entry()
-        if _transition_due(entry, QueueEntryStatus.RUNNING):
+        try:
+            transition_due = _transition_due(entry, QueueEntryStatus.RUNNING)
+        except (TypeError, ValueError) as exc:
+            failed_entry = await queue.amark_failed(entry.id, exc)
+            await queue.apublish_lifecycle_snapshot(failed_entry)
+            return None
+        if transition_due:
             return entry, None
         await _requeue_entry(queue, entry)
         return None
@@ -107,11 +114,26 @@ def _transition_due(entry: QueueEntry, state: QueueEntryStatus) -> bool:
 
 def _transition_at(entry: QueueEntry, state: QueueEntryStatus) -> float:
     """Return the timestamp at which ``entry`` should transition to ``state``."""
-    return next(
-        transition["at"]
-        for transition in entry.payload["transitions"]
-        if transition["state"] == state
-    )
+    if not isinstance(entry.payload, Mapping):
+        raise TypeError(f"Demo entry {entry.id} payload must be a mapping")
+    transitions = entry.payload.get("transitions")
+    if not isinstance(transitions, list):
+        raise TypeError(f"Demo entry {entry.id} must define a transitions list")
+    for transition in transitions:
+        if (
+            not isinstance(transition, Mapping)
+            or transition.get("state") != state.value
+        ):
+            continue
+        transition_at = transition.get("at")
+        if isinstance(transition_at, (int, float)) and not isinstance(
+            transition_at, bool
+        ):
+            return float(transition_at)
+        raise ValueError(
+            f"Demo entry {entry.id} has an invalid {state.value} transition timestamp"
+        )
+    raise ValueError(f"Demo entry {entry.id} has no {state.value} transition")
 
 
 async def _requeue_entry(queue, entry: QueueEntry) -> None:
