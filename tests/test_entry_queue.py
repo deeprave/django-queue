@@ -471,6 +471,25 @@ class TestMemoryQueueEntries:
         finally:
             subscription.unsubscribe()
 
+    def test_prune_removes_the_durable_entry_before_publishing_termination(
+        self, queue, monkeypatch
+    ):
+        entry_id = queue.enqueue("work")
+        queue.mark_running(entry_id)
+        queue.mark_succeeded(entry_id, "done")
+        snapshots = []
+
+        async def publish(entry):
+            with pytest.raises(QueueEntryNotFoundError):
+                await queue.aget_entry(entry.id)
+            snapshots.append(entry)
+
+        monkeypatch.setattr(queue, "apublish_lifecycle_snapshot", publish)
+
+        queue.prune_entry(entry_id)
+
+        assert snapshots[-1].status is QueueEntryStatus.TERMINATED
+
     def test_prune_refuses_a_non_terminal_entry(self, queue):
         entry_id = queue.enqueue("work")
 

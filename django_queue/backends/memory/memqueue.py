@@ -107,11 +107,11 @@ class MemoryQueue(AsyncQueue):
         entry = await self.aget_entry(entry_id)
         if QueueEntryStatus.TERMINATED not in entry.status.next_state():
             raise ValueError("Only terminal queue entries can be pruned")
+        del self._entries[entry_id]
+        self._remove_pending_entry(entry_id)
         await self.apublish_lifecycle_snapshot(
             replace(entry, status=QueueEntryStatus.TERMINATED)
         )
-        del self._entries[entry_id]
-        self._remove_pending_entry(entry_id)
 
     async def _aprune_expired_entries(self) -> int:
         if self.retention_timeout is None:
