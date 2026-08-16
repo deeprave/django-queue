@@ -1,13 +1,19 @@
 import asyncio
+import threading
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 import django_queue
 from django_queue.apps import DjangoQueueConfig
-from django_queue.backends import InvalidQueueBackendError, MemoryQueue
+from django_queue.backends import (
+    InvalidQueueBackendError,
+    MemoryAsyncQueue,
+    MemoryEventQueue,
+)
 from django_queue.backends.exceptions import QueueException
 from django_queue.entries import QueueEntry
+from django_queue.event_worker import EventQueueWorker
 from django_queue.worker import AsyncQueueWorker
 
 
@@ -21,27 +27,28 @@ class ValueErrorBackend:
         raise ValueError("invalid option")
 
 
-class HandlerMetadataBackend(MemoryQueue):
+class HandlerMetadataBackend(MemoryAsyncQueue):
     def __init__(self, location, options):
         assert "HANDLER" not in options
         assert "WORKER" not in options
         assert "ENTRY_CLASS" not in options
+        assert "entry_class" not in options
         super().__init__(location, options)
 
 
-class ClosingMemoryQueue(MemoryQueue):
+class ClosingMemoryAsyncQueue(MemoryAsyncQueue):
     closed = 0
 
     async def aclose(self):
         type(self).closed += 1
 
 
-class FailingClosingMemoryQueue(MemoryQueue):
+class FailingClosingMemoryAsyncQueue(MemoryAsyncQueue):
     async def aclose(self):
         raise ConnectionError("queue close failed")
 
 
-class RecordingClosingMemoryQueue(MemoryQueue):
+class RecordingClosingMemoryAsyncQueue(MemoryAsyncQueue):
     closed = 0
 
     async def aclose(self):
@@ -79,15 +86,15 @@ def reset_tracking_extension_instances():
 
 class TestConfiguredQueueInitialization:
     def test_asynchronous_disposal_attempts_later_queues_after_a_failure(self, caplog):
-        RecordingClosingMemoryQueue.closed = 0
+        RecordingClosingMemoryAsyncQueue.closed = 0
         handler = django_queue.QueueHandler(
             {
                 "broken": {
-                    "BACKEND": "tests.test_configured_queues.FailingClosingMemoryQueue",
+                    "BACKEND": "tests.test_configured_queues.FailingClosingMemoryAsyncQueue",
                     "LOCATION": "",
                 },
                 "remaining": {
-                    "BACKEND": "tests.test_configured_queues.RecordingClosingMemoryQueue",
+                    "BACKEND": "tests.test_configured_queues.RecordingClosingMemoryAsyncQueue",
                     "LOCATION": "",
                 },
             }
@@ -96,15 +103,15 @@ class TestConfiguredQueueInitialization:
 
         asyncio.run(django_queue.aclose_queues(handler))
 
-        assert RecordingClosingMemoryQueue.closed == 1
+        assert RecordingClosingMemoryAsyncQueue.closed == 1
         assert "Unable to dispose queue resources" in caplog.text
 
     def test_asynchronous_disposal_closes_initialised_queues(self):
-        ClosingMemoryQueue.closed = 0
+        ClosingMemoryAsyncQueue.closed = 0
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "tests.test_configured_queues.ClosingMemoryQueue",
+                    "BACKEND": "tests.test_configured_queues.ClosingMemoryAsyncQueue",
                     "LOCATION": "",
                 }
             }
@@ -113,14 +120,14 @@ class TestConfiguredQueueInitialization:
 
         asyncio.run(django_queue.aclose_queues(handler))
 
-        assert ClosingMemoryQueue.closed == 1
+        assert ClosingMemoryAsyncQueue.closed == 1
 
     def test_synchronous_disposal_remains_a_synchronous_callable(self):
-        ClosingMemoryQueue.closed = 0
+        ClosingMemoryAsyncQueue.closed = 0
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "tests.test_configured_queues.ClosingMemoryQueue",
+                    "BACKEND": "tests.test_configured_queues.ClosingMemoryAsyncQueue",
                     "LOCATION": "",
                 }
             }
@@ -129,7 +136,7 @@ class TestConfiguredQueueInitialization:
 
         django_queue.close_queues(handler)
 
-        assert ClosingMemoryQueue.closed == 1
+        assert ClosingMemoryAsyncQueue.closed == 1
 
     def test_invalid_backend_errors_are_queue_and_django_configuration_errors(self):
         assert issubclass(QueueException, Exception)
@@ -140,12 +147,12 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "LOCATION": "",
                     "maxsize": 4,
                 },
                 "events": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "LOCATION": "",
                 },
             }
@@ -156,17 +163,38 @@ class TestConfiguredQueueInitialization:
         events = handler["events"]
         django_queue.initialise_queues(handler)
 
-        assert isinstance(default, MemoryQueue)
+        assert isinstance(default, MemoryAsyncQueue)
         assert default.capacity == 4
         assert default is handler["default"]
         assert events is handler["events"]
+
+    def test_configured_memory_event_queue_is_shared_across_threads(self):
+        handler = django_queue.QueueHandler(
+            {
+                "events": {
+                    "BACKEND": "django_queue.backends.MemoryEventQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        first = handler["events"]
+        from_other_thread = []
+
+        thread = threading.Thread(
+            target=lambda: from_other_thread.append(handler["events"])
+        )
+        thread.start()
+        thread.join()
+
+        assert isinstance(first, MemoryEventQueue)
+        assert from_other_thread == [first]
 
     @pytest.mark.parametrize(
         ("settings", "message"),
         [
             ("not a configuration mapping", "QUEUES must be a mapping"),
-            ({0: {"BACKEND": "django_queue.backends.MemoryQueue"}}, "alias 0"),
-            ({"": {"BACKEND": "django_queue.backends.MemoryQueue"}}, "alias ''"),
+            ({0: {"BACKEND": "django_queue.backends.MemoryAsyncQueue"}}, "alias 0"),
+            ({"": {"BACKEND": "django_queue.backends.MemoryAsyncQueue"}}, "alias ''"),
             ({"requests": {}}, "requests.*BACKEND"),
             ({"requests": {"BACKEND": ""}}, "requests.*BACKEND"),
             ({"requests": {"BACKEND": 42}}, "requests.*BACKEND"),
@@ -225,7 +253,7 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "LOCATION": "",
                 }
             }
@@ -235,7 +263,7 @@ class TestConfiguredQueueInitialization:
 
         config.ready()
 
-        assert isinstance(handler["default"], MemoryQueue)
+        assert isinstance(handler["default"], MemoryAsyncQueue)
 
     def test_preserves_handler_metadata_without_passing_it_to_the_backend(self):
         handler = django_queue.QueueHandler(
@@ -243,6 +271,7 @@ class TestConfiguredQueueInitialization:
                 "default": {
                     "BACKEND": "tests.test_configured_queues.HandlerMetadataBackend",
                     "HANDLER": "tests.test_runqueues.handle_entry",
+                    "ENTRY_CLASS": TrackingEntry,
                     "LOCATION": "",
                 }
             }
@@ -255,6 +284,7 @@ class TestConfiguredQueueInitialization:
             handler.settings["default"]["HANDLER"]
             == "tests.test_runqueues.handle_entry"
         )
+        assert handler["default"].entry_class is TrackingEntry
 
     @pytest.mark.parametrize(
         ("worker", "entry_class"),
@@ -291,6 +321,36 @@ class TestConfiguredQueueInitialization:
         assert handler["default"].entry_class is TrackingEntry
         assert TrackingEntry.instances == 0
 
+    def test_passes_the_configured_entry_class_to_a_redis_event_provider(self):
+        handler = django_queue.QueueHandler(
+            {
+                "events": {
+                    "BACKEND": "django_queue.backends.redis.RedisEventQueue",
+                    "LOCATION": "redis://localhost:6379/0",
+                    "ENTRY_CLASS": TrackingEntry,
+                }
+            }
+        )
+
+        django_queue.initialise_queues(handler)
+
+        queue = handler["events"]
+        assert queue.entry_class is TrackingEntry
+
+    def test_rejects_an_event_worker_configured_for_an_async_queue(self):
+        handler = django_queue.QueueHandler(
+            {
+                "default": {
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
+                    "LOCATION": "",
+                    "WORKER": EventQueueWorker,
+                }
+            }
+        )
+
+        with pytest.raises(InvalidQueueBackendError, match="default.*WORKER"):
+            django_queue.initialise_queues(handler)
+
     @pytest.mark.parametrize(
         ("setting", "value", "message"),
         [
@@ -314,19 +374,14 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     setting: value,
                 }
             }
         )
 
-        if setting == "WORKER":
+        with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
             django_queue.initialise_queues(handler)
-            with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
-                handler["default"].create_worker("default", no_op_handler)
-        else:
-            with pytest.raises(InvalidQueueBackendError, match=f"default.*{message}"):
-                django_queue.initialise_queues(handler)
 
     @pytest.mark.parametrize(
         "budget", [0, -1, "30", True, None, float("nan"), float("inf")]
@@ -336,7 +391,7 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "TIMEOUT": budget,
                 }
             }
@@ -349,7 +404,7 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "TIMEOUT": 30,
                 }
             }
@@ -361,7 +416,7 @@ class TestConfiguredQueueInitialization:
 
     def test_defaults_terminal_entry_retention_to_ten_minutes(self):
         handler = django_queue.QueueHandler(
-            {"default": {"BACKEND": "django_queue.backends.MemoryQueue"}}
+            {"default": {"BACKEND": "django_queue.backends.MemoryAsyncQueue"}}
         )
 
         django_queue.initialise_queues(handler)
@@ -372,7 +427,7 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "RETENTION_TIMEOUT": None,
                 }
             }
@@ -387,7 +442,7 @@ class TestConfiguredQueueInitialization:
         handler = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "RETENTION_TIMEOUT": retention_timeout,
                 }
             }

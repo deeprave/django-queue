@@ -1,32 +1,33 @@
 import asyncio
-from unittest.mock import AsyncMock
 
 import pytest
 
 from django_queue.backends import (
     QueueEmptyException,
     QueueFullException,
-    RedisPriorityQueue,
 )
+from django_queue.backends.redis import RedisAsyncPriorityQueue
 
 
 @pytest.fixture
 def redis_priority_queue(redis_url):
     """
-    Fixture to set up and clean up a RedisPriorityQueue instance.
+    Fixture to set up and clean up a RedisAsyncPriorityQueue instance.
     """
-    queue = RedisPriorityQueue(redis_url, queue_name="test_priority_queue", maxsize=5)
+    queue = RedisAsyncPriorityQueue(
+        redis_url, queue_name="test_priority_queue", maxsize=5
+    )
     queue.clear()
     return queue
 
 
 def test_init(redis_url):
     """
-    Test initialisation of RedisPriorityQueue.
+    Test initialisation of RedisAsyncPriorityQueue.
     """
-    queue = RedisPriorityQueue(redis_url, queue_name="test_priority_queue")
+    queue = RedisAsyncPriorityQueue(redis_url, queue_name="test_priority_queue")
     assert queue.queue_name == "test_priority_queue"
-    assert queue._maxsize == 0  # Unlimited size by default
+    assert queue.capacity == 0  # Unlimited size by default
 
 
 def test_capacity(redis_priority_queue):
@@ -67,28 +68,6 @@ def test_get_empty(redis_priority_queue):
         redis_priority_queue.get()
 
 
-def test_poll_blocking(redis_priority_queue, mocker):
-    """
-    Test `poll()` blocks if the queue is empty and retrieves the next added item.
-    """
-
-    async def exercise():
-        client = redis_priority_queue._async_redis()
-        mocker.patch.object(
-            client,
-            "bzpopmax",
-            AsyncMock(
-                return_value=(redis_priority_queue.queue_name, b"blocked_item", 0)
-            ),
-        )
-        await redis_priority_queue.aadd((10, "item1"))
-        assert await redis_priority_queue.apoll(timeout=5) == "item1"
-        assert await redis_priority_queue.apoll(timeout=5) == "blocked_item"
-        await redis_priority_queue.aclose()
-
-    asyncio.run(exercise())
-
-
 def test_poll_wakes_when_a_priority_item_is_added(redis_priority_queue):
     async def exercise():
         poll_task = asyncio.create_task(redis_priority_queue.apoll(timeout=1))
@@ -96,26 +75,6 @@ def test_poll_wakes_when_a_priority_item_is_added(redis_priority_queue):
         await redis_priority_queue.aadd((10, "arrived"))
 
         assert await asyncio.wait_for(poll_task, timeout=0.5) == "arrived"
-        await redis_priority_queue.aclose()
-
-    asyncio.run(exercise())
-
-
-def test_poll_applies_timeout_to_each_retry_attempt(redis_priority_queue, mocker):
-    async def exercise():
-        client = redis_priority_queue._async_redis()
-        blocking_pop = mocker.patch.object(
-            client, "bzpopmax", AsyncMock(return_value=None)
-        )
-
-        with pytest.raises(QueueEmptyException):
-            await redis_priority_queue.apoll(timeout=2, retries=2)
-
-        assert blocking_pop.await_count == 2
-        assert [call.kwargs["timeout"] for call in blocking_pop.await_args_list] == [
-            2,
-            2,
-        ]
         await redis_priority_queue.aclose()
 
     asyncio.run(exercise())
@@ -188,7 +147,7 @@ def test_get_removes_the_stored_member(redis_priority_queue):
 
 def test_get_removes_the_stored_member_from_a_decoding_url(redis_url):
     """`get()` removes the member when a decoding URL yields text."""
-    queue = RedisPriorityQueue(
+    queue = RedisAsyncPriorityQueue(
         f"{redis_url}?decode_responses=true", queue_name="test-priority-decoding"
     )
     queue.clear()

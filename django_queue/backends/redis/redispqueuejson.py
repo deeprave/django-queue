@@ -1,8 +1,8 @@
 try:
-    from .redispqueue import RedisPriorityQueue
+    from .redispqueue import RedisAsyncPriorityQueue
     from .redisqueuejson import _decode, _encode
 
-    class RedisPriorityQueueJson(RedisPriorityQueue):
+    class RedisAsyncPriorityQueueJson(RedisAsyncPriorityQueue):
         async def aadd(self, *items: tuple[int, dict | str]) -> None:
             await super().aadd(
                 *(

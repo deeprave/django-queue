@@ -9,12 +9,18 @@ Define Django's validated registry of named queue services.
 The Django app SHALL validate and initialise every `QUEUES` alias idempotently
 during application setup without starting a worker. An optional `HANDLER`
 dotted import path is command metadata for `runqueues` and MUST NOT be passed
-to the queue backend constructor.
+to the queue backend constructor. An alias MUST be a non-empty string and MUST
+NOT contain `*`, `?`, `[` or `]`.
 
 #### Scenario: Access a configured service
 
 - **WHEN** Django initialisation completes with valid `QUEUES`
 - **THEN** application code can retrieve each configured queue by alias
+
+#### Scenario: Reject an unsafe queue alias
+
+- **WHEN** a `QUEUES` alias contains `*`, `?`, `[` or `]`
+- **THEN** configuration raises an alias-specific configuration error
 
 #### Scenario: Configure a queue handler
 
@@ -26,11 +32,12 @@ to the queue backend constructor.
 
 The configured queue registry SHALL accept optional `WORKER` and `ENTRY_CLASS`
 metadata for each alias. Each value MUST be either a class object or a non-empty
-dotted import path. `WORKER` MUST resolve to an `AsyncQueueWorker` subclass and
-`ENTRY_CLASS` MUST resolve to a `QueueEntry` subclass. Omitted values SHALL use
-the generic default classes. Settings initialisation MUST NOT instantiate either
-class, and SHALL leave both configured values unchanged; it SHALL preserve
-`WORKER` on the queue for a worker consumer to resolve.
+dotted import path. `WORKER` MUST resolve to the queue kind's compatible task
+or event worker subclass, and `ENTRY_CLASS` MUST resolve to a `QueueEntry`
+subclass. Omitted values SHALL use the backend-selected default worker and
+entry classes. Settings initialisation MUST NOT instantiate either class, and
+SHALL leave both configured values unchanged; it SHALL preserve `WORKER` on the
+queue for a worker consumer to resolve.
 
 #### Scenario: Configure a dotted worker and entry class
 
@@ -62,9 +69,10 @@ boundary after backend construction.
 The registry SHALL provide asynchronous disposal of configured queues, since a
 backend's connection resources belong to the event loop that acquired them. The
 synchronous disposal hook SHALL remain synchronous and delegate through the
-framework's bridge. ASGI lifespan and `runqueues` SHALL await disposal from
-their own resource-owning loops; Django provides no process-shutdown signal
-that can do this safely for an arbitrary loop.
+framework's bridge. The process-local event runtime and `runqueues` SHALL await
+disposal from their own resource-owning loops. Other asynchronous hosts SHALL
+await `aclose_queues()` before closing their loop; Django provides no
+process-shutdown signal that can do this safely for an arbitrary loop.
 
 #### Scenario: Close synchronous-wrapper resources
 - **WHEN** a synchronous host calls the registry disposal hook

@@ -1,7 +1,7 @@
 import pytest
 
 from django_queue.backends import (
-    MemoryPriorityQueue,
+    MemoryAsyncPriorityQueue,
     QueueEmptyException,
     QueueFullException,
 )
@@ -9,7 +9,7 @@ from django_queue.backends import (
 
 @pytest.fixture
 def priority_queue():
-    return MemoryPriorityQueue(options={"maxsize": 5})
+    return MemoryAsyncPriorityQueue(options={"maxsize": 5})
 
 
 def test_add_to_full_queue_raises_exception(priority_queue):

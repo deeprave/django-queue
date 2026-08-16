@@ -87,6 +87,11 @@ dependencies = [
     { name = "django" },
 ]
 
+[package.optional-dependencies]
+redis = [
+    { name = "redis" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -103,7 +108,9 @@ redis = [
 requires-dist = [
     { name = "asgiref", specifier = ">=3.12.1" },
     { name = "django", specifier = ">=5.1.4" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=5.2.1" },
 ]
+provides-extras = ["redis"]
 
 [package.metadata.requires-dev]
 dev = [

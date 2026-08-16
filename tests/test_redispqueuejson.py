@@ -3,13 +3,13 @@ import pytest
 from django_queue.backends import (
     QueueEmptyException,
     QueueEncodingException,
-    RedisPriorityQueueJson,
 )
+from django_queue.backends.redis import RedisAsyncPriorityQueueJson
 
 
 @pytest.fixture
-def redis_queue(redis_url) -> RedisPriorityQueueJson:
-    return RedisPriorityQueueJson(redis_url)
+def redis_queue(redis_url) -> RedisAsyncPriorityQueueJson:
+    return RedisAsyncPriorityQueueJson(redis_url)
 
 
 def test_get_valid_json(redis_queue):
@@ -59,6 +59,7 @@ def test_peek_empty_queue(redis_queue):
         redis_queue.peek()
 
 
+@pytest.mark.slow
 def test_large_queue(redis_queue):
     values = []
     # sourcery skip: no-loop-in-tests

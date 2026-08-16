@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md LICENSE.md ./
 COPY django_queue ./django_queue
-RUN pip install --no-cache-dir . "redis>=5.2.1"
+RUN pip install --no-cache-dir ".[redis]" "faker>=40.36.0"
 
 COPY demo_aq ./demo_aq
 

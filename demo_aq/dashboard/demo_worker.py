@@ -12,18 +12,20 @@ from collections.abc import Mapping
 from faker import Faker
 
 from django_queue.backends.base import BaseQueue
+from django_queue.backends.redis import RedisAsyncQueueWorker
+from django_queue.clock import MICROSECONDS_PER_SECOND
 from django_queue.entries import QueueEntry, QueueEntryStatus
-from django_queue.worker import AsyncQueueWorker
 
 _QUEUED_DELAY_SECONDS = (10, 30)
 _RUNNING_DELAY_SECONDS = (30, 60)
 _FOLLOW_UP_DELAY_SECONDS = (5, 20)
+_IMMEDIATE_RELEASE_DELAY_SECONDS = 1 / MICROSECONDS_PER_SECOND
 
 logger = logging.getLogger(__name__)
 _faker = Faker("en_US")
 
 
-class DemoQueueWorker(AsyncQueueWorker):
+class DemoQueueWorker(RedisAsyncQueueWorker):
     """Dispatch due entries, letting their handlers complete concurrently."""
 
     def __init__(self, *args, **kwargs) -> None:
@@ -63,16 +65,36 @@ class DemoQueueWorker(AsyncQueueWorker):
     async def _next_entry(
         self, queue: BaseQueue
     ) -> tuple[QueueEntry, float | None] | None:
-        entry = await queue.adequeue_entry()
+        await self._recover_expired_claims(queue)
+        provider = self._providers[queue]
+        entry = await provider.aclaim(
+            self._worker_id, queue.default_claim_lease_seconds
+        )
         try:
             transition_due = _transition_due(entry, QueueEntryStatus.RUNNING)
         except (TypeError, ValueError) as exc:
-            failed_entry = await queue.amark_failed(entry.id, exc)
-            await queue.apublish_lifecycle_snapshot(failed_entry)
+            running_entry = await self._mark_claimed_running(queue, entry)
+            if running_entry is None:
+                return None
+            await queue.apublish_lifecycle_snapshot(running_entry)
+            await self._record_failure(queue, running_entry, exc, self._worker_id)
             return None
         if transition_due:
-            return entry, None
-        await _requeue_entry(queue, entry)
+            lease_seconds = (
+                self.resolve_budget(queue, entry) + self._cancellation_grace_period
+            )
+            if await provider.arenew(entry.id, self._worker_id, lease_seconds):
+                return entry, lease_seconds
+            return None
+        await _requeue_entry(
+            provider,
+            entry,
+            self._worker_id,
+            max(
+                _IMMEDIATE_RELEASE_DELAY_SECONDS,
+                _transition_at(entry, QueueEntryStatus.RUNNING) - time.time(),
+            ),
+        )
         return None
 
     async def _dispatch(
@@ -82,7 +104,9 @@ class DemoQueueWorker(AsyncQueueWorker):
         entry: QueueEntry,
         lease_seconds: float | None = None,
     ) -> None:
-        running_entry = await queue.amark_running(entry.id)
+        running_entry = await self._mark_claimed_running(queue, entry)
+        if running_entry is None:
+            return
         await queue.apublish_lifecycle_snapshot(running_entry)
         task = asyncio.create_task(self._complete_entry(queue, handler, running_entry))
         self._handler_tasks.add(task)
@@ -96,19 +120,28 @@ class DemoQueueWorker(AsyncQueueWorker):
             result = await handler(entry)
         except asyncio.CancelledError:
             await self._record_failure(
-                queue, entry, RuntimeError("Demo handler terminated during shutdown")
+                queue,
+                entry,
+                RuntimeError("Demo handler terminated during shutdown"),
+                self._worker_id,
             )
             raise
         except Exception as exc:  # noqa: BLE001 - demo failures are intentional.
-            await self._record_failure(queue, entry, exc)
+            await self._record_failure(queue, entry, exc, self._worker_id)
         else:
             if entry.payload["should_fail"]:
-                failed_entry = await queue.amark_failed(
-                    entry.id, RuntimeError("Intentional demo failure")
+                await self._settle_terminal(
+                    queue,
+                    entry,
+                    self._worker_id,
+                    QueueEntryStatus.FAILED,
+                    error={
+                        "type": "RuntimeError",
+                        "message": "Intentional demo failure",
+                    },
                 )
-                await queue.apublish_lifecycle_snapshot(failed_entry)
             else:
-                await self._record_result(queue, entry, result)
+                await self._record_result(queue, entry, result, self._worker_id)
 
 
 async def handle_demo_entry(entry: QueueEntry) -> dict[str, str]:
@@ -174,6 +207,9 @@ def _transition_at(entry: QueueEntry, state: QueueEntryStatus) -> float:
     raise ValueError(f"Demo entry {entry.id} has no {state.value} transition")
 
 
-async def _requeue_entry(queue, entry: QueueEntry) -> None:
+async def _requeue_entry(
+    provider, entry: QueueEntry, worker_id, delay_seconds: float
+) -> None:
     """Return a not-yet-due queued entry to the end of this demo's pending list."""
-    await queue._async_redis().rpush(queue._entry_pending_name, str(entry.id))
+    if not await provider.arelease(entry.id, worker_id, delay_seconds):
+        logger.warning("Lost claim for queue entry %s before requeueing", entry.id)

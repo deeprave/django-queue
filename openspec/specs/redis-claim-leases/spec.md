@@ -6,11 +6,12 @@ Define broker-neutral reliable delivery and Redis claim-lease recovery.
 
 ## Requirements
 
-### Requirement: Expose broker-neutral reliable-delivery capability
-The queue base contract SHALL expose claim, renewal, settlement, and
-expired-claim recovery operations without exposing Redis storage details. A
-backend that does not support reliable delivery SHALL report that capability as
-unsupported, and its worker SHALL retain best-effort dequeue behaviour.
+### Requirement: Keep Redis reliable delivery internal to Redis workers
+Redis-aware workers SHALL use their queue-owned Redis provider for claim,
+renewal, settlement, and expired-claim recovery. Queue-facing APIs and the
+common provider protocol SHALL NOT expose those delivery operations or Redis
+storage details. A backend that does not use Redis reliable delivery SHALL use
+its own transport-native worker model or retain best-effort dequeue behaviour.
 
 #### Scenario: Dispatch on an unsupported backend
 - **WHEN** a worker serves a queue without reliable-delivery support

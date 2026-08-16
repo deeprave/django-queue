@@ -4,9 +4,8 @@ version = "0.0.1"
 description = "Minimal Django dashboard for the django-queue async queue observer demo"
 requires-python = ">=3.14"
 dependencies = [
-    "django-queue",
+    "django-queue[redis]",
     "faker>=40.36.0",
-    "redis>=5.2.1",
 ]
 
 [tool.uv.sources]

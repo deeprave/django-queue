@@ -1,14 +1,12 @@
 import asyncio
 import logging
 import threading
-import uuid
 from dataclasses import FrozenInstanceError
 
 import pytest
 
 from django_queue import ClockTime, WorkerSnapshot
-from django_queue.backends import MemoryQueue
-from django_queue.backends.exceptions import QueueReliableDeliveryUnsupportedError
+from django_queue.backends import MemoryAsyncQueue
 from django_queue.clock import LocalQueueClock
 from django_queue.entries import QueueEntryStatus
 from django_queue.worker import (
@@ -24,27 +22,6 @@ SKEWED = ClockTime(1_000_000_000)
 
 
 class TestAsyncQueueWorker:
-    @pytest.mark.parametrize(
-        ("lease_seconds", "expected_delay"),
-        [(60, 30), (61, 61 * 2 / 3), (600, 400), (601, 601 * 3 / 4)],
-        ids=["short-boundary", "medium", "medium-boundary", "long"],
-    )
-    def test_adapts_claim_renewal_delay_to_the_lease_window(
-        self, lease_seconds, expected_delay
-    ):
-        assert AsyncQueueWorker._renewal_delay(lease_seconds) == pytest.approx(
-            expected_delay
-        )
-
-    def test_memory_queue_reports_reliable_delivery_as_unsupported(self):
-        queue = MemoryQueue(queue_name="requests")
-
-        assert queue.supports_claim_leases is False
-        with pytest.raises(QueueReliableDeliveryUnsupportedError):
-            queue.claim_entry(uuid.uuid7())
-        with pytest.raises(QueueReliableDeliveryUnsupportedError):
-            queue.mark_claim_running(uuid.uuid7(), uuid.uuid7())
-
     @pytest.mark.parametrize(
         "cancellation_grace_period",
         [-0.001, float("inf"), float("nan"), "one"],
@@ -106,8 +83,8 @@ class TestAsyncQueueWorker:
             worker.running = True
 
     def test_snapshot_lists_registered_queue_aliases_in_registration_order(self):
-        first_queue = MemoryQueue(queue_name="first")
-        second_queue = MemoryQueue(queue_name="second")
+        first_queue = MemoryAsyncQueue(queue_name="first")
+        second_queue = MemoryAsyncQueue(queue_name="second")
 
         async def handle(entry):
             return entry.payload
@@ -123,7 +100,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._snapshot_tracks_a_confirmed_successful_outcome())
 
     async def _snapshot_tracks_a_confirmed_successful_outcome(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         started = asyncio.Event()
         release = asyncio.Event()
@@ -168,7 +145,7 @@ class TestAsyncQueueWorker:
 
     async def _logs_snapshot_derived_lifecycle_records(self, caplog):
         caplog.set_level(logging.INFO, logger="django_queue.worker")
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         handled = asyncio.Event()
 
@@ -225,7 +202,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._idle_worker_runs_until_cancelled_without_dispatching())
 
     async def _idle_worker_runs_until_cancelled_without_dispatching(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
 
         async def handle(entry):
             raise AssertionError("An empty queue must not dispatch a handler")
@@ -272,7 +249,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._dispatches_an_entry_and_stores_the_handler_result())
 
     async def _dispatches_an_entry_and_stores_the_handler_result(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue({"request_id": 42})
         handled = asyncio.Event()
 
@@ -300,7 +277,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._records_a_safe_failure_and_keeps_the_worker_running())
 
     async def _records_a_safe_failure_and_keeps_the_worker_running(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         failed_id = await queue.aenqueue("broken")
         succeeded_id = await queue.aenqueue("valid")
         handled = asyncio.Event()
@@ -342,7 +319,7 @@ class TestAsyncQueueWorker:
     async def _cancellation_allows_an_active_handler_to_finish_within_its_grace_period(
         self,
     ):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         started = asyncio.Event()
         release = asyncio.Event()
@@ -379,7 +356,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._cancellation_marks_an_unfinished_handler_as_timed_out())
 
     async def _cancellation_marks_an_unfinished_handler_as_timed_out(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         started = asyncio.Event()
 
@@ -409,7 +386,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._cancellation_completes_when_a_handler_ignores_cancellation())
 
     async def _cancellation_completes_when_a_handler_ignores_cancellation(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         started = asyncio.Event()
         cancellation_ignored = asyncio.Event()
@@ -451,7 +428,7 @@ class TestAsyncQueueWorker:
         )
 
     async def _cancellation_records_a_handler_failure_within_its_grace_period(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         started = asyncio.Event()
         release = asyncio.Event()
@@ -478,42 +455,6 @@ class TestAsyncQueueWorker:
             "type": "ValueError",
             "message": "shutdown failure",
         }
-
-    def test_cancellation_renews_a_claim_while_the_handler_uses_its_grace_period(
-        self,
-    ):
-        asyncio.run(
-            self._cancellation_renews_a_claim_while_the_handler_uses_its_grace_period()
-        )
-
-    async def _cancellation_renews_a_claim_while_the_handler_uses_its_grace_period(
-        self,
-    ):
-        queue = RenewalTrackingQueue(queue_name="requests")
-        entry_id = await queue.aenqueue("work", timeout_seconds=0.04)
-        started = asyncio.Event()
-        release = asyncio.Event()
-
-        async def handle(entry):
-            started.set()
-            await release.wait()
-            return entry.payload
-
-        worker = AsyncQueueWorker(
-            {"requests": queue},
-            {"requests": handle},
-            idle_delay=0.001,
-            cancellation_grace_period=0.04,
-        )
-        task = asyncio.create_task(worker.run())
-        await asyncio.wait_for(started.wait(), timeout=1)
-        task.cancel()
-        await asyncio.wait_for(queue.renewed.wait(), timeout=1)
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
 
     def test_cancellation_during_success_persistence_does_not_repeat_the_transition(
         self,
@@ -548,7 +489,7 @@ class TestAsyncQueueWorker:
         asyncio.run(self._records_a_safe_failure_for_a_non_json_handler_result())
 
     async def _records_a_safe_failure_for_a_non_json_handler_result(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
 
         async def handle(entry):
@@ -650,7 +591,7 @@ class TestAsyncQueueWorker:
                 await asyncio.sleep(0.001)
 
 
-class ThreadRecordingDispatchQueue(MemoryQueue):
+class ThreadRecordingDispatchQueue(MemoryAsyncQueue):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.thread_ids: list[int] = []
@@ -659,54 +600,16 @@ class ThreadRecordingDispatchQueue(MemoryQueue):
         self.thread_ids.append(threading.get_ident())
         return await super().adequeue_entry()
 
-    async def amark_running(self, entry_id):
+    async def _amark_running(self, entry_id):
         self.thread_ids.append(threading.get_ident())
-        return await super().amark_running(entry_id)
+        return await super()._amark_running(entry_id)
 
-    async def amark_succeeded(self, entry_id, result):
+    async def _amark_succeeded(self, entry_id, result):
         self.thread_ids.append(threading.get_ident())
-        return await super().amark_succeeded(entry_id, result)
+        return await super()._amark_succeeded(entry_id, result)
 
 
-class RenewalTrackingQueue(MemoryQueue):
-    """In-memory reliable queue used to observe worker lease renewal behaviour."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.renewed = asyncio.Event()
-        self._claim_owner: uuid.UUID | None = None
-
-    @property
-    def supports_claim_leases(self):
-        return True
-
-    async def aclaim_entry(self, worker_id, lease_seconds=None):
-        self._claim_owner = worker_id
-        return await super().adequeue_entry()
-
-    async def arenew_claim(self, entry_id, worker_id, lease_seconds):
-        if worker_id != self._claim_owner:
-            return False
-        self.renewed.set()
-        return True
-
-    async def amark_claim_running(self, entry_id, worker_id):
-        if worker_id != self._claim_owner:
-            return None
-        return await super().amark_running(entry_id)
-
-    async def asettle_claim(self, worker_id, entry):
-        if worker_id != self._claim_owner:
-            return False
-        self._entries[entry.id] = entry
-        self._claim_owner = None
-        return True
-
-    async def arecover_expired_claims(self):
-        return 0
-
-
-class SlowEmptyQueue(MemoryQueue):
+class SlowEmptyQueue(MemoryAsyncQueue):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dequeue_started = threading.Event()
@@ -717,43 +620,43 @@ class SlowEmptyQueue(MemoryQueue):
         return await super().adequeue_entry()
 
 
-class BlockingSuccessQueue(MemoryQueue):
+class BlockingSuccessQueue(MemoryAsyncQueue):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.persistence_started = asyncio.Event()
         self.persistence_release = asyncio.Event()
         self.persisted = asyncio.Event()
 
-    async def amark_succeeded(self, entry_id, result):
+    async def _amark_succeeded(self, entry_id, result):
         self.persistence_started.set()
         try:
             await self.persistence_release.wait()
-            return await super().amark_succeeded(entry_id, result)
+            return await super()._amark_succeeded(entry_id, result)
         finally:
             self.persisted.set()
 
 
-class FailingTerminalQueue(MemoryQueue):
+class FailingTerminalQueue(MemoryAsyncQueue):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._fail_next_success = True
 
-    async def amark_succeeded(self, entry_id, result):
+    async def _amark_succeeded(self, entry_id, result):
         if self._fail_next_success:
             self._fail_next_success = False
             raise ConnectionError("Redis is unavailable")
-        return await super().amark_succeeded(entry_id, result)
+        return await super()._amark_succeeded(entry_id, result)
 
 
 class UnrecoverableTerminalQueue(FailingTerminalQueue):
-    async def amark_failed(self, entry_id, error):
+    async def _amark_failed(self, entry_id, error):
         raise ConnectionError("Redis is unavailable")
 
 
 class TestWorkerClock:
     def test_takes_its_queue_clock_when_the_queue_creates_it(self):
         """A worker and the entries it dispatches must share one time basis."""
-        queue = MemoryQueue(queue_name="requests", clock=FixedClock())
+        queue = MemoryAsyncQueue(queue_name="requests", clock=FixedClock())
 
         async def handle(entry):
             return entry.payload
@@ -772,7 +675,7 @@ class TestWorkerClock:
 
     async def _run_start_time_never_follows_a_dispatch_it_made(self):
         """The queue clock is skewed far from local time; one basis or neither."""
-        queue = MemoryQueue(queue_name="requests", clock=FixedClock(SKEWED))
+        queue = MemoryAsyncQueue(queue_name="requests", clock=FixedClock(SKEWED))
         entry_id = await queue.aenqueue("work")
         dispatched = asyncio.Event()
 
@@ -800,7 +703,7 @@ class TestWorkerDuration:
 
     async def _reports_how_long_it_has_been_running(self):
         clock = FixedClock(SKEWED)
-        queue = MemoryQueue(queue_name="requests", clock=clock)
+        queue = MemoryAsyncQueue(queue_name="requests", clock=clock)
         dispatched = asyncio.Event()
 
         async def handle(entry):
@@ -848,7 +751,7 @@ class TestWorkerDuration:
     async def _a_stopped_worker_reports_how_long_it_ran(self):
         """Otherwise a stopped worker's runtime grows forever."""
         clock = FixedClock(SKEWED)
-        queue = MemoryQueue(queue_name="requests", clock=clock)
+        queue = MemoryAsyncQueue(queue_name="requests", clock=clock)
 
         async def handle(entry):
             return entry.payload
@@ -876,7 +779,7 @@ class TestBudgetResolution:
         return queue.get_entry(queue.enqueue("work", timeout_seconds=budget))
 
     def test_falls_back_to_the_default_when_nothing_is_set(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle_nothing})
 
         assert (
@@ -884,14 +787,14 @@ class TestBudgetResolution:
         )
 
     def test_a_queue_default_beats_the_fallback(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         queue.timeout_seconds = 45
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle_nothing})
 
         assert worker.resolve_budget(queue, self._entry(queue)) == 45
 
     def test_an_entry_budget_beats_the_queue_default(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         queue.timeout_seconds = 45
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle_nothing})
 
@@ -899,7 +802,7 @@ class TestBudgetResolution:
 
     def test_a_worker_override_beats_everything(self):
         """The worker knows the runtime it is actually operating in."""
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         queue.timeout_seconds = 45
         worker = AsyncQueueWorker(
             {"requests": queue}, {"requests": handle_nothing}, timeout_seconds=2
@@ -933,7 +836,7 @@ class TestBudgetEnforcement:
     async def _nested_repeated_heartbeats_extend_the_budget_without_changing_entry_time(
         self,
     ):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work", timeout_seconds=0.05)
 
         async def report_progress():
@@ -960,7 +863,7 @@ class TestBudgetEnforcement:
         asyncio.run(self._heartbeat_extends_the_active_handler_budget())
 
     async def _heartbeat_extends_the_active_handler_budget(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work", timeout_seconds=0.02)
 
         async def handle(entry):
@@ -986,7 +889,7 @@ class TestBudgetEnforcement:
         asyncio.run(self._heartbeat_from_a_handler_child_after_dispatch_raises())
 
     async def _heartbeat_from_a_handler_child_after_dispatch_raises(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         await queue.aenqueue("work")
         child_ready = asyncio.Event()
         release_child = asyncio.Event()
@@ -1018,7 +921,7 @@ class TestBudgetEnforcement:
 
     async def _abandons_a_handler_that_exceeds_its_budget(self):
         """The alias must not be starved by one handler that never returns."""
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         hung_id = await queue.aenqueue("hangs")
         started = asyncio.Event()
 
@@ -1055,7 +958,7 @@ class TestBudgetEnforcement:
 
     async def _enforces_a_budget_carried_on_the_entry(self):
         """The budget a producer set at enqueue, with no worker override."""
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work", timeout_seconds=0.05)
 
         async def handle(entry):
@@ -1077,7 +980,7 @@ class TestBudgetEnforcement:
 
     async def _enforces_the_queues_configured_budget(self):
         """The alias TIMEOUT setting, with neither entry nor worker overriding."""
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         queue.timeout_seconds = 0.05
         entry_id = await queue.aenqueue("work")
 
@@ -1105,7 +1008,7 @@ class TestBudgetEnforcement:
         budget expires with. Only the budget actually running out means the
         handler never answered.
         """
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
 
         async def handle(entry):
@@ -1139,7 +1042,7 @@ class TestBudgetEnforcement:
 
     async def _a_handler_raising_timeout_error_during_shutdown_is_a_failure(self):
         """The grace period expires as TimeoutError too, and is told apart."""
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1171,7 +1074,7 @@ class TestBudgetEnforcement:
         asyncio.run(self._leaves_a_handler_inside_its_budget_alone())
 
     async def _leaves_a_handler_inside_its_budget_alone(self):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         entry_id = await queue.aenqueue("work")
 
         async def handle(entry):
@@ -1198,7 +1101,7 @@ class TestBudgetEnforcement:
 
     async def _a_timeout_leaves_the_cancelled_count_alone(self):
         """Abandoned-on-budget and stopped-on-shutdown are different outcomes."""
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         await queue.aenqueue("work")
 
         async def handle(entry):
@@ -1231,7 +1134,7 @@ class TestBudgetEnforcement:
         asyncio.run(self._the_terminal_record_carries_the_timed_out_count(caplog))
 
     async def _the_terminal_record_carries_the_timed_out_count(self, caplog):
-        queue = MemoryQueue(queue_name="requests")
+        queue = MemoryAsyncQueue(queue_name="requests")
         await queue.aenqueue("work")
 
         async def handle(entry):
@@ -1274,7 +1177,7 @@ class TestBudgetAndEntryClocksStaySeparate:
         a wall-clock reading taken from the backend.
         """
         clock = FixedClock(SKEWED)
-        queue = MemoryQueue(queue_name="requests", clock=clock)
+        queue = MemoryAsyncQueue(queue_name="requests", clock=clock)
         entry_id = await queue.aenqueue("work")
         budget = 0.05
 

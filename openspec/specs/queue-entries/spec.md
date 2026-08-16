@@ -135,14 +135,15 @@ from its durable representation.
 - **THEN** the entry is stored with status `failed`, a structured error value,
   a non-null `finished_at` timestamp, and no `dispatched_at` timestamp
 
-#### Scenario: Record cancelled handling
-- **WHEN** a caller marks a running entry cancelled through the backend contract
+#### Scenario: Reserve cancelled handling
+- **WHEN** a worker-internal lifecycle operation records a running entry as
+  cancelled
 - **THEN** the entry is stored with status `cancelled` and a non-null
   `finished_at` timestamp
-- **AND** no worker path produces this status: a handler that finishes during
-  shutdown records its own outcome and one that overruns records `timeout`, so
-  `cancelled` is reserved for a deliberate cancellation the queue does not yet
-  offer
+- **AND** no worker path currently produces this status: a handler that
+  finishes during shutdown records its own outcome and one that overruns
+  records `timeout`, so `cancelled` is reserved for a deliberate cancellation
+  the queue does not yet offer
 
 #### Scenario: Record a timed-out handling
 - **WHEN** a worker abandons a handler that exceeded its execution budget
