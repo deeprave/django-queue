@@ -29,6 +29,7 @@ __all__ = (
     "QueueEntry",
     "QueueEntryStatus",
     "QueueProvider",
+    "QueueRegistry",
     "QueueSubscription",
     "WorkerSnapshot",
     "aclose_queues",
@@ -46,14 +47,14 @@ DEFAULT_QUEUE_ALIAS = "default"
 _FORBIDDEN_QUEUE_ALIAS_CHARACTERS = frozenset("*?[]")
 
 
-class QueueHandler(BaseConnectionHandler):
+class QueueRegistry(BaseConnectionHandler):
     settings_name = "QUEUES"
     exception_class = InvalidQueueBackendError
 
     def __init__(self, settings=None) -> None:
         super().__init__(settings)
-        self._process_connections: dict[str, object] = {}
-        self._process_connections_lock = threading.RLock()
+        self._process_queues: dict[str, object] = {}
+        self._process_queues_lock = threading.RLock()
 
     def configure_settings(self, settings):
         if settings is None:
@@ -123,17 +124,17 @@ class QueueHandler(BaseConnectionHandler):
         if getattr(backend_cls, "requires_entry_class_at_construction", False):
             params["entry_class"] = entry_class
         if getattr(backend_cls, "connection_scope", "thread") == "process":
-            with self._process_connections_lock:
-                if (queue := self._process_connections.get(alias)) is not None:
+            with self._process_queues_lock:
+                if (queue := self._process_queues.get(alias)) is not None:
                     return queue
-                queue = self._build_connection(
+                queue = self._build_queue(
                     alias, backend_cls, location, params, entry_class
                 )
-                self._process_connections[alias] = queue
+                self._process_queues[alias] = queue
                 return queue
-        return self._build_connection(alias, backend_cls, location, params, entry_class)
+        return self._build_queue(alias, backend_cls, location, params, entry_class)
 
-    def _build_connection(
+    def _build_queue(
         self, alias: str, backend_cls, location: str, params: dict, entry_class
     ):
         try:
@@ -163,39 +164,37 @@ class QueueHandler(BaseConnectionHandler):
             queue.retention_timeout = retention_timeout
         if worker_class is not None:
             queue.worker_class = worker_class
-        if isinstance(queue, AsyncQueue):
-            queue.resolve_worker_class(alias)
-        elif isinstance(queue, EventQueue):
-            queue.resolve_event_worker_class(alias)
+        if isinstance(queue, AsyncQueue | EventQueue):
+            queue.resolve_worker(alias)
         queue_created.send(self, name=alias, instance=queue)
         return queue
 
 
-queues = QueueHandler()
+queues = QueueRegistry()
 
 queue = ConnectionProxy(queues, DEFAULT_QUEUE_ALIAS)
 
 
-def initialise_queues(queue_handler: QueueHandler | None = None) -> QueueHandler:
+def initialise_queues(registry: QueueRegistry | None = None) -> QueueRegistry:
     """Validate and construct every queue configured for this Django process."""
-    queue_handler = queues if queue_handler is None else queue_handler
-    for alias in queue_handler:
-        queue_handler[alias]
-    return queue_handler
+    registry = queues if registry is None else registry
+    for alias in registry:
+        registry[alias]
+    return registry
 
 
-def close_queues(queue_handler: QueueHandler | None = None, **kwargs) -> None:
+def close_queues(registry: QueueRegistry | None = None) -> None:
     """Synchronously release resources created through synchronous wrappers."""
-    (queues if queue_handler is None else queue_handler).close_all()
+    (queues if registry is None else registry).close_all()
 
 
-async def aclose_queues(queue_handler: QueueHandler | None = None) -> None:
+async def aclose_queues(registry: QueueRegistry | None = None) -> None:
     """Dispose configured queues from the loop that acquired their resources."""
-    queue_handler = queues if queue_handler is None else queue_handler
+    registry = queues if registry is None else registry
     results = await asyncio.gather(
         *(
             configured_queue.aclose()
-            for configured_queue in queue_handler.all(initialized_only=True)
+            for configured_queue in registry.all(initialized_only=True)
         ),
         return_exceptions=True,
     )

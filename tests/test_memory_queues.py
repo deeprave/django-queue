@@ -26,7 +26,7 @@ class TestMemoryAsyncQueueConfiguration:
     def test_uses_the_default_task_worker(self):
         queue = MemoryAsyncQueue()
 
-        assert queue.resolve_worker_class("tasks") is MemoryAsyncQueueWorker
+        assert queue.resolve_worker("tasks") is MemoryAsyncQueueWorker
 
     def test_rejects_a_redis_worker_for_a_memory_queue(self):
         queue = MemoryAsyncQueue(queue_name="tasks")

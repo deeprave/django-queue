@@ -30,8 +30,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from django_queue.event_worker import EventQueueWorker
-    from django_queue.worker import AsyncQueueWorker
-    from django_queue.worker import QueueHandler as QueueEntryHandler
+    from django_queue.worker import AsyncQueueWorker, Handler
 
 
 class BaseQueue(ABC):
@@ -71,40 +70,6 @@ class BaseQueue(ABC):
         """
         return self._clock or DEFAULT_CLOCK
 
-    def resolve_worker_class(self, alias: str) -> type[AsyncQueueWorker]:
-        """Import and validate this queue's configured worker class."""
-        # Imported here so the storage layer does not depend on the worker layer.
-        from django_queue.worker import AsyncQueueWorker
-
-        worker_class = self.worker_class
-        if isinstance(worker_class, str):
-            if not worker_class:
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' WORKER must be a non-empty dotted path"
-                )
-            try:
-                worker_class = import_string(worker_class)
-            except ImportError as exc:
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' WORKER could not be imported: {exc}"
-                ) from exc
-        if not isinstance(worker_class, type) or not issubclass(
-            worker_class, AsyncQueueWorker
-        ):
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' WORKER must be an AsyncQueueWorker subclass"
-            )
-        if worker_class.provider_kind != self.worker_provider_kind:
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' requires a {self.worker_provider_kind} worker"
-            )
-        if not self._worker_class_is_compatible(worker_class):
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' WORKER is not compatible with "
-                f"{type(self).__name__}"
-            )
-        return worker_class
-
     def _worker_class_is_compatible(self, worker_class: type) -> bool:
         compatible_worker_class = self.compatible_worker_class
         if isinstance(compatible_worker_class, str):
@@ -112,17 +77,6 @@ class BaseQueue(ABC):
         return (
             issubclass(worker_class, compatible_worker_class)
             and worker_class.provider_type == self.worker_provider_type
-        )
-
-    def create_worker(self, alias: str, handler: QueueEntryHandler) -> AsyncQueueWorker:
-        """Create this queue's configured worker when it becomes active.
-
-        The worker is given this queue's clock, so its recorded time and the
-        entries it dispatches share one basis. A configured WORKER subclass
-        overriding `__init__` must therefore accept a `clock` keyword.
-        """
-        return self.resolve_worker_class(alias)(
-            {alias: self}, {alias: handler}, clock=self.clock
         )
 
     @property
@@ -137,31 +91,31 @@ class BaseQueue(ABC):
         return self._run_synchronously(self.aadd, *items)
 
     async def aadd(self, *items) -> None:
-        await self._provider.aadd_item(*items)
+        await self._provider.aadd(*items)
 
     def get(self):
         return self._run_synchronously(self.aget)
 
     async def aget(self):
-        return await self._provider.aget_item()
+        return await self._provider.aget()
 
     def poll(self):
         return self._run_synchronously(self.apoll)
 
     async def apoll(self):
-        return await self._provider.apoll_item()
+        return await self._provider.apoll()
 
     def peek(self):
         return self._run_synchronously(self.apeek)
 
     async def apeek(self):
-        return await self._provider.apeek_item()
+        return await self._provider.apeek()
 
     def size(self):
         return self._run_synchronously(self.asize)
 
     async def asize(self):
-        return await self._provider.asize_items()
+        return await self._provider.asize()
 
     def is_empty(self):
         return self.size() == 0
@@ -173,7 +127,7 @@ class BaseQueue(ABC):
         return self._run_synchronously(self.aclear)
 
     async def aclear(self) -> None:
-        await self._provider.aclear_items()
+        await self._provider.aclear()
 
     def close(self):
         return async_to_sync(self.aclose)()
@@ -211,32 +165,32 @@ class BaseQueue(ABC):
         """
         raise NotImplementedError("aenqueue")
 
-    def get_entry(self, entry_id: UUID) -> QueueEntry:
-        return self._run_synchronously(self.aget_entry, entry_id)
+    def find(self, entry_id: UUID) -> QueueEntry:
+        return self._run_synchronously(self.afind, entry_id)
 
     @abstractmethod
-    async def aget_entry(self, entry_id: UUID) -> QueueEntry:
+    async def afind(self, entry_id: UUID) -> QueueEntry:
         """Return the retained entry record for *entry_id*."""
-        raise NotImplementedError("aget_entry")
+        raise NotImplementedError("afind")
 
-    async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
+    async def apublish(self, entry: QueueEntry) -> None:
         """Best-effort publish one worker-observed lifecycle snapshot."""
 
-    def dequeue_entry(self) -> QueueEntry:
-        return self._run_synchronously(self.adequeue_entry)
+    def dequeue(self) -> QueueEntry:
+        return self._run_synchronously(self.adequeue)
 
     @abstractmethod
-    async def adequeue_entry(self) -> QueueEntry:
+    async def adequeue(self) -> QueueEntry:
         """Remove and return the next pending entry (best effort)."""
-        raise NotImplementedError("adequeue_entry")
+        raise NotImplementedError("adequeue")
 
-    def has_pending_entries(self) -> bool:
-        return self._run_synchronously(self.ahas_pending_entries)
+    def has_pending(self) -> bool:
+        return self._run_synchronously(self.ahas_pending)
 
     @abstractmethod
-    async def ahas_pending_entries(self) -> bool:
+    async def ahas_pending(self) -> bool:
         """Return whether an entry worker can dequeue pending work."""
-        raise NotImplementedError("ahas_pending_entries")
+        raise NotImplementedError("ahas_pending")
 
     def __len__(self):
         return self.size()
@@ -250,7 +204,52 @@ class AsyncQueue(BaseQueue):
 
     retention_timeout: float | None = 600
 
-    def _lifecycle_snapshot_receiver(
+    def resolve_worker(self, alias: str) -> type[AsyncQueueWorker]:
+        """Import and validate this queue's configured worker class."""
+        # Imported here so the storage layer does not depend on the worker layer.
+        from django_queue.worker import AsyncQueueWorker
+
+        worker_class = self.worker_class
+        if isinstance(worker_class, str):
+            if not worker_class:
+                raise InvalidQueueBackendError(
+                    f"Queue alias '{alias}' WORKER must be a non-empty dotted path"
+                )
+            try:
+                worker_class = import_string(worker_class)
+            except ImportError as exc:
+                raise InvalidQueueBackendError(
+                    f"Queue alias '{alias}' WORKER could not be imported: {exc}"
+                ) from exc
+        if not isinstance(worker_class, type) or not issubclass(
+            worker_class, AsyncQueueWorker
+        ):
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' WORKER must be an AsyncQueueWorker subclass"
+            )
+        if worker_class.provider_kind != self.worker_provider_kind:
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' requires a {self.worker_provider_kind} worker"
+            )
+        if not self._worker_class_is_compatible(worker_class):
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' WORKER is not compatible with "
+                f"{type(self).__name__}"
+            )
+        return worker_class
+
+    def create_worker(self, alias: str, handler: Handler) -> AsyncQueueWorker:
+        """Create this queue's configured worker when it becomes active.
+
+        The worker is given this queue's clock, so its recorded time and the
+        entries it dispatches share one basis. A configured WORKER subclass
+        overriding `__init__` must therefore accept a `clock` keyword.
+        """
+        return self.resolve_worker(alias)(
+            {alias: self}, {alias: handler}, clock=self.clock
+        )
+
+    def _observer_receiver(
         self, on_snapshot: Callable[[QueueEntry], None]
     ) -> Callable[[], None] | None:
         """Return this backend's optional cross-process lifecycle receiver."""
@@ -273,23 +272,21 @@ class AsyncQueue(BaseQueue):
         send_entry_enqueued(self, entry=entry)
         return entry.id
 
-    async def aget_entry(self, entry_id: UUID) -> QueueEntry:
+    async def afind(self, entry_id: UUID) -> QueueEntry:
         self._configure_provider_entry_class()
-        return await self._provider.aget(entry_id)
+        return await self._provider.afind(entry_id)
 
     async def alist(self) -> builtins.list[QueueEntry]:
         """Return retained entry snapshots for observation and administration."""
         self._configure_provider_entry_class()
         return await self._provider.alist()
 
-    async def aprune_entry(self, entry_id: UUID) -> None:
+    async def aprune(self, entry_id: UUID) -> None:
         self._configure_provider_entry_class()
         entry = await self._provider.aprune(entry_id)
-        await self.apublish_lifecycle_snapshot(
-            replace(entry, status=QueueEntryStatus.TERMINATED)
-        )
+        await self.apublish(replace(entry, status=QueueEntryStatus.TERMINATED))
 
-    async def _aprune_expired_entries(self) -> int:
+    async def _aprune_expired(self) -> int:
         if self.retention_timeout is None:
             return 0
         now = await self.clock.anow()
@@ -303,17 +300,17 @@ class AsyncQueue(BaseQueue):
         pruned = 0
         for entry_id in expired_entry_ids:
             try:
-                await self.aprune_entry(entry_id)
+                await self.aprune(entry_id)
             except QueueEntryNotFoundError:
                 continue
             pruned += 1
         return pruned
 
-    async def adequeue_entry(self) -> QueueEntry:
+    async def adequeue(self) -> QueueEntry:
         self._configure_provider_entry_class()
         return await self._provider.apop()
 
-    async def ahas_pending_entries(self) -> bool:
+    async def ahas_pending(self) -> bool:
         return await self._provider.ahas_pending()
 
     def _mark_running(self, entry_id: UUID) -> QueueEntry:
@@ -375,9 +372,9 @@ class AsyncQueue(BaseQueue):
         """Synchronously return retained entry snapshots."""
         return self._run_synchronously(self.alist)
 
-    def prune_entry(self, entry_id: UUID) -> None:
+    def prune(self, entry_id: UUID) -> None:
         """Remove one retained terminal entry and publish its final snapshot."""
-        return self._run_synchronously(self.aprune_entry, entry_id)
+        return self._run_synchronously(self.aprune, entry_id)
 
     async def _areplace_entry(
         self, entry_id: UUID, *, status: QueueEntryStatus, **changes
@@ -388,7 +385,7 @@ class AsyncQueue(BaseQueue):
             raise ValueError(
                 "Terminated queue entry snapshots are only published by pruning"
             )
-        previous_entry = await self.aget_entry(entry_id)
+        previous_entry = await self.afind(entry_id)
         if status not in previous_entry.status.next_state():
             raise ValueError(
                 f"Cannot transition queue entry from {previous_entry.status} to {status}"
@@ -402,7 +399,7 @@ class AsyncQueue(BaseQueue):
             await self._provider.adiscard(entry_id)
         return entry
 
-    def _initialise_lifecycle_observers(self) -> None:
+    def _initialise_observers(self) -> None:
         """Initialise the process-local observer state owned by this queue."""
         self._lifecycle_observer_lock = threading.RLock()
         self._lifecycle_observers = None
@@ -448,11 +445,11 @@ class EventQueue(BaseQueue):
         await self._provider.apush(entry.id)
         return entry.id
 
-    async def aget_entry(self, entry_id: UUID) -> QueueEntry:
+    async def afind(self, entry_id: UUID) -> QueueEntry:
         self._configure_provider_entry_class()
-        return await self._provider.aget(entry_id)
+        return await self._provider.afind(entry_id)
 
-    async def ahas_pending_entries(self) -> bool:
+    async def ahas_pending(self) -> bool:
         await self._aprune_expired()
         return await self._provider.ahas_pending()
 
@@ -470,7 +467,7 @@ class EventQueue(BaseQueue):
             self._event_worker_pid = pid
         return worker_id
 
-    def resolve_event_worker_class(self, alias: str) -> type[EventQueueWorker]:
+    def resolve_worker(self, alias: str) -> type[EventQueueWorker]:
         """Import and validate this event queue's configured worker class."""
         from django_queue.event_worker import EventQueueWorker
 
@@ -503,9 +500,9 @@ class EventQueue(BaseQueue):
             )
         return worker_class
 
-    def create_event_worker(self, alias: str) -> EventQueueWorker:
+    def create_worker(self, alias: str) -> EventQueueWorker:
         """Create this queue's local listener worker."""
-        return self.resolve_event_worker_class(alias)(self, alias=alias)
+        return self.resolve_worker(alias)(self, alias=alias)
 
     def _resolve_lifetime(self, timeout_seconds: float | None) -> float:
         """Resolve an event's unconsumed lifetime from its available context."""
@@ -517,14 +514,14 @@ class EventQueue(BaseQueue):
             else self.default_lifetime_seconds
         )
 
-    async def adequeue_entry(self) -> QueueEntry:
+    async def adequeue(self) -> QueueEntry:
         """Return and consume an event without exposing a claim owner.
 
         Listener workers need an owned claim while they decide whether to
         consume or retry. Direct queue consumers instead delegate one atomic
         consume operation to the provider.
         """
-        return await self._provider.adequeue_event()
+        return await self._provider.adequeue()
 
     async def _aprune_expired(self) -> int:
         """Remove unconsumed events whose configured lifetime elapsed."""

@@ -13,7 +13,7 @@ from django_queue.backends.base import EventQueue
 logger = logging.getLogger(__name__)
 
 
-class ConfiguredQueueLookup(Protocol):
+class QueueLookup(Protocol):
     """Configured queue aliases and their lazily-built queue instances."""
 
     def __iter__(self) -> Iterator[str]: ...
@@ -36,7 +36,7 @@ class EventRuntime:
         self._queues: dict[str, EventQueue] = {}
         self._closed = False
 
-    def start_configured(self, queues: ConfiguredQueueLookup) -> None:
+    def start(self, queues: QueueLookup) -> None:
         """Start or reuse dispatchers for every configured event queue."""
         with self._lock:
             if self._closed:
@@ -124,7 +124,7 @@ class EventRuntime:
         delay = self.restart_initial_delay
         while True:
             try:
-                await queue.create_event_worker(alias).run()
+                await queue.create_worker(alias).run()
             except asyncio.CancelledError:
                 raise
             except Exception:

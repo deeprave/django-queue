@@ -29,7 +29,7 @@ def test_event_worker_removes_a_consumed_event(monkeypatch):
         await queue.aenqueue("event")
         assert await MemoryEventQueueWorker(queue).adispatch_once()
         assert received == ["event"]
-        assert not await queue.ahas_pending_entries()
+        assert not await queue.ahas_pending()
         await queue.aclose()
 
     asyncio.run(exercise())
@@ -94,7 +94,7 @@ def test_event_worker_skips_filters_and_removes_rejections(monkeypatch, caplog):
     async def exercise():
         await queue.aenqueue("event")
         assert await MemoryEventQueueWorker(queue).adispatch_once()
-        assert not await queue.ahas_pending_entries()
+        assert not await queue.ahas_pending()
         await queue.aclose()
 
     asyncio.run(exercise())
@@ -189,7 +189,7 @@ def test_event_worker_treats_a_failed_renewal_as_lost_ownership(monkeypatch, cap
             super().__init__(queue)
             self.entry = entry
 
-        async def _next_event(self) -> tuple[QueueEntry, float | None] | None:
+        async def _next(self) -> tuple[QueueEntry, float | None] | None:
             return self.entry, 1
 
         async def _renew_claim(self, entry: QueueEntry, lease_seconds: float) -> bool:
@@ -210,9 +210,9 @@ def test_event_worker_treats_a_failed_renewal_as_lost_ownership(monkeypatch, cap
 
     async def exercise():
         entry_id = await queue.aenqueue("event")
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert await FailingRenewalWorker(queue, entry).adispatch_once()
-        assert await queue.ahas_pending_entries()
+        assert await queue.ahas_pending()
         await queue.aclose()
 
     asyncio.run(exercise())
@@ -237,7 +237,7 @@ def test_redis_event_worker_dispatches_an_event(redis_client, monkeypatch):
     async def exercise():
         await queue.aenqueue("event")
         assert await RedisEventQueueWorker(queue).adispatch_once()
-        assert not await queue.ahas_pending_entries()
+        assert not await queue.ahas_pending()
         await queue.aclose()
 
     asyncio.run(exercise())

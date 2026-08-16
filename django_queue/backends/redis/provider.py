@@ -440,7 +440,7 @@ class QueueProviderRedis:
     def stack(self) -> bool:
         return self._stack
 
-    async def aadd_item(self, *items: str) -> None:
+    async def aadd(self, *items: str) -> None:
         if not items:
             return
         client = self._async_redis()
@@ -452,7 +452,7 @@ class QueueProviderRedis:
             *(self.encode(item, self._encoding) for item in items if item is not None),
         )
 
-    async def aget_item(self) -> str:
+    async def aget(self) -> str:
         client = self._async_redis()
         item = (
             await client.rpop(self._queue_name)
@@ -463,7 +463,7 @@ class QueueProviderRedis:
             raise QueueEmptyException
         return self.decode(item, self._encoding)
 
-    async def apoll_item(self) -> str:
+    async def apoll(self) -> str:
         client = self._async_redis()
         item = (
             await client.brpop([self._queue_name], 0)
@@ -474,7 +474,7 @@ class QueueProviderRedis:
             raise QueueEmptyException
         return self.decode(item[1], self._encoding)
 
-    async def apeek_item(self) -> str:
+    async def apeek(self) -> str:
         client = self._async_redis()
         values = (
             await client.lrange(self._queue_name, -1, -1)
@@ -485,13 +485,13 @@ class QueueProviderRedis:
             raise QueueEmptyException
         return self.decode(values[0], self._encoding)
 
-    async def asize_items(self) -> int:
+    async def asize(self) -> int:
         return await self._async_redis().llen(self._queue_name)
 
-    async def aclear_items(self) -> None:
+    async def aclear(self) -> None:
         await self._async_redis().delete(self._queue_name)
 
-    async def aclear_entries(self) -> None:
+    async def aclear_records(self) -> None:
         """Remove all Redis state owned by this queue's retained entries.
 
         This is deliberately provider-local: it supports the bundled demo's
@@ -503,9 +503,9 @@ class QueueProviderRedis:
             keys.append(key)
         await client.delete(*keys)
 
-    async def aadd_priority_items(self, *items) -> None:
+    async def aadd_priority(self, *items) -> None:
         for priority, value in items:
-            if self._maxsize and await self.asize_priority_items() >= self._maxsize:
+            if self._maxsize and await self.asize_priority() >= self._maxsize:
                 raise QueueFullException
             await self._async_redis().zadd(
                 self._queue_name,
@@ -513,7 +513,7 @@ class QueueProviderRedis:
                 nx=True,
             )
 
-    async def aget_priority_item(self) -> str:
+    async def aget_priority(self) -> str:
         if item := await self._async_redis().zrevrange(
             self._queue_name, 0, 0, withscores=False
         ):
@@ -526,13 +526,13 @@ class QueueProviderRedis:
             return self.decode(member, self._encoding)
         raise QueueEmptyException
 
-    async def apoll_priority_item(self, timeout: int = 0, retries: int = 10) -> str:
+    async def apoll_priority(self, timeout: int = 0, retries: int = 10) -> str:
         """Remove the highest-priority item, waiting for each attempt."""
         attempt = retries
         while retries == 0 or attempt > 0:
             attempt -= 1
             try:
-                return await self.aget_priority_item()
+                return await self.aget_priority()
             except QueueEmptyException:
                 if timeout <= 0:
                     raise
@@ -542,17 +542,17 @@ class QueueProviderRedis:
                     return self.decode(item[1], self._encoding)
         raise QueueEmptyException
 
-    async def apeek_priority_item(self) -> str:
+    async def apeek_priority(self) -> str:
         if item := await self._async_redis().zrevrange(
             self._queue_name, 0, 0, withscores=False
         ):
             return self.decode(item[0], self._encoding)
         raise QueueEmptyException
 
-    async def asize_priority_items(self) -> int:
+    async def asize_priority(self) -> int:
         return await self._async_redis().zcard(self._queue_name)
 
-    async def aclear_priority_items(self) -> None:
+    async def aclear_priority(self) -> None:
         await self._async_redis().delete(self._queue_name)
 
     def _entry_key(self, entry_id: uuid.UUID) -> str:
@@ -593,7 +593,7 @@ class QueueProviderRedis:
         """Return an isolated synchronous client for observer Pub/Sub."""
         return redis.Redis.from_url(self._redis_url)
 
-    def receive_lifecycle_snapshots(self, on_snapshot) -> None:
+    def observe(self, on_snapshot) -> None:
         """Receive and decode lifecycle snapshots through provider-owned Pub/Sub."""
         client = self._observer_redis_client()
         pubsub = client.pubsub(ignore_subscribe_messages=True)
@@ -615,7 +615,7 @@ class QueueProviderRedis:
             pubsub.close()
             client.close()
 
-    async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
+    async def apublish(self, entry: QueueEntry) -> None:
         await self._async_redis().publish(
             self.lifecycle_channel, json.dumps(entry.to_dict())
         )
@@ -654,7 +654,7 @@ class QueueProviderRedis:
             },
         )
 
-    async def aget(self, entry_id: uuid.UUID) -> QueueEntry:
+    async def afind(self, entry_id: uuid.UUID) -> QueueEntry:
         raw = await self._async_redis().get(self._entry_key(entry_id))
         if raw is None:
             raise QueueEntryNotFoundError(entry_id)
@@ -729,7 +729,7 @@ class QueueProviderRedis:
         )
         if raw_entry_id is None:
             raise QueueEmptyException
-        return await self.aget(uuid.UUID(self.decode(raw_entry_id, "ascii")))
+        return await self.afind(uuid.UUID(self.decode(raw_entry_id, "ascii")))
 
     async def adiscard(self, entry_id: uuid.UUID) -> None:
         await self._async_redis().lrem(
@@ -753,7 +753,7 @@ class QueueProviderRedis:
     ) -> QueueEntry:
         return await self._aclaim(worker_id, lease_seconds, expire_unclaimed=True)
 
-    async def adequeue_event(self) -> QueueEntry:
+    async def adequeue(self) -> QueueEntry:
         """Atomically remove and return the next unclaimed live event."""
         client = self._async_redis()
         outcome, raw_entry = await self._async_scripts_by_loop[
@@ -819,7 +819,7 @@ class QueueProviderRedis:
         if outcome != "claimed":
             raise QueueValueError(f"Unknown Redis claim outcome: {outcome!r}")
         try:
-            return await self.aget(entry_id)
+            return await self.afind(entry_id)
         except QueueEntryNotFoundError as exc:
             raise QueueEntryMissingError(entry_id) from exc
 
@@ -946,7 +946,7 @@ class QueueProviderRedis:
         return int(recovered), int(discarded)
 
     async def aprune(self, entry_id: uuid.UUID) -> QueueEntry:
-        entry = await self.aget(entry_id)
+        entry = await self.afind(entry_id)
         if QueueEntryStatus.TERMINATED not in entry.status.next_state():
             raise ValueError("Only terminal queue entries can be pruned")
         self._async_redis()

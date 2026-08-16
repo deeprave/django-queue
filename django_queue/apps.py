@@ -7,7 +7,7 @@ def _start_event_runtime_on_request(**kwargs) -> None:
     from django_queue import initialise_queues
     from django_queue.event_runtime import event_runtime
 
-    event_runtime.start_configured(initialise_queues())
+    event_runtime.start(initialise_queues())
 
 
 class DjangoQueueConfig(AppConfig):

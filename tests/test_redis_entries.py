@@ -27,7 +27,7 @@ async def _run_until_terminal(queue, entry_id, handler):
     )
     task = asyncio.create_task(worker.run())
     try:
-        while (await queue.aget_entry(entry_id)).status not in {
+        while (await queue.afind(entry_id)).status not in {
             QueueEntryStatus.SUCCEEDED,
             QueueEntryStatus.FAILED,
         }:
@@ -38,9 +38,9 @@ async def _run_until_terminal(queue, entry_id, handler):
             await task
 
 
-def test_get_entry_reports_a_missing_retained_entry(redis_entry_queue):
+def test_find_reports_a_missing_retained_record(redis_entry_queue):
     with pytest.raises(QueueEntryNotFoundError):
-        redis_entry_queue.get_entry(uuid4())
+        redis_entry_queue.find(uuid4())
 
 
 def test_prunes_a_terminal_entry(redis_entry_queue):
@@ -56,19 +56,19 @@ def test_prunes_a_terminal_entry(redis_entry_queue):
 
     entry_id = asyncio.run(exercise())
 
-    redis_entry_queue.prune_entry(entry_id)
+    redis_entry_queue.prune(entry_id)
 
     with pytest.raises(QueueEntryNotFoundError):
-        redis_entry_queue.get_entry(entry_id)
+        redis_entry_queue.find(entry_id)
 
 
 def test_prune_refuses_a_non_terminal_entry(redis_entry_queue):
     entry_id = redis_entry_queue.enqueue("work")
 
     with pytest.raises(ValueError, match="terminal"):
-        redis_entry_queue.prune_entry(entry_id)
+        redis_entry_queue.prune(entry_id)
 
-    assert redis_entry_queue.get_entry(entry_id).status is QueueEntryStatus.QUEUED
+    assert redis_entry_queue.find(entry_id).status is QueueEntryStatus.QUEUED
 
 
 def test_list_returns_retained_entry_snapshots(redis_client):
@@ -98,10 +98,10 @@ def test_direct_dequeue_is_atomic_and_fifo(redis_entry_queue):
     first_id = redis_entry_queue.enqueue("first")
     second_id = redis_entry_queue.enqueue("second")
 
-    assert redis_entry_queue.dequeue_entry().id == first_id
-    assert redis_entry_queue.dequeue_entry().id == second_id
+    assert redis_entry_queue.dequeue().id == first_id
+    assert redis_entry_queue.dequeue().id == second_id
     with pytest.raises(QueueEmptyException):
-        redis_entry_queue.dequeue_entry()
+        redis_entry_queue.dequeue()
 
 
 def test_raw_values_and_retained_entries_are_independent(redis_entry_queue):
@@ -109,7 +109,7 @@ def test_raw_values_and_retained_entries_are_independent(redis_entry_queue):
     entry_id = redis_entry_queue.enqueue({"request_id": 42})
 
     assert redis_entry_queue.get() == "raw-value"
-    assert redis_entry_queue.get_entry(entry_id).payload == {"request_id": 42}
+    assert redis_entry_queue.find(entry_id).payload == {"request_id": 42}
 
 
 def test_redis_queue_restores_the_configured_entry_class(redis_client):
@@ -121,7 +121,7 @@ def test_redis_queue_restores_the_configured_entry_class(redis_client):
 
     async def exercise():
         entry_id = await queue.aenqueue("work")
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         await queue.aclose()
         return entry
 
@@ -138,7 +138,7 @@ def test_redis_worker_records_success(redis_client):
             return entry.payload
 
         await _run_until_terminal(queue, entry_id, handle)
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         await queue.aclose()
         return entry
 
@@ -158,7 +158,7 @@ def test_redis_worker_records_failure(redis_client):
             raise ValueError(entry.payload)
 
         await _run_until_terminal(queue, entry_id, handle)
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         await queue.aclose()
         return entry
 
@@ -171,7 +171,7 @@ def test_redis_worker_records_failure(redis_client):
 def test_pruning_publishes_a_terminated_snapshot_to_an_observer(
     redis_client, monkeypatch
 ):
-    handler = django_queue.QueueHandler(
+    handler = django_queue.QueueRegistry(
         {
             "requests": {
                 "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
@@ -204,7 +204,7 @@ def test_pruning_publishes_a_terminated_snapshot_to_an_observer(
 
         entry_id = asyncio.run(complete_entry())
         time.sleep(0.05)
-        queue.prune_entry(entry_id)
+        queue.prune(entry_id)
 
         assert terminated.wait(1)
         assert snapshots[-1].status is QueueEntryStatus.TERMINATED

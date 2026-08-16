@@ -66,7 +66,7 @@ class _QueueObservers:
                 )
                 self.dispatcher.start()
             if self.receiver is None:
-                receiver = self.queue._lifecycle_snapshot_receiver(self.publish)
+                receiver = self.queue._observer_receiver(self.publish)
                 if receiver is not None:
                     self.receiver = threading.Thread(
                         target=self._run_receiver,
@@ -241,7 +241,7 @@ def _queue_for_name(queue_name: str) -> AsyncQueue:
     return queues[queue_name]
 
 
-def publish_snapshot(queue: AsyncQueue, entry: QueueEntry) -> None:
+def publish(queue: AsyncQueue, entry: QueueEntry) -> None:
     """Submit a lifecycle snapshot to one queue's local observers.
 
     A final ``terminated`` snapshot is observer-only and is never retained.

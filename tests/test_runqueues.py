@@ -13,7 +13,7 @@ from django_queue.backends import MemoryAsyncQueue
 from django_queue.backends.memory import MemoryAsyncQueueWorker
 from django_queue.management.commands.runqueues import (
     Command,
-    ConfiguredWorkerActivation,
+    WorkerActivation,
 )
 from django_queue.worker import AsyncQueueWorker
 
@@ -53,7 +53,7 @@ class TestRunQueuesCommand:
     def test_exits_successfully_when_no_queue_handlers_are_configured(
         self, monkeypatch
     ):
-        monkeypatch.setattr(django_queue, "queues", django_queue.QueueHandler({}))
+        monkeypatch.setattr(django_queue, "queues", django_queue.QueueRegistry({}))
         output = StringIO()
 
         Command(stdout=output).handle()
@@ -68,7 +68,7 @@ class TestRunQueuesCommand:
     async def _starts_workers_only_when_configured_queues_have_entries(
         self, monkeypatch
     ):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "first": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -102,8 +102,8 @@ class TestRunQueuesCommand:
         second_id = await queues["second"].aenqueue("second")
 
         async def entries_completed():
-            first = await queues["first"].aget_entry(first_id)
-            second = await queues["second"].aget_entry(second_id)
+            first = await queues["first"].afind(first_id)
+            second = await queues["second"].afind(second_id)
             return first.result is not None and second.result is not None
 
         await asyncio.wait_for(
@@ -113,12 +113,8 @@ class TestRunQueuesCommand:
         shutdown.set()
         await asyncio.wait_for(task, timeout=1)
 
-        assert (await queues["first"].aget_entry(first_id)).result == {
-            "handled": "first"
-        }
-        assert (await queues["second"].aget_entry(second_id)).result == {
-            "handled": "second"
-        }
+        assert (await queues["first"].afind(first_id)).result == {"handled": "first"}
+        assert (await queues["second"].afind(second_id)).result == {"handled": "second"}
         assert TrackingWorker.instances == 2
         assert set(output.getvalue().splitlines()) == {
             "Started queue handler for first.",
@@ -129,7 +125,7 @@ class TestRunQueuesCommand:
         asyncio.run(self._reports_each_queue_alias_as_its_worker_starts(monkeypatch))
 
     async def _reports_each_queue_alias_as_its_worker_starts(self, monkeypatch):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "first": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -164,7 +160,7 @@ class TestRunQueuesCommand:
         assert output.getvalue() == "Started queue handler for first.\n"
 
     def test_rejects_an_invalid_handler_path_before_starting_workers(self, monkeypatch):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -179,7 +175,7 @@ class TestRunQueuesCommand:
             Command().handle()
 
     def test_rejects_an_invalid_worker_before_starting_workers(self, monkeypatch):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -195,7 +191,7 @@ class TestRunQueuesCommand:
             Command().handle()
 
     def test_rejects_an_invalid_entry_class_before_starting_workers(self, monkeypatch):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -213,7 +209,7 @@ class TestRunQueuesCommand:
     def test_does_not_construct_a_worker_while_validating_configuration(
         self, monkeypatch
     ):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -233,7 +229,7 @@ class TestRunQueuesCommand:
     def test_rejects_a_non_asynchronous_handler_before_starting_workers(
         self, monkeypatch
     ):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -248,7 +244,7 @@ class TestRunQueuesCommand:
             Command().handle()
 
     def test_accepts_an_asynchronous_callable_object(self, monkeypatch):
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -262,14 +258,11 @@ class TestRunQueuesCommand:
         activations = Command()._create_workers()
 
         assert len(activations) == 1
-        assert (
-            activations[0].queue.resolve_worker_class("default")
-            is MemoryAsyncQueueWorker
-        )
+        assert activations[0].queue.resolve_worker("default") is MemoryAsyncQueueWorker
 
     def test_activates_each_worker_on_its_own_queue_clock(self, monkeypatch):
         """The shared time basis has to hold where workers are really built."""
-        queues = django_queue.QueueHandler(
+        queues = django_queue.QueueRegistry(
             {
                 "default": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -300,8 +293,8 @@ class TestRunQueuesCommand:
         task = asyncio.create_task(
             Command()._run_configured_workers(
                 [
-                    ConfiguredWorkerActivation("healthy", healthy_queue, handle_entry),
-                    ConfiguredWorkerActivation("failed", failed_queue, handle_entry),
+                    WorkerActivation("healthy", healthy_queue, handle_entry),
+                    WorkerActivation("failed", failed_queue, handle_entry),
                 ],
                 shutdown,
             )
@@ -339,8 +332,8 @@ class TestRunQueuesCommand:
         task = asyncio.create_task(
             Command()._run_configured_workers(
                 [
-                    ConfiguredWorkerActivation("idle", idle_queue, handle_entry),
-                    ConfiguredWorkerActivation("failed", failed_queue, handle_entry),
+                    WorkerActivation("idle", idle_queue, handle_entry),
+                    WorkerActivation("failed", failed_queue, handle_entry),
                 ],
                 shutdown,
             )
@@ -360,7 +353,7 @@ class TestRunQueuesCommand:
         idle_entry_id = await idle_queue.aenqueue("idle work")
 
         async def idle_entry_completed():
-            entry = await idle_queue.aget_entry(idle_entry_id)
+            entry = await idle_queue.afind(idle_entry_id)
             return entry.result is not None
 
         await asyncio.wait_for(
@@ -388,7 +381,7 @@ class TestRunQueuesCommand:
 
         with pytest.raises(RuntimeError, match="backend failed"):
             await Command()._run_configured_workers(
-                [ConfiguredWorkerActivation("default", queue, handle_entry)]
+                [WorkerActivation("default", queue, handle_entry)]
             )
 
     def test_shutdown_request_cancels_and_awaits_workers(self):
@@ -408,7 +401,7 @@ class TestRunQueuesCommand:
         await queue.aenqueue("work")
         task = asyncio.create_task(
             Command()._run_configured_workers(
-                [ConfiguredWorkerActivation("default", queue, handler)],
+                [WorkerActivation("default", queue, handler)],
                 shutdown,
             )
         )
@@ -483,6 +476,6 @@ class ExplodingQueue(MemoryAsyncQueue):
         super().__init__(*args, **kwargs)
         self.dequeue_started = threading.Event()
 
-    async def adequeue_entry(self):
+    async def adequeue(self):
         self.dequeue_started.set()
         raise RuntimeError("backend failed")

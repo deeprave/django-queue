@@ -19,33 +19,33 @@ class MemoryAsyncPriorityQueue(AsyncQueue):
             clock=self._clock,
             maxsize=maxsize,
         )
-        self._initialise_lifecycle_observers()
+        self._initialise_observers()
 
     async def aadd(self, *items):
-        await self._provider.aadd_priority_items(*items)
+        await self._provider.aadd_priority(*items)
 
     async def aget(self):
-        return await self._provider.aget_priority_item()
+        return await self._provider.aget_priority()
 
     async def apoll(self):
-        return await self._provider.apoll_priority_item()
+        return await self._provider.apoll_priority()
 
     async def apeek(self):
-        return await self._provider.apeek_priority_item()
+        return await self._provider.apeek_priority()
 
     async def asize(self):
-        return await self._provider.asize_priority_items()
+        return await self._provider.asize_priority()
 
     async def aclear(self):
-        await self._provider.aclear_priority_items()
+        await self._provider.aclear_priority()
 
     aenqueue = MemoryAsyncQueue.aenqueue
-    aget_entry = MemoryAsyncQueue.aget_entry
-    aprune_entry = MemoryAsyncQueue.aprune_entry
-    _aprune_expired_entries = MemoryAsyncQueue._aprune_expired_entries
-    apublish_lifecycle_snapshot = MemoryAsyncQueue.apublish_lifecycle_snapshot
-    adequeue_entry = MemoryAsyncQueue.adequeue_entry
-    ahas_pending_entries = MemoryAsyncQueue.ahas_pending_entries
+    afind = MemoryAsyncQueue.afind
+    aprune = MemoryAsyncQueue.aprune
+    _aprune_expired = MemoryAsyncQueue._aprune_expired
+    apublish = MemoryAsyncQueue.apublish
+    adequeue = MemoryAsyncQueue.adequeue
+    ahas_pending = MemoryAsyncQueue.ahas_pending
     _amark_running = MemoryAsyncQueue._amark_running
     _amark_succeeded = MemoryAsyncQueue._amark_succeeded
     _amark_failed = MemoryAsyncQueue._amark_failed

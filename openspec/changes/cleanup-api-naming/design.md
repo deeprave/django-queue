@@ -25,6 +25,12 @@ unreleased, so no compatibility layer is required or desired.
 - Renaming persisted Redis key formats, entry fields, or Django settings unless
   the API inventory identifies a user-facing naming conflict.
 
+The documented Django settings remain `BACKEND`, `LOCATION`, `HANDLER`,
+`WORKER`, `ENTRY_CLASS`, `TIMEOUT`, and `RETENTION_TIMEOUT`: they are explicit
+configuration names, not redundant callable names. A configured queue's name
+comes only from its `QUEUES` mapping alias; `queue_name` is never a supported
+setting.
+
 ## Decisions
 
 ### Audit the complete surface before choosing individual replacements
@@ -63,6 +69,34 @@ decides each case.
 Remove the old spellings from source, tests, documentation, and specs in the
 same change. Do not provide aliases, fallback imports, deprecation warnings, or
 dual configuration keys.
+
+### Adopt the agreed canonical vocabulary
+
+The public lifecycle-record vocabulary is `find` / `afind`, `dequeue` /
+`adequeue`, `has_pending` / `ahas_pending`, and `prune` / `aprune`. `alist`
+remains the retained-record collection operation, while `apublish` names the
+worker-to-observer publication of one immutable record. Raw queue-value
+operations remain `add`, `get`, `poll`, `peek`, `size`, and `clear`, because
+they operate on a different domain from retained lifecycle records.
+
+Provider primitive names similarly use the shortest established action name;
+the provider remains an internal resource and is not exposed by queue facades.
+The configured registry is `QueueRegistry`, a callable queue handler is
+`Handler`, and worker activation metadata is `WorkerActivation`.
+
+`QueueEntryNotFoundError` and `QueueEntryMissingError` remain distinct. The
+former reports an application lookup or prune request for an absent retained
+record; the latter is an internal worker/provider recovery condition for a
+claimed identifier whose backing record disappeared.
+
+### Document semantic queue types before storage backends
+
+README documentation first distinguishes `AsyncQueue` from `EventQueue`.
+Async queues retain lifecycle records and are dispatched by async handlers and
+workers; event queues deliver transient events to registered listeners. Memory
+and Redis are then presented as storage/delivery backend choices within those
+semantic queue types. The configuration examples place one minimal async queue
+and one minimal event queue side by side.
 
 ## Risks / Trade-offs
 

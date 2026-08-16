@@ -7,29 +7,37 @@ This is an implementation of message queues for Django.
 `django-queue` requires Python 3.14 or later. Queue entry IDs use the
 standard-library UUIDv7 implementation introduced in Python 3.14.
 
-## Message Queues
+## Choose a queue type
 
-What are message queues? In Django, message queues enable independent and decoupled communication between parts of an
-application or with external systems. For instance, one app can generate messages for another app to consume, avoiding
-direct dependencies. This module implements a simple mechanism where a sender publishes messages, and consumers read and
-remove them from the queue.
+Choose the semantic queue type first; choose its memory or Redis backend second.
 
-This module supports various queue types: first-in-first-out (FIFO), last-in-first-out (LIFO or stacks), and priority
-queues, where messages with higher priority are consumed before lower-priority ones, regardless of their addition order.
+| Choose | Use it for | Classes | Consumer model | Retention |
+| --- | --- | --- | --- | --- |
+| **Async queue** | Work that runs later and whose progress or outcome must be inspectable | `MemoryAsyncQueue`, `RedisAsyncQueue`, and their stack/priority variants | An async `HANDLER`, normally run by `manage.py runqueues` | A durable lifecycle: `queued`, `running`, then `succeeded`, `failed`, or `timeout` until pruning |
+| **Event queue** | Short-lived notifications delivered to local listeners | `MemoryEventQueue`, `RedisEventQueue` | `@queue_listener`; Django starts the event runtime when the process first handles a request | Consumed, retried, or expired; no durable outcome record |
 
-## Implementation
+Async queues are the right choice when a producer needs to find a later result,
+observe lifecycle progress, or retain completed work temporarily. Event queues
+are the right choice when registered listeners should react to a transient
+event and no result needs to be retrieved afterwards.
 
-This module currently implements two types of queues. Both use the same interface and are, to some extent,
-interchangeable:
+## Backend choices
 
-- **memory queues**: non-persistent and available only while the application is running.
-- **redis queues**: persistent queues backed by a Redis server.
+- **Memory** queues exist only while the application process runs. Configured
+  `MemoryAsyncQueue` instances are local to the resolving process and thread;
+  `MemoryEventQueue` is process-scoped.
+- **Redis** queues are shared and persistent. Use them when producers and
+  consumers run in different processes, containers, or hosts. Install support
+  with `pip install "django-queue[redis]"`.
+
+FIFO, LIFO stack, and priority ordering are available for async queues. Event
+queues use their selected backend's transient delivery semantics.
 
 ## Configuration
 
 Queues are configured in the Django settings module, and use a simple and familiar configuration format like **DATABASES** and **CACHES**.
 
-Example
+An async queue used only by producers is configured as follows:
 
 ```python
 QUEUES = {
@@ -41,30 +49,40 @@ QUEUES = {
 }
 ```
 
-The above configures the queue backend to be redis, storing FIFO data in JSON format.
-Redis-backed queues take a Redis URL as their location and own their asynchronous
-connections; application code does not supply Redis client instances.
-Install Redis support with `pip install "django-queue[redis]"`.
+This configures a Redis-backed FIFO async queue with JSON values. Redis-backed
+queues own their asynchronous connections; application code does not supply
+Redis client instances.
 
-To implement a stack (FILO), the `django_queue.backends.redis.RedisAsyncStackJson` can be used instead, or a `"stack": True` option added to the options.
+To implement a stack (FILO), use
+`django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`.
 
 All aliases are validated and initialised when Django starts. Application code
 can retrieve a configured queue through `queues["alias"]`; initialisation only
 constructs queue services and never starts a worker.
 Queue aliases cannot contain `*`, `?`, `[` or `]`.
 
-Configured in-memory async queues are local to the resolving process and thread,
-so they are not a shared broker. `MemoryEventQueue` is process-scoped and is
-shared by configured threads in that process only; use Redis when producers and
-consumers must share work across processes, containers, or external workers.
+The explicit supported settings are `BACKEND`, `LOCATION`, `HANDLER`, `WORKER`,
+`ENTRY_CLASS`, `TIMEOUT`, and `RETENTION_TIMEOUT`; backend-specific options are
+passed through to the selected backend.
 
 ### Transient event queues
 
 `MemoryEventQueue` and `RedisEventQueue` deliver short-lived events to local
-listeners instead of retaining task outcomes. Configure one explicitly, then
+listeners instead of retaining async-work outcomes. Configure one explicitly,
+then
 register one or more listeners in application code:
 
 ```python
+# settings.py
+QUEUES = {
+    "events": {
+        "BACKEND": "django_queue.backends.redis.RedisEventQueue",
+        "LOCATION": "redis://localhost:6379/12",
+    },
+}
+
+
+# myproject/listeners.py
 from django_queue import queue_listener
 
 
@@ -97,7 +115,7 @@ the expired claim for redelivery.
 The runtime retries an event dispatcher that stops from an infrastructure
 failure with bounded backoff.
 
-### Queue type extensions
+### Async queue extensions
 
 Each alias may optionally choose the concrete worker and entry types it uses:
 
@@ -133,13 +151,13 @@ first becomes active; an entry only when it is enqueued, restored, or updated.
 `RETENTION_TIMEOUT` controls how long terminal entry records remain available.
 It defaults to 600 seconds; set it to `None` to explicitly disable automatic
 retention cleanup. A running worker removes expired terminal records during its
-normal loop. `prune_entry(entry_id)` and `await aprune_entry(entry_id)` remove
+normal loop. `prune(entry_id)` and `await aprune(entry_id)` remove
 one terminal record immediately.
 
 Custom queue backends that support identified entry dispatch must implement
-`has_pending_entries()`, returning whether `dequeue_entry()` can immediately
-return an entry. They must also implement `aprune_entry()` and
-`_aprune_expired_entries()`: pruning rejects non-terminal entries, removes the
+`has_pending()`, returning whether `dequeue()` can immediately
+return an entry. They must also implement `aprune()` and
+`_aprune_expired()`: pruning rejects non-terminal entries, removes the
 durable record, and publishes an observer-only `terminated` snapshot. Workers
 publish an entry's initial lifecycle snapshot when they first observe it.
 Custom backends that emit Django's `entry_enqueued` signal must call
@@ -214,9 +232,9 @@ it fails rather than yielding a negative time.
 An instant does not convert to a number implicitly. `float(instant)` raises, and
 so does `json.dumps` on one, so a caller that wants a number asks for it.
 
-### Identified queue entries
+### Identified lifecycle records
 
-The entry-oriented API is appropriate when a producer needs to poll the
+The lifecycle-record API is appropriate when a producer needs to poll the
 outcome of work processed later. Payloads and handler results must be
 JSON-serialisable. The queue generates the UUIDv7 identifier and owns all
 lifecycle timestamps, taking them from its own clock — Redis-aligned for a Redis
@@ -248,18 +266,18 @@ elapsed time is meaningless rather than merely small.
 
 ### Asynchronous queue API and heartbeat
 
-The `a`-prefixed entry operations are the primary API in asynchronous code:
-`aenqueue`, `aget_entry`, `alist`, `adequeue_entry`, and
-`ahas_pending_entries`.
+The `a`-prefixed lifecycle operations are the primary API in asynchronous code:
+`aenqueue`, `afind`, `alist`, `adequeue`, and
+`ahas_pending`.
 Lifecycle transitions are worker-internal operations, not producer APIs.
-AsyncQueue backends also expose `aprune_entry`
+AsyncQueue backends also expose `aprune`
 for explicit retained-entry removal. Built-in queues also expose `aadd`, `aget`,
 `apoll`, `apeek`, `asize`, and `aclear` for raw queue values. Await these from
 an ASGI view, a handler, or another coroutine:
 
 ```python
 entry_id = await queue.aenqueue({"request_id": 42})
-entry = await queue.aget_entry(entry_id)
+entry = await queue.afind(entry_id)
 ```
 
 The corresponding synchronous methods remain for synchronous Django code. They
@@ -302,7 +320,7 @@ in a loop: doing so disables the protection the budget provides.
 from django_queue import queue
 
 entry_id = queue.enqueue({"request_id": 42})
-entry = queue.get_entry(entry_id)
+entry = queue.find(entry_id)
 
 assert entry.status == "queued"
 ```
@@ -347,7 +365,7 @@ final immutable entry-shaped snapshot to its observers with
 `status == "terminated"`. This final snapshot is never persisted as a retained
 record, although `terminated` is the final lifecycle state after any completed
 state. Dashboards can use it to remove the entry from their projection. A later
-`get_entry()` or `aget_entry()` for the removed ID raises
+`find()` or `afind()` for the removed ID raises
 `QueueEntryNotFoundError`.
 
 The first Redis observer for a queue starts one daemon receiver for that
@@ -570,48 +588,59 @@ not dispatched; when no handlers are configured, the command reports this and
 exits successfully. A worker failure is logged while the remaining queues stay
 watched; the command exits non-zero only when no configured queue is left.
 
-With all queues, the `get()`, `peek()` and `pull()` methods return the object.
+With all queues, the `get()`, `peek()`, and `poll()` methods return the object.
 With priority queues the priority is only used with and relevant to `add()`.
 Identified entries have no priority parameter, so their worker dispatch remains
 FIFO until priority-aware entry enqueueing is introduced.
 
-## Queue Interface
+## API reference
 
-All queues conform to the following interface:
+All queues expose raw-value operations. `stack`, `capacity`, and `queue_name`
+describe the selected backend; `len(queue)` and `bool(queue)` are synchronous
+conveniences.
 
-#### Properties
+| Raw-value operation | Meaning |
+| --- | --- |
+| `add` / `aadd` | Add one or more raw values. Priority queues accept `(priority, value)` values. |
+| `get` / `aget` | Remove and return the next raw value. |
+| `poll` / `apoll` | Wait for and remove the next raw value. Redis priority queues accept `timeout` and `retries`. |
+| `peek` / `apeek` | Return the next raw value without removing it. |
+| `size` / `asize`, `is_empty` / `ais_empty` | Inspect raw-value availability. |
+| `clear` / `aclear`, `close` / `aclose` | Clear raw values or release queue resources. |
 
-- stack: returns True if the queue is a stack (LIFO) otherwise it is FIFO or priority based
-- capacity: returns the queue capacity, 0 for unlimited
-- queue_name: the stable entry namespace when the backend exposes one
+### AsyncQueue lifecycle API
 
-#### Methods
+Only `AsyncQueue` implementations retain lifecycle records. Their synchronous
+methods have `a`-prefixed async counterparts.
 
-- add(item1[, item2, item3 ...]): add one or more items to the queue. With priority queues, items can be passed as `(priority, item)` tuples, although if not a tuple the default priority of 0 is defined. Priorities are evaluated as higher values = high priority, lower values = low priority. Priority can be positive or negative with 0 considered "normal".
-- get(): retrieve and remove the next item from the queue.
-- poll(): same as get(), but blocks if no item is available. Redis priority
-  queues accept ``timeout`` and ``retries``; timeout applies to each retry
-  attempt.
-- peek(): retrieve but not remove the next item in the queue.
-- size(): returns the number of items currently in the queue. `len(queue)` also returns this value.
-- is_empty(): returns true if there are no items currently in the queue.
-- clear(): remove all items from the queue.
-- close(): closes and destroys the queue.
-- has_pending_entries(): returns whether `dequeue_entry()` can return an entry.
-- list(): returns retained AsyncQueue entry snapshots.
-- alist(): asynchronous equivalent of `list()`; AsyncQueue only.
-- prune_entry(): removes one retained terminal entry; AsyncQueue only.
-- aprune_entry(): asynchronous equivalent of `prune_entry()`; AsyncQueue only.
-- enqueue(): emits Django's `entry_enqueued` signal after durable enqueue;
-  lifecycle observers receive snapshots when a worker first sees the entry.
-- the queue itself can be used in the context of a boolean: True if there are items in the queue else False.
+| Operation | Meaning |
+| --- | --- |
+| `enqueue` / `aenqueue` | Create a durable queued record and return its UUIDv7 ID. |
+| `find` / `afind` | Return one retained record by ID. |
+| `dequeue` / `adequeue` | Remove the next pending record from delivery while retaining its record. |
+| `has_pending` / `ahas_pending` | Report whether delivery work is available. |
+| `list` / `alist` | Return retained records for administration or observer bootstrap. |
+| `prune` / `aprune` | Remove one retained terminal record and publish its observer-only `terminated` state. |
 
-#### Exceptions
+Lifecycle transitions are worker-internal. `enqueue` emits Django's
+`entry_enqueued` signal after durable storage; lifecycle observers receive
+records when workers first observe them and as their state changes.
 
-- InvalidQueueBackendError: an `ImproperlyConfigured` error indicating an issue
-  with the Django `QUEUES` configuration.
-- QueueFullException: operation (addition) attempted on a queue that has reached capacity
-- QueueEmptyException: operation (get, peek or timed out poll) accepted on an empty queue
-- QueueEntryNotFoundError: lookup or pruning requested a retained entry that no longer exists
-- QueueEncodingException: error occurred in encoding the item
-- QueueValueError: error occurred in decoding an item
+### EventQueue delivery API
+
+`EventQueue` uses `enqueue` / `aenqueue` to create a transient event,
+`find` / `afind` to inspect one live event, and `dequeue` / `adequeue` for
+direct consumption. It deliberately has no `list` or `prune` lifecycle API:
+event records are consumed or expire without a terminal outcome, and listeners
+receive them through `@queue_listener`.
+
+### Exceptions
+
+- `InvalidQueueBackendError`: invalid Django `QUEUES` configuration.
+- `QueueFullException` and `QueueEmptyException`: raw-value capacity or
+  availability errors.
+- `QueueEntryNotFoundError`: `find` or `prune` requested a retained record
+  that no longer exists.
+- `QueueEntryMissingError`: an internal worker/provider recovery condition:
+  a previously claimed record disappeared unexpectedly.
+- `QueueEncodingException` and `QueueValueError`: invalid stored values.

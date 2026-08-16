@@ -56,7 +56,7 @@ class TestAsyncQueueWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.SUCCEEDED
         assert queue.thread_ids
         assert set(queue.thread_ids) == {loop_thread}
 
@@ -268,7 +268,7 @@ class TestAsyncQueueWorker:
         except asyncio.CancelledError:
             pass
 
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert entry.status is QueueEntryStatus.SUCCEEDED
         assert entry.result == {"processed": 42}
         assert worker.running is False
@@ -299,11 +299,11 @@ class TestAsyncQueueWorker:
         except asyncio.CancelledError:
             pass
 
-        assert (await queue.aget_entry(failed_id)).error == {
+        assert (await queue.afind(failed_id)).error == {
             "type": "ValueError",
             "message": "bad request",
         }
-        assert (await queue.aget_entry(succeeded_id)).result == "done"
+        assert (await queue.afind(succeeded_id)).result == "done"
         assert worker.snapshot.dispatch_count == 2
         assert worker.snapshot.succeeded_count == 1
         assert worker.snapshot.failed_count == 1
@@ -344,7 +344,7 @@ class TestAsyncQueueWorker:
         except asyncio.CancelledError:
             pass
 
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert entry.result == "completed during shutdown"
         # A shutdown in progress does not overwrite an outcome the handler
         # actually reached: it finished, so it is recorded by what it returned.
@@ -376,7 +376,7 @@ class TestAsyncQueueWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.TIMEOUT
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.TIMEOUT
         assert worker.snapshot.running is False
         assert worker.snapshot.active_entry_id is None
         assert worker.snapshot.timed_out_count == 1
@@ -420,7 +420,7 @@ class TestAsyncQueueWorker:
             release.set()
             await asyncio.wait_for(handler_finished.wait(), timeout=1)
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.TIMEOUT
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.TIMEOUT
 
     def test_cancellation_records_a_handler_failure_within_its_grace_period(self):
         asyncio.run(
@@ -451,7 +451,7 @@ class TestAsyncQueueWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).error == {
+        assert (await queue.afind(entry_id)).error == {
             "type": "ValueError",
             "message": "shutdown failure",
         }
@@ -483,7 +483,7 @@ class TestAsyncQueueWorker:
             await task
         await asyncio.wait_for(queue.persisted.wait(), timeout=1)
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.SUCCEEDED
 
     def test_records_a_safe_failure_for_a_non_json_handler_result(self):
         asyncio.run(self._records_a_safe_failure_for_a_non_json_handler_result())
@@ -504,7 +504,7 @@ class TestAsyncQueueWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).error == {
+        assert (await queue.afind(entry_id)).error == {
             "type": "TypeError",
             "message": "Queue entry values must be JSON-serialisable",
         }
@@ -531,7 +531,7 @@ class TestAsyncQueueWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(failed_id)).error == {
+        assert (await queue.afind(failed_id)).error == {
             "type": "QueuePersistenceError",
             "message": "Unable to persist terminal queue outcome",
         }
@@ -582,7 +582,7 @@ class TestAsyncQueueWorker:
         return entry.payload
 
     async def _wait_for_status(self, queue, entry_id, status):
-        while (await queue.aget_entry(entry_id)).status is not status:
+        while (await queue.afind(entry_id)).status is not status:
             await asyncio.sleep(0.001)
 
     async def _wait_for_snapshot_count(self, worker, name, expected):
@@ -596,9 +596,9 @@ class ThreadRecordingDispatchQueue(MemoryAsyncQueue):
         super().__init__(*args, **kwargs)
         self.thread_ids: list[int] = []
 
-    async def adequeue_entry(self):
+    async def adequeue(self):
         self.thread_ids.append(threading.get_ident())
-        return await super().adequeue_entry()
+        return await super().adequeue()
 
     async def _amark_running(self, entry_id):
         self.thread_ids.append(threading.get_ident())
@@ -614,10 +614,10 @@ class SlowEmptyQueue(MemoryAsyncQueue):
         super().__init__(*args, **kwargs)
         self.dequeue_started = threading.Event()
 
-    async def adequeue_entry(self):
+    async def adequeue(self):
         self.dequeue_started.set()
         await asyncio.sleep(0.05)
-        return await super().adequeue_entry()
+        return await super().adequeue()
 
 
 class BlockingSuccessQueue(MemoryAsyncQueue):
@@ -691,7 +691,7 @@ class TestWorkerClock:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert started_at == SKEWED
         assert entry.dispatched_at == SKEWED
         assert started_at <= entry.dispatched_at
@@ -776,29 +776,27 @@ class TestBudgetResolution:
     """Worker override, then the entry's own budget, then the queue, then 600s."""
 
     def _entry(self, queue, budget=None):
-        return queue.get_entry(queue.enqueue("work", timeout_seconds=budget))
+        return queue.find(queue.enqueue("work", timeout_seconds=budget))
 
     def test_falls_back_to_the_default_when_nothing_is_set(self):
         queue = MemoryAsyncQueue(queue_name="requests")
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle_nothing})
 
-        assert (
-            worker.resolve_budget(queue, self._entry(queue)) == DEFAULT_TIMEOUT_SECONDS
-        )
+        assert worker.budget_for(queue, self._entry(queue)) == DEFAULT_TIMEOUT_SECONDS
 
     def test_a_queue_default_beats_the_fallback(self):
         queue = MemoryAsyncQueue(queue_name="requests")
         queue.timeout_seconds = 45
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle_nothing})
 
-        assert worker.resolve_budget(queue, self._entry(queue)) == 45
+        assert worker.budget_for(queue, self._entry(queue)) == 45
 
     def test_an_entry_budget_beats_the_queue_default(self):
         queue = MemoryAsyncQueue(queue_name="requests")
         queue.timeout_seconds = 45
         worker = AsyncQueueWorker({"requests": queue}, {"requests": handle_nothing})
 
-        assert worker.resolve_budget(queue, self._entry(queue, 5)) == 5
+        assert worker.budget_for(queue, self._entry(queue, 5)) == 5
 
     def test_a_worker_override_beats_everything(self):
         """The worker knows the runtime it is actually operating in."""
@@ -808,7 +806,7 @@ class TestBudgetResolution:
             {"requests": queue}, {"requests": handle_nothing}, timeout_seconds=2
         )
 
-        assert worker.resolve_budget(queue, self._entry(queue, 5)) == 2
+        assert worker.budget_for(queue, self._entry(queue, 5)) == 2
 
     @pytest.mark.parametrize("budget", ["30", True, object()])
     def test_rejects_a_worker_override_that_is_not_a_number(self, budget):
@@ -855,7 +853,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        completed = await queue.aget_entry(entry_id)
+        completed = await queue.afind(entry_id)
         assert completed.status is QueueEntryStatus.SUCCEEDED
         assert completed.ran_for is not None
 
@@ -879,7 +877,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.SUCCEEDED
 
     def test_heartbeat_outside_a_handler_raises(self):
         with pytest.raises(RuntimeError, match="active handler dispatch"):
@@ -949,9 +947,9 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(hung_id)).status is QueueEntryStatus.TIMEOUT
-        assert (await queue.aget_entry(hung_id)).finished_at is not None
-        assert (await queue.aget_entry(next_id)).status is QueueEntryStatus.SUCCEEDED
+        assert (await queue.afind(hung_id)).status is QueueEntryStatus.TIMEOUT
+        assert (await queue.afind(hung_id)).finished_at is not None
+        assert (await queue.afind(next_id)).status is QueueEntryStatus.SUCCEEDED
 
     def test_enforces_a_budget_carried_on_the_entry(self):
         asyncio.run(self._enforces_a_budget_carried_on_the_entry())
@@ -973,7 +971,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.TIMEOUT
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.TIMEOUT
 
     def test_enforces_the_queues_configured_budget(self):
         asyncio.run(self._enforces_the_queues_configured_budget())
@@ -996,7 +994,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.TIMEOUT
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.TIMEOUT
 
     def test_a_handler_raising_timeout_error_is_a_failure_not_an_expiry(self):
         asyncio.run(self._a_handler_raising_timeout_error_is_a_failure_not_an_expiry())
@@ -1026,7 +1024,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert entry.status is QueueEntryStatus.FAILED
         # the handler's own error survives rather than being discarded
         assert entry.error == {
@@ -1065,7 +1063,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert entry.status is QueueEntryStatus.FAILED
         assert entry.error["type"] == "TimeoutError"
         assert worker.snapshot.timed_out_count == 0
@@ -1093,7 +1091,7 @@ class TestBudgetEnforcement:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert (await queue.aget_entry(entry_id)).status is QueueEntryStatus.SUCCEEDED
+        assert (await queue.afind(entry_id)).status is QueueEntryStatus.SUCCEEDED
         assert worker.snapshot.timed_out_count == 0
 
     def test_a_timeout_leaves_the_cancelled_count_alone(self):
@@ -1197,7 +1195,7 @@ class TestBudgetAndEntryClocksStaySeparate:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        entry = await queue.aget_entry(entry_id)
+        entry = await queue.afind(entry_id)
         assert entry.status is QueueEntryStatus.TIMEOUT
         # An hour on the queue's clock, from a budget of a twentieth of a second.
         assert entry.ran_for == 3600.0

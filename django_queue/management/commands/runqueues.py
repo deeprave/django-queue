@@ -14,18 +14,18 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils.module_loading import import_string
 
 import django_queue
-from django_queue.backends.base import BaseQueue
+from django_queue.backends.base import AsyncQueue
 from django_queue.backends.exceptions import InvalidQueueBackendError
-from django_queue.worker import QueueHandler as QueueEntryHandler
+from django_queue.worker import Handler
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class ConfiguredWorkerActivation:
+class WorkerActivation:
     alias: str
-    queue: BaseQueue
-    handler: QueueEntryHandler
+    queue: AsyncQueue
+    handler: Handler
 
 
 class Command(BaseCommand):
@@ -42,7 +42,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Starting {len(activations)} queue handlers.")
         asyncio.run(self._run_configured_workers(activations))
 
-    def _create_workers(self) -> list[ConfiguredWorkerActivation]:
+    def _create_workers(self) -> list[WorkerActivation]:
         try:
             queues = django_queue.initialise_queues()
             configured_handlers = [
@@ -51,9 +51,9 @@ class Command(BaseCommand):
                 if "HANDLER" in options
             ]
             activations = [
-                ConfiguredWorkerActivation(
+                WorkerActivation(
                     alias,
-                    queues[alias],
+                    cast(AsyncQueue, queues[alias]),
                     self._load_handler(alias, handler_path),
                 )
                 for alias, handler_path in configured_handlers
@@ -61,13 +61,13 @@ class Command(BaseCommand):
             # Resolve every worker class up front so a misconfigured alias fails
             # here rather than when its queue first receives work.
             for activation in activations:
-                activation.queue.resolve_worker_class(activation.alias)
+                activation.queue.resolve_worker(activation.alias)
         except InvalidQueueBackendError as exc:
             raise CommandError(str(exc)) from exc
         return activations
 
     @staticmethod
-    def _load_handler(alias: str, handler_path: object) -> QueueEntryHandler:
+    def _load_handler(alias: str, handler_path: object) -> Handler:
         if not isinstance(handler_path, str) or not handler_path:
             raise CommandError(
                 f"Queue '{alias}' HANDLER must be a non-empty dotted path."
@@ -82,11 +82,11 @@ class Command(BaseCommand):
             raise CommandError(
                 f"Queue '{alias}' HANDLER must be an asynchronous callable."
             )
-        return cast(QueueEntryHandler, handler)
+        return cast(Handler, handler)
 
     async def _run_configured_workers(
         self,
-        activations: Sequence[ConfiguredWorkerActivation],
+        activations: Sequence[WorkerActivation],
         shutdown_event: asyncio.Event | None = None,
     ) -> None:
         tasks = {
@@ -100,8 +100,8 @@ class Command(BaseCommand):
             tasks, shutdown_event, tuple(activation.queue for activation in activations)
         )
 
-    async def _activate_worker(self, activation: ConfiguredWorkerActivation) -> None:
-        while not await activation.queue.ahas_pending_entries():
+    async def _activate_worker(self, activation: WorkerActivation) -> None:
+        while not await activation.queue.ahas_pending():
             await asyncio.sleep(0.1)
         worker = activation.queue.create_worker(activation.alias, activation.handler)
         self.stdout.write(f"Started queue handler for {activation.alias}.")
@@ -111,7 +111,7 @@ class Command(BaseCommand):
         self,
         tasks: dict[asyncio.Task[None], str],
         shutdown_event: asyncio.Event | None,
-        queues: Sequence[BaseQueue],
+        queues: Sequence[AsyncQueue],
     ) -> None:
         shutdown_event = asyncio.Event() if shutdown_event is None else shutdown_event
         loop = asyncio.get_running_loop()
