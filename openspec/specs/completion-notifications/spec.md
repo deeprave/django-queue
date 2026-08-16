@@ -15,7 +15,7 @@ automatically start one idempotent local observer runtime. The API SHALL NOT
 require a separate `QUEUES` definition, Django Channels, or WebSockets.
 
 #### Scenario: Register a queue observer
-- **WHEN** an application registers a callback for a named task queue
+- **WHEN** an application registers a callback for a named async queue
 - **THEN** the process starts or reuses its local notification runtime and
   retains the callback until it is unsubscribed
 

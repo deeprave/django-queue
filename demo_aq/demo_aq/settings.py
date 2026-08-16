@@ -38,7 +38,7 @@ USE_TZ = True
 
 QUEUES = {
     "demo": {
-        "BACKEND": "django_queue.backends.RedisQueueJson",
+        "BACKEND": "django_queue.backends.redis.RedisAsyncQueueJson",
         "LOCATION": os.environ.get("DEMO_REDIS_URL", "redis://127.0.0.1:16379/0"),
         "TIMEOUT": 300,
         "RETENTION_TIMEOUT": 30,

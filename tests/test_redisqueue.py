@@ -3,22 +3,92 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from django_queue.backends import QueueEmptyException, QueueFullException, RedisQueue
-from django_queue.backends.exceptions import QueueEncodingException
-from django_queue.backends.redis.redisqueue import _decode
+from django_queue.backends import (
+    QueueEmptyException,
+    QueueFullException,
+)
+from django_queue.backends.exceptions import (
+    InvalidQueueBackendError,
+    QueueEncodingException,
+)
+from django_queue.backends.redis import RedisAsyncQueue, RedisAsyncQueueWorker
+from django_queue.backends.redis.provider import QueueProviderRedis
+from django_queue.entries import QueueEntry
+from django_queue.worker import AsyncQueueWorker
 
 
 @pytest.fixture
 def redis_queue(redis_url):
-    queue = RedisQueue(redis_url, queue_name="test_queue", maxsize=5)
+    queue = RedisAsyncQueue(redis_url, queue_name="test_queue", maxsize=5)
     queue.clear()
     return queue
 
 
 def test_init(redis_url):
-    queue = RedisQueue(redis_url, queue_name="test_queue")
+    queue = RedisAsyncQueue(redis_url, queue_name="test_queue")
     assert queue.queue_name == "test_queue"
-    assert queue._maxsize == 0
+    assert queue.capacity == 0
+
+
+def test_uses_a_redis_specific_default_worker():
+    queue = RedisAsyncQueue("redis://localhost:6379/0")
+
+    assert queue.resolve_worker_class("tasks") is RedisAsyncQueueWorker
+
+
+def test_rejects_the_generic_worker_for_a_redis_queue(redis_url):
+    queue = RedisAsyncQueue(redis_url, queue_name="test-worker-type")
+
+    async def handle(entry):
+        return entry.payload
+
+    with pytest.raises(TypeError, match="requires a redis worker"):
+        AsyncQueueWorker({"tasks": queue}, {"tasks": handle})
+
+
+def test_rejects_a_generic_worker_override_for_a_redis_queue(redis_url):
+    queue = RedisAsyncQueue(redis_url, queue_name="test-worker-override")
+    queue.worker_class = AsyncQueueWorker
+
+    with pytest.raises(InvalidQueueBackendError, match="requires a redis worker"):
+        queue.resolve_worker_class("tasks")
+
+
+def test_rejects_a_spoofed_redis_worker_override(redis_url):
+    class SpoofedRedisWorker(AsyncQueueWorker):
+        provider_kind = "redis"
+
+    queue = RedisAsyncQueue(redis_url, queue_name="test-worker-override")
+    queue.worker_class = SpoofedRedisWorker
+
+    with pytest.raises(InvalidQueueBackendError, match="not compatible"):
+        queue.resolve_worker_class("tasks")
+
+
+def test_redis_worker_claims_through_its_provider(redis_url, mocker):
+    async def exercise():
+        queue = RedisAsyncQueue(redis_url, queue_name="test-worker-provider")
+
+        async def handle(entry):
+            return entry.payload
+
+        worker = RedisAsyncQueueWorker({"tasks": queue}, {"tasks": handle})
+        entry = QueueEntry.create(queue="tasks", payload="work")
+        mocker.patch.object(queue._provider, "arecover", AsyncMock(return_value=(0, 0)))
+        mocker.patch.object(queue._provider, "aclaim", AsyncMock(return_value=entry))
+        mocker.patch.object(queue._provider, "arenew", AsyncMock(return_value=True))
+
+        assert await worker._next_entry(queue) == (
+            entry,
+            worker.resolve_budget(queue, entry) + worker._cancellation_grace_period,
+        )
+        queue._provider.aclaim.assert_awaited_once_with(
+            worker._worker_id, queue.default_claim_lease_seconds
+        )
+        assert not hasattr(queue, "_aclaim")
+        await queue.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_capacity(redis_queue):
@@ -69,7 +139,9 @@ def test_size(redis_queue):
 
 def test_decode_returns_text_from_a_decoding_url(redis_url):
     """A decoding URL yields text rather than bytes."""
-    queue = RedisQueue(f"{redis_url}?decode_responses=true", queue_name="test-decoding")
+    queue = RedisAsyncQueue(
+        f"{redis_url}?decode_responses=true", queue_name="test-decoding"
+    )
     queue.clear()
 
     queue.add("item1")
@@ -79,7 +151,7 @@ def test_decode_returns_text_from_a_decoding_url(redis_url):
 
 def test_decode_rejects_a_value_that_is_neither_text_nor_bytes():
     with pytest.raises(QueueEncodingException, match="not int"):
-        _decode(12345, "utf-8")
+        QueueProviderRedis.decode(12345, "utf-8")
 
 
 def test_get_reports_empty_when_another_consumer_wins_the_race(redis_queue, mocker):
@@ -88,7 +160,7 @@ def test_get_reports_empty_when_another_consumer_wins_the_race(redis_queue, mock
     async def exercise():
         await redis_queue.aadd("item1")
         mocker.patch.object(
-            redis_queue._async_redis(), "lpop", AsyncMock(return_value=None)
+            redis_queue._provider._async_redis(), "lpop", AsyncMock(return_value=None)
         )
         with pytest.raises(QueueEmptyException):
             await redis_queue.aget()
@@ -100,7 +172,7 @@ def test_get_reports_empty_when_another_consumer_wins_the_race(redis_queue, mock
 def test_poll_reports_empty_when_the_blocking_pop_returns_nothing(redis_queue, mocker):
     async def exercise():
         mocker.patch.object(
-            redis_queue._async_redis(), "blpop", AsyncMock(return_value=None)
+            redis_queue._provider._async_redis(), "blpop", AsyncMock(return_value=None)
         )
         with pytest.raises(QueueEmptyException):
             await redis_queue.apoll()

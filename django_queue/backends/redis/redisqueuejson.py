@@ -3,7 +3,7 @@ try:
 
     from django_queue.backends.exceptions import QueueEncodingException
 
-    from .redisqueue import RedisQueue
+    from .redisqueue import RedisAsyncQueue
 
     def _encode(item: dict | str) -> str:
         try:
@@ -17,7 +17,7 @@ try:
         except (json.JSONDecodeError, TypeError) as e:
             raise QueueEncodingException from e
 
-    class RedisQueueJson(RedisQueue):
+    class RedisAsyncQueueJson(RedisAsyncQueue):
         async def aadd(self, *items: dict | str) -> None:
             await super().aadd(*(_encode(item) for item in items if item is not None))
 
@@ -30,7 +30,7 @@ try:
         async def apeek(self) -> dict | str:
             return _decode(await super().apeek())
 
-    class RedisStackJson(RedisQueueJson):
+    class RedisAsyncStackJson(RedisAsyncQueueJson):
         def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
             options = {} if options is None else options
             options |= kwargs

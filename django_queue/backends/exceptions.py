@@ -25,8 +25,12 @@ class QueueClaimConflictError(QueueException):
         super().__init__(f"Queue entry {entry_id} is already claimed")
 
 
-class QueueReliableDeliveryUnsupportedError(QueueException):
-    """The queue cannot provide claim-based reliable delivery."""
+class QueueEntryExpiredError(QueueException):
+    """A transient entry expired before it could be claimed."""
+
+    def __init__(self, entry_id):
+        self.entry_id = entry_id
+        super().__init__(f"Queue entry {entry_id} expired before it could be claimed")
 
 
 class QueueEntryMissingError(QueueException):

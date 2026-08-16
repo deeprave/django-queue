@@ -9,7 +9,8 @@ import pytest
 from django.core.management.base import CommandError
 
 import django_queue
-from django_queue.backends import MemoryQueue
+from django_queue.backends import MemoryAsyncQueue
+from django_queue.backends.memory import MemoryAsyncQueueWorker
 from django_queue.management.commands.runqueues import (
     Command,
     ConfiguredWorkerActivation,
@@ -70,13 +71,13 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "first": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
                     "WORKER": "tests.test_runqueues.TrackingWorker",
                 },
                 "second": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
                     "WORKER": "tests.test_runqueues.TrackingWorker",
@@ -131,12 +132,12 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "first": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
                 },
                 "second": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
                 },
@@ -166,7 +167,7 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.not_a_handler",
                     "LOCATION": "",
                 }
@@ -181,7 +182,7 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "WORKER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
@@ -197,7 +198,7 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "ENTRY_CLASS": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
@@ -215,7 +216,7 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "WORKER": "tests.test_runqueues.TrackingWorker",
                     "LOCATION": "",
@@ -235,7 +236,7 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.synchronous_handler",
                     "LOCATION": "",
                 }
@@ -250,7 +251,7 @@ class TestRunQueuesCommand:
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.asynchronous_callable",
                     "LOCATION": "",
                 }
@@ -261,14 +262,17 @@ class TestRunQueuesCommand:
         activations = Command()._create_workers()
 
         assert len(activations) == 1
-        assert activations[0].queue.resolve_worker_class("default") is AsyncQueueWorker
+        assert (
+            activations[0].queue.resolve_worker_class("default")
+            is MemoryAsyncQueueWorker
+        )
 
     def test_activates_each_worker_on_its_own_queue_clock(self, monkeypatch):
         """The shared time basis has to hold where workers are really built."""
         queues = django_queue.QueueHandler(
             {
                 "default": {
-                    "BACKEND": "django_queue.backends.MemoryQueue",
+                    "BACKEND": "django_queue.backends.MemoryAsyncQueue",
                     "HANDLER": "tests.test_runqueues.handle_entry",
                     "LOCATION": "",
                 }
@@ -286,7 +290,7 @@ class TestRunQueuesCommand:
 
     async def _continues_healthy_workers_after_another_worker_fails(self, caplog):
         shutdown = asyncio.Event()
-        healthy_queue = MemoryQueue(queue_name="healthy")
+        healthy_queue = MemoryAsyncQueue(queue_name="healthy")
         await healthy_queue.aenqueue("healthy")
         failed_queue = ExplodingQueue(queue_name="failed")
         await failed_queue.aenqueue("failed")
@@ -326,7 +330,7 @@ class TestRunQueuesCommand:
 
     async def _keeps_watching_an_idle_queue_after_another_worker_fails(self, caplog):
         shutdown = asyncio.Event()
-        idle_queue = MemoryQueue(queue_name="idle")
+        idle_queue = MemoryAsyncQueue(queue_name="idle")
         failed_queue = ExplodingQueue(queue_name="failed")
         await failed_queue.aenqueue("failed")
         caplog.set_level(
@@ -391,7 +395,7 @@ class TestRunQueuesCommand:
         asyncio.run(self._shutdown_request_cancels_and_awaits_workers())
 
     async def _shutdown_request_cancels_and_awaits_workers(self):
-        queue = MemoryQueue(queue_name="default")
+        queue = MemoryAsyncQueue(queue_name="default")
         started = asyncio.Event()
         release = asyncio.Event()
         shutdown = asyncio.Event()
@@ -474,7 +478,7 @@ class TestRunQueuesCommand:
         assert removed == [signal.SIGINT]
 
 
-class ExplodingQueue(MemoryQueue):
+class ExplodingQueue(MemoryAsyncQueue):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dequeue_started = threading.Event()

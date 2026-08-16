@@ -59,8 +59,4 @@ def _random_messages(min_entries: int, max_entries: int) -> list[str]:
 
 async def _clear_demo_queue(queue) -> None:
     """Remove this demo queue's retained task state before publishing a batch."""
-    client = queue._async_redis()
-    keys = [queue.queue_name]
-    async for key in client.scan_iter(match=f"{queue.queue_name}:entries:*"):
-        keys.append(key)
-    await client.delete(*keys)
+    await queue._provider.aclear_entries()

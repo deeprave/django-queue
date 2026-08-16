@@ -1,11 +1,12 @@
 import pytest
 
-from django_queue.backends import QueueEncodingException, RedisQueueJson
+from django_queue.backends import QueueEncodingException
+from django_queue.backends.redis import RedisAsyncQueueJson
 
 
 @pytest.fixture
 def redis_queue(redis_url):
-    queue = RedisQueueJson(redis_url, queue_name="test_queue", maxsize=5)
+    queue = RedisAsyncQueueJson(redis_url, queue_name="test_queue", maxsize=5)
     queue.clear()
     return queue
 

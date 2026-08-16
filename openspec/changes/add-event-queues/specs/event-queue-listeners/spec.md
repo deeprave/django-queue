@@ -4,7 +4,7 @@
 The system SHALL export `queue_listener` from `django_queue`. The decorator
 SHALL register the decorated sync or async callable for one named event queue
 and accept an optional `filter` callable receiving a QueueEntry and returning
-a bool. Registration SHALL be process-local and SHALL NOT require a task handler.
+a bool. Registration SHALL be process-local and SHALL NOT require an async-queue handler.
 
 #### Scenario: Register an asynchronous listener
 - **WHEN** an application decorates an async function with `@queue_listener("events")`
@@ -52,6 +52,20 @@ outcomes SHALL NOT persist a terminal task result.
 - **WHEN** a listener or its filter raises
 - **THEN** the worker logs the exception and makes the event available only after the delay
 
+### Requirement: Maintain and recover event claims
+Redis event workers SHALL renew an owned claim while a listener is active.
+They SHALL periodically recover expired claims before receiving another event,
+so an event claimed by a stopped worker becomes available again. A worker that
+loses ownership SHALL not remove or release the event.
+
+#### Scenario: Recover an abandoned event
+- **WHEN** a Redis event claim expires before its worker settles it
+- **THEN** a later event-worker iteration returns the event to pending delivery
+
+#### Scenario: Retain a slow listener's ownership
+- **WHEN** an active Redis listener runs beyond its initial claim lease
+- **THEN** its worker renews the claim and another worker cannot recover it
+
 ### Requirement: Run local dispatchers on a shared event runtime
 The system SHALL start one process-wide event runtime for configured event
 queues. It SHALL own one background thread and asyncio loop, with one event
@@ -62,6 +76,25 @@ sync listeners SHALL use the framework bridge and SHALL NOT block that loop.
 - **WHEN** two event queues are configured in one Django process
 - **THEN** their workers run as separate tasks on one event-runtime loop
 
+#### Scenario: Recover a failed dispatcher
+- **WHEN** an event worker stops because of an infrastructure exception
+- **THEN** the runtime retries that queue's worker with bounded exponential backoff
+
+### Requirement: Keep event worker ownership private and stable
+Each event queue SHALL generate one private worker identity for the lifetime of
+its runtime. A recreated worker for the same queue runtime SHALL reuse that
+identity. Public queue operations SHALL NOT accept or expose a worker or claim
+identifier; a direct dequeue SHALL create any provider ownership identity it
+needs internally.
+
+#### Scenario: Recreate an event worker
+- **WHEN** the runtime recreates a worker after an infrastructure failure
+- **THEN** the replacement uses the same private identity as the prior worker
+
+#### Scenario: Dequeue directly from application code
+- **WHEN** application code dequeues an event through the public queue API
+- **THEN** it supplies no worker or claim identifier
+
 ### Requirement: Document delivery scope and ordering
 The system SHALL document that Redis workers compete through leases, memory
 event queues are process-local, and ordering is indeterminate with multiple
@@ -71,3 +104,7 @@ one process.
 #### Scenario: Run in multiple Django processes
 - **WHEN** multiple processes listen to one Redis event queue
 - **THEN** an event has at most one active claim owner without global ordering
+
+#### Scenario: Share configured memory delivery across request threads
+- **WHEN** separate request threads access one configured memory event queue
+- **THEN** they and the process-local event runtime use the same queue instance

@@ -2,9 +2,11 @@
 
 ### Requirement: Separate task and event queue semantics
 The system SHALL provide `AsyncQueue` and `EventQueue` semantic base classes
-beneath `BaseQueue`. Existing Redis and memory queues SHALL retain AsyncQueue task
+beneath `BaseQueue`. Existing Redis and memory queues SHALL retain AsyncQueue
 semantics. Redis and memory event queue variants SHALL remove consumed,
-rejected, and expired events instead of persisting task terminal states.
+rejected, and expired events instead of persisting terminal states. Provider
+composition and transport-specific delivery behaviour are defined by the
+`provider-composition` capability.
 
 #### Scenario: Retain an AsyncQueue outcome
 - **WHEN** an AsyncQueue worker records a terminal outcome

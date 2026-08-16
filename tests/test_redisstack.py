@@ -1,19 +1,23 @@
 import pytest
 
-from django_queue.backends import QueueEmptyException, QueueFullException, RedisStack
+from django_queue.backends import (
+    QueueEmptyException,
+    QueueFullException,
+)
+from django_queue.backends.redis import RedisAsyncStack
 
 
 @pytest.fixture
 def redis_stack(redis_url):
-    stack = RedisStack(redis_url, queue_name="test_stack", maxsize=5)
+    stack = RedisAsyncStack(redis_url, queue_name="test_stack", maxsize=5)
     stack.clear()
     return stack
 
 
 def test_init(redis_url):
-    stack = RedisStack(redis_url, queue_name="test_stack")
+    stack = RedisAsyncStack(redis_url, queue_name="test_stack")
     assert stack.queue_name == "test_stack"
-    assert stack._maxsize == 0
+    assert stack.capacity == 0
     assert stack.stack
 
 

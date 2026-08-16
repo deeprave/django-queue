@@ -1,4 +1,4 @@
-"""Passive, process-local task lifecycle observation."""
+"""Passive, process-local async-queue lifecycle observation."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class _QueueObservers:
                 )
                 self.dispatcher.start()
             if self.receiver is None:
-                receiver = _receiver_for(self.queue)
+                receiver = self.queue._lifecycle_snapshot_receiver(self.publish)
                 if receiver is not None:
                     self.receiver = threading.Thread(
                         target=self._run_receiver,
@@ -123,9 +123,9 @@ class _QueueObservers:
                 )
                 self.drop_logged = True
 
-    def _run_receiver(self, receiver: Callable[[Observer], None]) -> None:
+    def _run_receiver(self, receiver: Callable[[], None]) -> None:
         try:
-            receiver(self.publish)
+            receiver()
             logger.warning(
                 "Queue lifecycle receiver stopped",
                 extra={"queue": self.queue.queue_name},
@@ -211,20 +211,6 @@ def _observers_for(queue: AsyncQueue) -> _QueueObservers:
 def _state_timestamp(entry: QueueEntry) -> object:
     """Return the persisted timestamp identifying this lifecycle snapshot."""
     return entry.finished_at or entry.dispatched_at or entry.queued_at
-
-
-def _receiver_for(configured_queue: AsyncQueue):
-    """Return the internal cross-process transport for a supported backend."""
-    try:
-        from django_queue.backends.redis.redisqueue import (
-            RedisLifecycleObserverTransport,
-            RedisQueue,
-        )
-    except ImportError:
-        return None
-    if isinstance(configured_queue, RedisQueue):
-        return RedisLifecycleObserverTransport(configured_queue).receive
-    return None
 
 
 def _order_snapshots(snapshots: list[QueueEntry]) -> list[QueueEntry]:

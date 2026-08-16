@@ -8,13 +8,13 @@ surface.
 ## Requirements
 
 ### Requirement: Present an asynchronous backend contract
-Queue backends SHALL expose every operation that performs storage work as an
-awaitable method named with an `a` prefix: `aenqueue`, `aget_entry`,
-`adequeue_entry`, `ahas_pending_entries`, `amark_running`, `amark_succeeded`,
-`amark_failed`, `amark_cancelled`, `amark_timed_out`, `aprune_entry`, and
-`aclose`. These
+Queue backends SHALL expose every public operation that performs storage work
+as an awaitable method named with an `a` prefix: `aenqueue`, `aget_entry`,
+`adequeue_entry`, `ahas_pending_entries`, `aprune_entry`, and `aclose`. These
 SHALL be the implementations, not wrappers. A backend supporting identified
-entry dispatch MUST implement all of them.
+entry dispatch MUST implement all of them. Lifecycle transitions to `running`,
+`succeeded`, `failed`, `cancelled`, and `timeout` are worker-internal
+operations and SHALL NOT be public queue APIs.
 
 #### Scenario: Await an entry operation
 - **WHEN** a caller awaits an entry operation on any configured backend

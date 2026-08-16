@@ -43,9 +43,6 @@ WORKER_EVENT_MESSAGES: Mapping[str, str] = {
     "stopped": "Queue worker stopped",
 }
 
-_SHORT_LEASE_SECONDS = 60
-_MEDIUM_LEASE_SECONDS = 600
-_RECOVERY_INTERVAL_SECONDS = 1
 _CLAIM_CONFLICT_LOG_INTERVAL_SECONDS = 60
 
 # A coroutine rather than any awaitable: the worker schedules handlers with
@@ -95,6 +92,24 @@ class QueuePersistenceError(RuntimeError):
     """A terminal queue outcome could not be stored safely."""
 
 
+class BaseQueueWorker:
+    """Common local worker identity and idle-loop state."""
+
+    provider_kind = "generic"
+    provider_type = "generic"
+
+    def __init__(
+        self, *, idle_delay: float = 0.1, worker_id: UUID | None = None
+    ) -> None:
+        self._idle_delay = idle_delay
+        self._worker_id = uuid.uuid7() if worker_id is None else worker_id
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSnapshot:
     """Immutable, process-local state for an asynchronous queue worker.
@@ -117,7 +132,7 @@ class WorkerSnapshot:
     timed_out_count: int
 
 
-class AsyncQueueWorker:
+class AsyncQueueWorker(BaseQueueWorker):
     """Sequentially process registered queues until its task is cancelled."""
 
     def __init__(
@@ -139,13 +154,27 @@ class AsyncQueueWorker:
             raise ValueError(
                 "Cancellation grace period must be a finite non-negative number of seconds"
             )
+        super().__init__(idle_delay=idle_delay)
         self._timeout_seconds = timeout_seconds
         self._clock: QueueClock = clock or DEFAULT_CLOCK
-        self._queues = {name: queues[name] for name in handlers}
+        self._queues = {}
+        for name in handlers:
+            queue = queues[name]
+            if not isinstance(queue, AsyncQueue):
+                raise TypeError("AsyncQueueWorker requires AsyncQueue instances")
+            if self.provider_kind != queue.worker_provider_kind:
+                raise TypeError(
+                    f"{type(queue).__name__} requires a "
+                    f"{queue.worker_provider_kind} worker"
+                )
+            if not queue._worker_class_is_compatible(type(self)):
+                raise TypeError(
+                    f"{type(self).__name__} is not compatible with "
+                    f"{type(queue).__name__}"
+                )
+            self._queues[name] = queue
         self._handlers = dict(handlers)
-        self._idle_delay = idle_delay
         self._cancellation_grace_period = cancellation_grace_period
-        self._worker_id = uuid.uuid7()
         self._started_at: ClockTime | None = None
         self._stopped_at: ClockTime | None = None
         self._active_entry_id: UUID | None = None
@@ -155,17 +184,11 @@ class AsyncQueueWorker:
         self._failed_count = 0
         self._cancelled_count = 0
         self._timed_out_count = 0
-        self._running = False
-        self._last_recovery_at: dict[BaseQueue, float] = {}
+        self._last_recovery_at: dict[AsyncQueue, float] = {}
         self._last_retention_cleanup_at: dict[AsyncQueue, float] = {}
         self._last_first_seen_scan_at: dict[AsyncQueue, float] = {}
         self._last_observed_entry_id: dict[AsyncQueue, UUID] = {}
         self._last_claim_conflict_at: dict[UUID, float] = {}
-
-    @property
-    def running(self) -> bool:
-        """Return whether this worker's dispatch loop is running."""
-        return self._running
 
     @property
     def clock(self) -> QueueClock:
@@ -176,7 +199,7 @@ class AsyncQueueWorker:
         """
         return self._clock
 
-    def resolve_budget(self, queue: BaseQueue, entry: QueueEntry) -> float:
+    def resolve_budget(self, queue: AsyncQueue, entry: QueueEntry) -> float:
         """Return the execution budget governing this entry, in seconds.
 
         A worker override wins over the entry's own budget, which wins over the
@@ -280,10 +303,8 @@ class AsyncQueueWorker:
             self._active_queue_name = None
             self._log_state_change("stopped")
 
-    async def _publish_first_seen_entries(self, queue: BaseQueue) -> None:
+    async def _publish_first_seen_entries(self, queue: AsyncQueue) -> None:
         """Publish snapshots beyond this worker's completed-scan UUIDv7 cursor."""
-        if not isinstance(queue, AsyncQueue):
-            return
         now = asyncio.get_running_loop().time()
         if now - self._last_first_seen_scan_at.get(queue, float("-inf")) < 1:
             return
@@ -302,9 +323,9 @@ class AsyncQueueWorker:
             if previous_entry_id is None or largest_entry_id > previous_entry_id:
                 self._last_observed_entry_id[queue] = largest_entry_id
 
-    async def _prune_expired_entries(self, queue: BaseQueue) -> None:
+    async def _prune_expired_entries(self, queue: AsyncQueue) -> None:
         """Periodically remove expired AsyncQueue terminal records."""
-        if not isinstance(queue, AsyncQueue) or queue.retention_timeout is None:
+        if queue.retention_timeout is None:
             return
         now = asyncio.get_running_loop().time()
         if now - self._last_retention_cleanup_at.get(queue, float("-inf")) < 1:
@@ -313,83 +334,45 @@ class AsyncQueueWorker:
         await queue._aprune_expired_entries()
 
     async def _next_entry(
-        self, queue: BaseQueue
+        self, queue: AsyncQueue
     ) -> tuple[QueueEntry, float | None] | None:
         """Get one entry, claiming and leasing it where the backend supports it."""
-        if not queue.supports_claim_leases:
-            return await queue.adequeue_entry(), None
-        now = asyncio.get_running_loop().time()
-        if (
-            now - self._last_recovery_at.get(queue, float("-inf"))
-            >= _RECOVERY_INTERVAL_SECONDS
-        ):
-            self._last_recovery_at[queue] = now
-            recovered_count = await queue.arecover_expired_claims()
-            if recovered_count:
-                logger.warning(
-                    "Recovered %s expired queue claim%s",
-                    recovered_count,
-                    "s" if recovered_count != 1 else "",
-                )
-        entry = await queue.aclaim_entry(self._worker_id)
-        lease_seconds = (
-            self.resolve_budget(queue, entry) + self._cancellation_grace_period
-        )
-        if not await queue.arenew_claim(entry.id, self._worker_id, lease_seconds):
-            logger.warning("Lost claim for queue entry %s before dispatch", entry.id)
-            return None
-        self._last_claim_conflict_at.pop(entry.id, None)
-        return entry, lease_seconds
+        return await queue.adequeue_entry(), None
 
     async def _discard_missing_entry_claim(
-        self, queue: BaseQueue, entry_id: UUID
+        self, queue: AsyncQueue, entry_id: UUID
     ) -> None:
         """Drop a claimed ID whose durable entry record no longer exists."""
-        try:
-            acknowledged = await queue.aacknowledge_claim(entry_id, self._worker_id)
-        except Exception:
-            logger.exception("Unable to discard missing queue entry %s", entry_id)
-        else:
-            if acknowledged:
-                logger.error("Discarded missing queue entry %s", entry_id)
-            else:
-                logger.warning("Lost claim for missing queue entry %s", entry_id)
+        logger.error("Discarded missing queue entry %s", entry_id)
+
+    async def _renew_claim(
+        self, queue: AsyncQueue, entry: QueueEntry, lease_seconds: float
+    ) -> bool:
+        """Renew a backend-specific claim lease.
+
+        The generic worker never creates leases; a delivery-specific worker
+        must override this alongside its claim implementation.
+        """
+        raise RuntimeError("Claim renewal requires a delivery-specific worker")
+
+    async def _mark_claimed_running(
+        self, queue: AsyncQueue, entry: QueueEntry
+    ) -> QueueEntry | None:
+        """Persist running state while a backend-specific claim is owned."""
+        raise RuntimeError("Claim settlement requires a delivery-specific worker")
+
+    async def _settle_claimed(self, queue: AsyncQueue, entry: QueueEntry) -> bool:
+        """Atomically settle a backend-specific claim."""
+        raise RuntimeError("Claim settlement requires a delivery-specific worker")
 
     @staticmethod
     def _log_missing_entry(entry_id: UUID) -> None:
         """Report an entry removed outside the queue lifecycle without stopping."""
         logger.error("Queue entry %s was unexpectedly removed", entry_id)
 
-    @staticmethod
-    def _renewal_delay(lease_seconds: float) -> float:
-        if lease_seconds <= _SHORT_LEASE_SECONDS:
-            return lease_seconds / 2
-        if lease_seconds <= _MEDIUM_LEASE_SECONDS:
-            return lease_seconds * 2 / 3
-        return lease_seconds * 3 / 4
-
-    async def _renew_claim(
-        self, queue: BaseQueue, entry: QueueEntry, lease_seconds: float
-    ) -> bool:
-        try:
-            while True:
-                await asyncio.sleep(self._renewal_delay(lease_seconds))
-                if not await queue.arenew_claim(
-                    entry.id, self._worker_id, lease_seconds
-                ):
-                    logger.warning(
-                        "Lost claim for queue entry %s during renewal", entry.id
-                    )
-                    return False
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Unable to renew claim for queue entry %s", entry.id)
-            return False
-
     async def _dispatch(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         handler: QueueHandler,
         entry: QueueEntry,
         lease_seconds: float | None = None,
@@ -397,7 +380,7 @@ class AsyncQueueWorker:
         if not self._entry_was_observed(queue, entry):
             await queue.apublish_lifecycle_snapshot(entry)
         if lease_seconds is not None:
-            running_entry = await queue.amark_claim_running(entry.id, self._worker_id)
+            running_entry = await self._mark_claimed_running(queue, entry)
             if running_entry is None:
                 logger.warning(
                     "Lost claim for queue entry %s before dispatch", entry.id
@@ -405,7 +388,7 @@ class AsyncQueueWorker:
                 return
             entry = running_entry
         else:
-            entry = await queue.amark_running(entry.id)
+            entry = await queue._amark_running(entry.id)
         await queue.apublish_lifecycle_snapshot(entry)
         timeout_seconds = self.resolve_budget(queue, entry)
         active_timeout: _ActiveTimeout | None = None
@@ -491,13 +474,11 @@ class AsyncQueueWorker:
             self._active_entry_id = None
             self._active_queue_name = None
 
-    def _entry_was_observed(self, queue: BaseQueue, entry: QueueEntry) -> bool:
+    def _entry_was_observed(self, queue: AsyncQueue, entry: QueueEntry) -> bool:
         """Return whether an AsyncQueue scan already published this entry."""
         return (
-            isinstance(queue, AsyncQueue)
-            and (entry_id := self._last_observed_entry_id.get(queue)) is not None
-            and entry.id <= entry_id
-        )
+            entry_id := self._last_observed_entry_id.get(queue)
+        ) is not None and entry.id <= entry_id
 
     async def _stop_renewal_task(self, renewal_task: asyncio.Task[bool]) -> None:
         """Stop a claim heartbeat before the entry is settled."""
@@ -515,7 +496,7 @@ class AsyncQueueWorker:
 
     async def _abandon_unresponsive_handler(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         handler_task: asyncio.Task[object],
         claim_worker_id: UUID | None,
@@ -535,11 +516,11 @@ class AsyncQueueWorker:
             return await self._settle_terminal(
                 queue, entry, claim_worker_id, QueueEntryStatus.TIMEOUT
             )
-        return await self._record_terminal(queue, entry, queue.amark_timed_out)
+        return await self._record_terminal(queue, entry, queue._amark_timed_out)
 
     async def _finish_cancellation(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         handler_task: asyncio.Task[object],
         claim_worker_id: UUID | None,
@@ -579,7 +560,7 @@ class AsyncQueueWorker:
 
     async def _record_result(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         result: object,
         claim_worker_id: UUID | None = None,
@@ -598,12 +579,12 @@ class AsyncQueueWorker:
                     result=result,
                 )
             return await self._record_terminal(
-                queue, entry, queue.amark_succeeded, result
+                queue, entry, queue._amark_succeeded, result
             )
 
     async def _record_failure(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         error: Exception,
         claim_worker_id: UUID | None = None,
@@ -617,11 +598,11 @@ class AsyncQueueWorker:
                 QueueEntryStatus.FAILED,
                 error={"type": type(error).__name__, "message": str(error)},
             )
-        return await self._record_terminal(queue, entry, queue.amark_failed, error)
+        return await self._record_terminal(queue, entry, queue._amark_failed, error)
 
     async def _settle_terminal(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         worker_id: UUID,
         status: QueueEntryStatus,
@@ -638,7 +619,7 @@ class AsyncQueueWorker:
                 error=error,
                 finished_at=await queue.clock.anow(),
             )
-            settled = await queue.asettle_claim(worker_id, terminal_entry)
+            settled = await self._settle_claimed(queue, terminal_entry)
         except QueueEntryNotFoundError:
             self._log_missing_entry(entry.id)
             await self._discard_missing_entry_claim(queue, entry.id)
@@ -657,7 +638,7 @@ class AsyncQueueWorker:
 
     async def _record_claim_persistence_failure(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         worker_id: UUID,
         cause: Exception,
@@ -684,7 +665,7 @@ class AsyncQueueWorker:
                 },
                 finished_at=await queue.clock.anow(),
             )
-            settled = await queue.asettle_claim(worker_id, failure_entry)
+            settled = await self._settle_claimed(queue, failure_entry)
         except Exception:
             logger.exception(
                 "Unable to record settlement failure for entry %s", entry.id
@@ -702,7 +683,7 @@ class AsyncQueueWorker:
 
     async def _record_terminal(
         self,
-        queue: BaseQueue,
+        queue: AsyncQueue,
         entry: QueueEntry,
         update: Callable[..., Awaitable[QueueEntry]],
         *args: object,
@@ -723,7 +704,7 @@ class AsyncQueueWorker:
         return terminal_entry
 
     async def _record_persistence_failure(
-        self, queue: BaseQueue, entry: QueueEntry
+        self, queue: AsyncQueue, entry: QueueEntry
     ) -> QueueEntry | None:
         try:
             current_entry = await queue.aget_entry(entry.id)
@@ -735,7 +716,7 @@ class AsyncQueueWorker:
         if current_entry.status is not QueueEntryStatus.RUNNING:
             return current_entry
         try:
-            return await queue.amark_failed(
+            return await queue._amark_failed(
                 entry.id,
                 QueuePersistenceError("Unable to persist terminal queue outcome"),
             )

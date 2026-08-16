@@ -34,7 +34,7 @@ Example
 ```python
 QUEUES = {
     "default": {
-        "BACKEND": "django_queue.backends.RedisQueueJson",
+        "BACKEND": "django_queue.backends.redis.RedisAsyncQueueJson",
         "LOCATION": f"redis://localhost:6379/12",
         "maxsize": 64,
     },
@@ -44,16 +44,58 @@ QUEUES = {
 The above configures the queue backend to be redis, storing FIFO data in JSON format.
 Redis-backed queues take a Redis URL as their location and own their asynchronous
 connections; application code does not supply Redis client instances.
+Install Redis support with `pip install "django-queue[redis]"`.
 
-To implement a stack (FILO), the `django_queue.backends.RedisStackJson` can be used instead, or a `"stack": True` option added to the options.
+To implement a stack (FILO), the `django_queue.backends.redis.RedisAsyncStackJson` can be used instead, or a `"stack": True` option added to the options.
 
 All aliases are validated and initialised when Django starts. Application code
 can retrieve a configured queue through `queues["alias"]`; initialisation only
 constructs queue services and never starts a worker.
+Queue aliases cannot contain `*`, `?`, `[` or `]`.
 
-Configured in-memory queues are local to the resolving process and thread, so
-they are not a shared broker. Use Redis when producers and consumers must share
-work across threads, processes, containers, or external workers.
+Configured in-memory async queues are local to the resolving process and thread,
+so they are not a shared broker. `MemoryEventQueue` is process-scoped and is
+shared by configured threads in that process only; use Redis when producers and
+consumers must share work across processes, containers, or external workers.
+
+### Transient event queues
+
+`MemoryEventQueue` and `RedisEventQueue` deliver short-lived events to local
+listeners instead of retaining task outcomes. Configure one explicitly, then
+register one or more listeners in application code:
+
+```python
+from django_queue import queue_listener
+
+
+@queue_listener("events")
+async def send_notification(entry):
+    await notify(entry.payload)
+    return True
+```
+
+An eligible listener returning `True` consumes and removes the event. Returning
+`False` logs a rejection and also removes it; returning `None` lets the next
+listener see it. If every listener passes, or a filter/listener raises, the
+event is released for a short delayed retry. Events expire unconsumed after an
+entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default.
+They never acquire a task result or terminal entry record.
+
+Django starts one process-local event runtime when each process handles its
+first HTTP request and at least one event queue is configured. It owns one
+asyncio loop and one worker task per event queue. An alias may set `WORKER` to
+an event-worker subclass compatible with the selected backend: memory event
+queues require a subclass of their memory-aware worker and Redis event queues
+require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata
+is invalid because listeners provide event dispatch. Memory event queues are
+local to that process. Redis workers use claims so processes
+compete for one active delivery, but ordering remains indeterminate across
+multiple listeners, processes, or retries. Use one listener in one process when
+strict ordering is required. An active Redis listener renews its claim while it
+runs; if its worker stops before settling the event, a later dispatcher recovers
+the expired claim for redelivery.
+The runtime retries an event dispatcher that stops from an infrastructure
+failure with bounded backoff.
 
 ### Queue type extensions
 
@@ -62,7 +104,7 @@ Each alias may optionally choose the concrete worker and entry types it uses:
 ```python
 QUEUES = {
     "requests": {
-        "BACKEND": "django_queue.backends.RedisQueue",
+        "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
         "LOCATION": "redis://redis:6379/12",
         "HANDLER": "myproject.queue_handlers.process_request",
         "WORKER": "myproject.workers.RequestWorker",
@@ -72,16 +114,21 @@ QUEUES = {
 ```
 
 `WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import
-path. They default to `AsyncQueueWorker` and `QueueEntry`, respectively.
-Workers must subclass `AsyncQueueWorker` and use its normal queue-lookup and
-handler-mapping constructor. A queue constructs its worker with its own clock,
+path. `ENTRY_CLASS` defaults to `QueueEntry`. Each backend selects its own
+default worker: memory async and event queues use memory-aware workers, while
+Redis async and event queues use Redis-aware workers that manage their transport
+delivery internally. `AsyncQueueWorker` and `EventQueueWorker` are common
+orchestration bases; concrete backend workers own provider delivery mechanics.
+A configured async-queue worker must be compatible with the backend's selected
+worker type and use its normal queue-lookup and handler-mapping constructor. A
+queue constructs its worker with its own clock,
 so a subclass that overrides `__init__` must accept a `clock` keyword and pass
 it to `super().__init__`, or accept `**kwargs` and forward them. Entry classes
 must subclass `QueueEntry` and declare any additional fields as a frozen
 dataclass; those fields must be JSON-serialisable, and are persisted and
-restored without further work. Django validates and imports entry types during queue configuration and worker types during
-`runqueues` startup. A worker is constructed only when its queue first becomes
-active; an entry only when it is enqueued, restored, or updated.
+restored without further work. Django validates and imports entry and worker
+types during queue configuration. A worker is constructed only when its queue
+first becomes active; an entry only when it is enqueued, restored, or updated.
 
 `RETENTION_TIMEOUT` controls how long terminal entry records remain available.
 It defaults to 600 seconds; set it to `None` to explicitly disable automatic
@@ -93,11 +140,12 @@ Custom queue backends that support identified entry dispatch must implement
 `has_pending_entries()`, returning whether `dequeue_entry()` can immediately
 return an entry. They must also implement `aprune_entry()` and
 `_aprune_expired_entries()`: pruning rejects non-terminal entries, removes the
-durable record, and publishes an observer-only `terminated` snapshot. To support
-local ASGI activation, they must also call `send_entry_enqueued()` after durably
-enqueueing an entry. Built-in backends expose `queue_name`, their stable entry
-namespace, which local ASGI enqueue observation uses to match entries to an
-alias.
+durable record, and publishes an observer-only `terminated` snapshot. Workers
+publish an entry's initial lifecycle snapshot when they first observe it.
+Custom backends that emit Django's `entry_enqueued` signal must call
+`send_entry_enqueued()` after durable enqueue; that signal is separate from
+lifecycle observation. Built-in backends expose `queue_name`, their stable entry
+namespace.
 
 ## Usage
 
@@ -201,8 +249,9 @@ elapsed time is meaningless rather than merely small.
 ### Asynchronous queue API and heartbeat
 
 The `a`-prefixed entry operations are the primary API in asynchronous code:
-`aenqueue`, `aget_entry`, `adequeue_entry`, `ahas_pending_entries`, and the
-`amark_*` lifecycle operations. AsyncQueue backends also expose `aprune_entry`
+`aenqueue`, `aget_entry`, `adequeue_entry`, and `ahas_pending_entries`.
+Lifecycle transitions are worker-internal operations, not producer APIs.
+AsyncQueue backends also expose `aprune_entry`
 for explicit retained-entry removal. Built-in queues also expose `aadd`, `aget`,
 `apoll`, `apeek`, `asize`, and `aclear` for raw queue values. Await these from
 an ASGI view, a handler, or another coroutine:
@@ -220,7 +269,7 @@ class supplies the synchronous wrappers. `len(queue)`, `bool(queue)`, and
 an event loop. Synchronous wrapper calls release their bridge-loop resources
 after each operation, so a custom backend's `aclose()` must be idempotent.
 
-An ASGI worker and `runqueues` dispose their queues on their owning event loop.
+`runqueues` disposes its queues on its owning event loop.
 Other async hosts must await `aclose_queues()` before closing that loop;
 `close_queues()` only serves synchronous-wrapper resources and cannot close a
 different loop's Redis client.
@@ -259,9 +308,9 @@ assert entry.status == "queued"
 
 ### Lifecycle observation
 
-Use `queue_observer` for best-effort, passive task monitoring. A subscription
-receives immutable entry snapshots from a task worker; it cannot affect task
-execution.
+Use `queue_observer` for best-effort, passive async-queue monitoring. A subscription
+receives immutable entry snapshots from an async-queue worker; it cannot affect
+async-queue execution.
 
 ```python
 from django_queue import queue_observer
@@ -336,10 +385,7 @@ async def process_request(entry):
     return {"processed": entry.payload["request_id"]}
 
 
-worker = AsyncQueueWorker(
-    {"default": queues["default"]},
-    {"default": process_request},
-)
+worker = queues["default"].create_worker("default", process_request)
 asyncio.run(worker.run())
 ```
 
@@ -355,12 +401,11 @@ execute more than once. Handlers that make external changes must therefore be
 idempotent. Queue backends without claim-lease support retain best-effort
 delivery.
 
-Claim, renewal, acknowledgement, recovery, and settlement are backend-neutral
-queue operations; Redis keys, scripts, timestamps, and record layout are not
-part of the public contract. A claim raises `QueueEmptyException` when no entry
-is pending, `QueueClaimConflictError` when its pending entry is already claimed,
-and `QueueEntryMissingError` when the claimed entry record is unavailable.
-Redis Cluster is not supported by these primitives.
+Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery
+operations, owned by the Redis worker and its private queue provider rather
+than the public queue API. Other transports may use a different native model.
+Redis keys, scripts, timestamps, and record layout are not public contract.
+Redis Cluster is not supported by the Redis delivery implementation.
 
 If a terminal outcome cannot be persisted because of an infrastructure failure,
 the worker logs the failure and continues. When it can still read a `running`
@@ -391,7 +436,7 @@ The budget is resolved per dispatch, taking the first of these that is set:
 ```python
 QUEUES = {
     "default": {
-        "BACKEND": "django_queue.backends.RedisQueueJson",
+        "BACKEND": "django_queue.backends.redis.RedisAsyncQueueJson",
         "LOCATION": "redis://localhost:6379/12",
         "TIMEOUT": 30,
     },
@@ -417,7 +462,8 @@ independent: the budget decides when to stop, and the entry records what
 happened. A timed-out entry's `ran_for` is a wall-clock measurement and will not
 equal the budget that expired.
 
-Custom entry-capable backends must implement `mark_timed_out(entry_id)`
+Custom entry-capable backends must implement the worker-internal
+`_amark_timed_out(entry_id)`
 alongside the other terminal transitions, moving a `running` entry to `timeout`
 and setting `finished_at`.
 
@@ -485,46 +531,6 @@ Snapshots and log records are local to the worker process. Collect logs or add
 an exporter in application infrastructure to aggregate multiple `runqueues` or
 web processes; this package does not provide distributed liveness or metrics.
 
-### ASGI in-process worker
-
-For local, single-process use and integration tests, an ASGI application can
-explicitly run a worker through the ASGI lifespan protocol. The application,
-not `django-queue`, decides whether to apply this wrapper; for example, it can
-use an environment-derived Django setting in `asgi.py`.
-
-```python
-from django.conf import settings
-from django.core.asgi import get_asgi_application
-
-from django_queue.asgi import with_queue_worker
-
-
-async def process_request(entry):
-    return {"processed": entry.payload["request_id"]}
-
-
-application = get_asgi_application()
-if settings.ENABLE_LOCAL_QUEUE_WORKER:
-    application = with_queue_worker(
-        application,
-        handlers={"default": process_request},
-    )
-```
-
-`with_queue_worker()` observes entries enqueued by that ASGI process after
-lifespan startup and starts one configured worker for each alias only when that
-alias first receives entry work. It cooperatively stops active workers during
-lifespan shutdown. The observation is deliberately process-local: another
-process cannot wake this worker. It logs a warning whenever it starts because
-an in-process worker is not supported for production use. Use an external
-`runqueues` worker with a shared backend such as Redis in production.
-
-The wrapper accepts an explicit queue mapping for integration tests. Pass the
-same `MemoryQueue` instance to the wrapper and to the component producing work
-to exercise a complete request-to-worker flow without Redis. That queue remains
-local to one ASGI process: it cannot be consumed by another process, container,
-or external `runqueues` worker.
-
 ### External `runqueues` worker
 
 For production, run queue processing as a separate Django process and use a
@@ -535,7 +541,7 @@ that the process should dispatch:
 # settings.py
 QUEUES = {
     "requests": {
-        "BACKEND": "django_queue.backends.RedisQueueJson",
+        "BACKEND": "django_queue.backends.redis.RedisAsyncQueueJson",
         "LOCATION": "redis://redis:6379/12",
         "HANDLER": "myproject.queue_handlers.process_request",
     },
@@ -593,8 +599,8 @@ All queues conform to the following interface:
 - has_pending_entries(): returns whether `dequeue_entry()` can return an entry.
 - prune_entry(): removes one retained terminal entry; AsyncQueue only.
 - aprune_entry(): asynchronous equivalent of `prune_entry()`; AsyncQueue only.
-- enqueue(): custom entry-capable backends must call `send_entry_enqueued()`
-  after durable enqueue when local ASGI activation is required.
+- enqueue(): emits Django's `entry_enqueued` signal after durable enqueue;
+  lifecycle observers receive snapshots when a worker first sees the entry.
 - the queue itself can be used in the context of a boolean: True if there are items in the queue else False.
 
 #### Exceptions
