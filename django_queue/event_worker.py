@@ -104,7 +104,7 @@ class EventQueueWorker(BaseQueueWorker, ABC):
                 if (
                     renewal_task is not None
                     and renewal_task.done()
-                    and renewal_task.result() is False
+                    and not self._renewal_succeeded(renewal_task, entry)
                 ):
                     return
                 if result is True:
@@ -127,8 +127,20 @@ class EventQueueWorker(BaseQueueWorker, ABC):
         finally:
             if renewal_task is not None:
                 renewal_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await renewal_task
+
+    def _renewal_succeeded(
+        self, renewal_task: asyncio.Task[bool], entry: QueueEntry
+    ) -> bool:
+        """Return whether a completed renewal task retained this event's lease."""
+        try:
+            return renewal_task.result()
+        except asyncio.CancelledError:
+            logger.warning("Event claim renewal was cancelled for %s", entry.id)
+        except Exception:
+            logger.exception("Event claim renewal failed for %s", entry.id)
+        return False
 
     async def _renew_claim(self, entry: QueueEntry, lease_seconds: float) -> bool:
         """Renew a provider-specific delivery lease while a listener runs."""

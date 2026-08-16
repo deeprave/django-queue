@@ -247,42 +247,19 @@ class TestMemoryAsyncQueueEntries:
                 {"requests": lambda entry: asyncio.sleep(0)},
             )
             scan_count = 0
-            original_list_entries = queue._alist_entries
+            original_list_entries = queue.alist
 
             async def list_entries():
                 nonlocal scan_count
                 scan_count += 1
                 return await original_list_entries()
 
-            queue._alist_entries = list_entries
+            queue.alist = list_entries
             await worker._publish_first_seen_entries(queue)
             await worker._publish_first_seen_entries(queue)
             return scan_count
 
         assert asyncio.run(exercise()) == 1
-
-    def test_worker_skips_a_pending_id_whose_entry_was_removed(self, queue):
-        async def exercise():
-            stale_id = await queue.aenqueue("stale")
-            del queue._provider._entries[stale_id]
-            entry_id = await queue.aenqueue("work")
-
-            async def handle(entry):
-                return entry.payload
-
-            worker = AsyncQueueWorker(
-                {"requests": queue}, {"requests": handle}, idle_delay=0.001
-            )
-            task = asyncio.create_task(worker.run())
-            while (
-                await queue.aget_entry(entry_id)
-            ).status is not QueueEntryStatus.SUCCEEDED:
-                await asyncio.sleep(0.001)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        asyncio.run(exercise())
 
     def test_observer_rejects_event_queue(self, monkeypatch):
         handler = django_queue.QueueHandler(
@@ -334,7 +311,7 @@ class TestMemoryAsyncQueueEntries:
         queue._mark_running(completed_id)
         queue._mark_succeeded(completed_id, "done")
 
-        entries = queue._list_entries()
+        entries = queue.list()
 
         assert {entry.id for entry in entries} == {queued_id, completed_id}
         assert {entry.status for entry in entries} == {

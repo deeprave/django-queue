@@ -56,3 +56,9 @@ first-request signal for configured event queues.
 - [x] 4.7 Make common async and event workers provider-agnostic orchestration
   layers; add memory-specific default workers and move all memory and Redis
   delivery access into their respective worker implementations.
+- [x] 4.8 Promote retained AsyncQueue snapshot enumeration to `alist()` and
+  `list()`, and remove queue-provider internals from behavioural tests and the
+  demo worker.
+- [x] 4.9 Preserve worker recovery when an immediate release is needed, and
+  treat failed event-claim renewal tasks as lost ownership rather than allowing
+  them to terminate dispatch.

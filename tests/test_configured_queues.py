@@ -334,8 +334,8 @@ class TestConfiguredQueueInitialization:
 
         django_queue.initialise_queues(handler)
 
-        assert handler["events"].entry_class is TrackingEntry
-        assert handler["events"]._provider.entry_class is TrackingEntry
+        queue = handler["events"]
+        assert queue.entry_class is TrackingEntry
 
     def test_rejects_an_event_worker_configured_for_an_async_queue(self):
         handler = django_queue.QueueHandler(

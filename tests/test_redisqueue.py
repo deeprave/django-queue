@@ -1,6 +1,3 @@
-import asyncio
-from unittest.mock import AsyncMock
-
 import pytest
 
 from django_queue.backends import (
@@ -13,7 +10,6 @@ from django_queue.backends.exceptions import (
 )
 from django_queue.backends.redis import RedisAsyncQueue, RedisAsyncQueueWorker
 from django_queue.backends.redis.provider import QueueProviderRedis
-from django_queue.entries import QueueEntry
 from django_queue.worker import AsyncQueueWorker
 
 
@@ -63,32 +59,6 @@ def test_rejects_a_spoofed_redis_worker_override(redis_url):
 
     with pytest.raises(InvalidQueueBackendError, match="not compatible"):
         queue.resolve_worker_class("tasks")
-
-
-def test_redis_worker_claims_through_its_provider(redis_url, mocker):
-    async def exercise():
-        queue = RedisAsyncQueue(redis_url, queue_name="test-worker-provider")
-
-        async def handle(entry):
-            return entry.payload
-
-        worker = RedisAsyncQueueWorker({"tasks": queue}, {"tasks": handle})
-        entry = QueueEntry.create(queue="tasks", payload="work")
-        mocker.patch.object(queue._provider, "arecover", AsyncMock(return_value=(0, 0)))
-        mocker.patch.object(queue._provider, "aclaim", AsyncMock(return_value=entry))
-        mocker.patch.object(queue._provider, "arenew", AsyncMock(return_value=True))
-
-        assert await worker._next_entry(queue) == (
-            entry,
-            worker.resolve_budget(queue, entry) + worker._cancellation_grace_period,
-        )
-        queue._provider.aclaim.assert_awaited_once_with(
-            worker._worker_id, queue.default_claim_lease_seconds
-        )
-        assert not hasattr(queue, "_aclaim")
-        await queue.aclose()
-
-    asyncio.run(exercise())
 
 
 def test_capacity(redis_queue):
@@ -152,33 +122,6 @@ def test_decode_returns_text_from_a_decoding_url(redis_url):
 def test_decode_rejects_a_value_that_is_neither_text_nor_bytes():
     with pytest.raises(QueueEncodingException, match="not int"):
         QueueProviderRedis.decode(12345, "utf-8")
-
-
-def test_get_reports_empty_when_another_consumer_wins_the_race(redis_queue, mocker):
-    """size() and pop() are not atomic; a None pop means the queue drained."""
-
-    async def exercise():
-        await redis_queue.aadd("item1")
-        mocker.patch.object(
-            redis_queue._provider._async_redis(), "lpop", AsyncMock(return_value=None)
-        )
-        with pytest.raises(QueueEmptyException):
-            await redis_queue.aget()
-        await redis_queue.aclose()
-
-    asyncio.run(exercise())
-
-
-def test_poll_reports_empty_when_the_blocking_pop_returns_nothing(redis_queue, mocker):
-    async def exercise():
-        mocker.patch.object(
-            redis_queue._provider._async_redis(), "blpop", AsyncMock(return_value=None)
-        )
-        with pytest.raises(QueueEmptyException):
-            await redis_queue.apoll()
-        await redis_queue.aclose()
-
-    asyncio.run(exercise())
 
 
 def test_poll_does_not_accept_priority_timeout_arguments(redis_queue):

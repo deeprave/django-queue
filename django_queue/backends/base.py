@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import logging
 import os
 import threading
@@ -276,7 +277,8 @@ class AsyncQueue(BaseQueue):
         self._configure_provider_entry_class()
         return await self._provider.aget(entry_id)
 
-    async def _alist_entries(self) -> list[QueueEntry]:
+    async def alist(self) -> builtins.list[QueueEntry]:
+        """Return retained entry snapshots for observation and administration."""
         self._configure_provider_entry_class()
         return await self._provider.alist()
 
@@ -293,7 +295,7 @@ class AsyncQueue(BaseQueue):
         now = await self.clock.anow()
         expired_entry_ids = [
             entry.id
-            for entry in await self._alist_entries()
+            for entry in await self.alist()
             if QueueEntryStatus.TERMINATED in entry.status.next_state()
             and entry.finished_at is not None
             and now - entry.finished_at >= self.retention_timeout
@@ -369,9 +371,9 @@ class AsyncQueue(BaseQueue):
             finished_at=await self.clock.anow(),
         )
 
-    def _list_entries(self) -> list[QueueEntry]:
-        """Return retained task snapshots for lifecycle-observer bootstrap."""
-        return self._run_synchronously(self._alist_entries)
+    def list(self) -> builtins.list[QueueEntry]:
+        """Synchronously return retained entry snapshots."""
+        return self._run_synchronously(self.alist)
 
     def prune_entry(self, entry_id: UUID) -> None:
         """Remove one retained terminal entry and publish its final snapshot."""

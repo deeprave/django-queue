@@ -61,19 +61,6 @@ class TestMemoryAsyncQueueConfiguration:
 
 
 class TestMemoryAsyncQueueOperations:
-    def test_delegates_raw_operations_to_its_provider(self, monkeypatch):
-        queue = MemoryAsyncQueue()
-        received = []
-
-        async def add_items(*items):
-            received.extend(items)
-
-        monkeypatch.setattr(queue._provider, "aadd_item", add_items)
-
-        queue.add("one", "two")
-
-        assert received == ["one", "two"]
-
     def test_poll_does_not_accept_priority_timeout_arguments(self, queue):
         with pytest.raises(TypeError):
             queue.poll(timeout=1)

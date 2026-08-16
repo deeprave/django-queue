@@ -1,5 +1,4 @@
 import asyncio
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -69,28 +68,6 @@ def test_get_empty(redis_priority_queue):
         redis_priority_queue.get()
 
 
-def test_poll_blocking(redis_priority_queue, mocker):
-    """
-    Test `poll()` blocks if the queue is empty and retrieves the next added item.
-    """
-
-    async def exercise():
-        client = redis_priority_queue._provider._async_redis()
-        mocker.patch.object(
-            client,
-            "bzpopmax",
-            AsyncMock(
-                return_value=(redis_priority_queue.queue_name, b"blocked_item", 0)
-            ),
-        )
-        await redis_priority_queue.aadd((10, "item1"))
-        assert await redis_priority_queue.apoll(timeout=5) == "item1"
-        assert await redis_priority_queue.apoll(timeout=5) == "blocked_item"
-        await redis_priority_queue.aclose()
-
-    asyncio.run(exercise())
-
-
 def test_poll_wakes_when_a_priority_item_is_added(redis_priority_queue):
     async def exercise():
         poll_task = asyncio.create_task(redis_priority_queue.apoll(timeout=1))
@@ -98,26 +75,6 @@ def test_poll_wakes_when_a_priority_item_is_added(redis_priority_queue):
         await redis_priority_queue.aadd((10, "arrived"))
 
         assert await asyncio.wait_for(poll_task, timeout=0.5) == "arrived"
-        await redis_priority_queue.aclose()
-
-    asyncio.run(exercise())
-
-
-def test_poll_applies_timeout_to_each_retry_attempt(redis_priority_queue, mocker):
-    async def exercise():
-        client = redis_priority_queue._provider._async_redis()
-        blocking_pop = mocker.patch.object(
-            client, "bzpopmax", AsyncMock(return_value=None)
-        )
-
-        with pytest.raises(QueueEmptyException):
-            await redis_priority_queue.apoll(timeout=2, retries=2)
-
-        assert blocking_pop.await_count == 2
-        assert [call.kwargs["timeout"] for call in blocking_pop.await_args_list] == [
-            2,
-            2,
-        ]
         await redis_priority_queue.aclose()
 
     asyncio.run(exercise())

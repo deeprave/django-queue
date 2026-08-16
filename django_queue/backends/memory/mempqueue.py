@@ -41,7 +41,6 @@ class MemoryAsyncPriorityQueue(AsyncQueue):
 
     aenqueue = MemoryAsyncQueue.aenqueue
     aget_entry = MemoryAsyncQueue.aget_entry
-    _alist_entries = MemoryAsyncQueue._alist_entries
     aprune_entry = MemoryAsyncQueue.aprune_entry
     _aprune_expired_entries = MemoryAsyncQueue._aprune_expired_entries
     apublish_lifecycle_snapshot = MemoryAsyncQueue.apublish_lifecycle_snapshot

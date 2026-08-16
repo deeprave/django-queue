@@ -249,7 +249,8 @@ elapsed time is meaningless rather than merely small.
 ### Asynchronous queue API and heartbeat
 
 The `a`-prefixed entry operations are the primary API in asynchronous code:
-`aenqueue`, `aget_entry`, `adequeue_entry`, and `ahas_pending_entries`.
+`aenqueue`, `aget_entry`, `alist`, `adequeue_entry`, and
+`ahas_pending_entries`.
 Lifecycle transitions are worker-internal operations, not producer APIs.
 AsyncQueue backends also expose `aprune_entry`
 for explicit retained-entry removal. Built-in queues also expose `aadd`, `aget`,
@@ -597,6 +598,8 @@ All queues conform to the following interface:
 - clear(): remove all items from the queue.
 - close(): closes and destroys the queue.
 - has_pending_entries(): returns whether `dequeue_entry()` can return an entry.
+- list(): returns retained AsyncQueue entry snapshots.
+- alist(): asynchronous equivalent of `list()`; AsyncQueue only.
 - prune_entry(): removes one retained terminal entry; AsyncQueue only.
 - aprune_entry(): asynchronous equivalent of `prune_entry()`; AsyncQueue only.
 - enqueue(): emits Django's `entry_enqueued` signal after durable enqueue;

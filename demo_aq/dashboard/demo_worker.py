@@ -13,11 +13,13 @@ from faker import Faker
 
 from django_queue.backends.base import BaseQueue
 from django_queue.backends.redis import RedisAsyncQueueWorker
+from django_queue.clock import MICROSECONDS_PER_SECOND
 from django_queue.entries import QueueEntry, QueueEntryStatus
 
 _QUEUED_DELAY_SECONDS = (10, 30)
 _RUNNING_DELAY_SECONDS = (30, 60)
 _FOLLOW_UP_DELAY_SECONDS = (5, 20)
+_IMMEDIATE_RELEASE_DELAY_SECONDS = 1 / MICROSECONDS_PER_SECOND
 
 logger = logging.getLogger(__name__)
 _faker = Faker("en_US")
@@ -64,7 +66,7 @@ class DemoQueueWorker(RedisAsyncQueueWorker):
         self, queue: BaseQueue
     ) -> tuple[QueueEntry, float | None] | None:
         await self._recover_expired_claims(queue)
-        provider = queue._provider
+        provider = self._providers[queue]
         entry = await provider.aclaim(
             self._worker_id, queue.default_claim_lease_seconds
         )
@@ -88,7 +90,10 @@ class DemoQueueWorker(RedisAsyncQueueWorker):
             provider,
             entry,
             self._worker_id,
-            max(0, _transition_at(entry, QueueEntryStatus.RUNNING) - time.time()),
+            max(
+                _IMMEDIATE_RELEASE_DELAY_SECONDS,
+                _transition_at(entry, QueueEntryStatus.RUNNING) - time.time(),
+            ),
         )
         return None
 

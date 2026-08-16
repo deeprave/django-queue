@@ -59,4 +59,7 @@ def _random_messages(min_entries: int, max_entries: int) -> list[str]:
 
 async def _clear_demo_queue(queue) -> None:
     """Remove this demo queue's retained task state before publishing a batch."""
+    # Deliberately provider-local demo-fixture cleanup; AsyncQueue does not
+    # expose a general reset API because normal entries may only be pruned once
+    # terminal.
     await queue._provider.aclear_entries()

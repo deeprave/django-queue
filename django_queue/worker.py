@@ -309,7 +309,7 @@ class AsyncQueueWorker(BaseQueueWorker):
         if now - self._last_first_seen_scan_at.get(queue, float("-inf")) < 1:
             return
         self._last_first_seen_scan_at[queue] = now
-        entries = await queue._alist_entries()
+        entries = await queue.alist()
         previous_entry_id = self._last_observed_entry_id.get(queue)
         new_entries = [
             entry
