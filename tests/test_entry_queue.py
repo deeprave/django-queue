@@ -47,7 +47,7 @@ def queue(request):
     ids=["fifo", "priority", "stack"],
 )
 def observer_queue(request, monkeypatch):
-    handler = django_queue.QueueHandler(
+    handler = django_queue.QueueRegistry(
         {
             "requests": {
                 "BACKEND": f"django_queue.backends.{request.param.__name__}",
@@ -72,7 +72,7 @@ async def _process_one(queue, queue_name="requests"):
     )
     entry_id = await queue.aenqueue("work")
     task = asyncio.create_task(worker.run())
-    while (await queue.aget_entry(entry_id)).status is not QueueEntryStatus.SUCCEEDED:
+    while (await queue.afind(entry_id)).status is not QueueEntryStatus.SUCCEEDED:
         await asyncio.sleep(0.001)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -81,8 +81,8 @@ async def _process_one(queue, queue_name="requests"):
 
 class ObserverEventQueue(EventQueue):
     capacity = 0
-    aadd = aget = apoll = apeek = asize = aenqueue = aget_entry = _event_queue_noop
-    adequeue_entry = ahas_pending_entries = _event_queue_noop
+    aadd = aget = apoll = apeek = asize = aenqueue = afind = _event_queue_noop
+    adequeue = ahas_pending = _event_queue_noop
     _amark_running = _amark_succeeded = _amark_failed = _event_queue_noop
     _amark_cancelled = _amark_timed_out = _event_queue_noop
 
@@ -111,7 +111,7 @@ class TestMemoryAsyncQueueEntries:
             assert not hasattr(queue, name)
 
     def test_observer_routes_live_snapshots_by_backend_queue_name(self, monkeypatch):
-        handler = django_queue.QueueHandler(
+        handler = django_queue.QueueRegistry(
             {
                 "alias": {
                     "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -227,13 +227,13 @@ class TestMemoryAsyncQueueEntries:
             async def publish(entry):
                 observed_ids.append(entry.id)
 
-            queue.apublish_lifecycle_snapshot = publish
+            queue.apublish = publish
             first_id = await queue.aenqueue("first")
-            await worker._publish_first_seen_entries(queue)
+            await worker._publish_new(queue)
             second_id = await queue.aenqueue("second")
             third_id = await queue.aenqueue("third")
             worker._last_first_seen_scan_at[queue] = float("-inf")
-            await worker._publish_first_seen_entries(queue)
+            await worker._publish_new(queue)
             return first_id, second_id, third_id
 
         first_id, second_id, third_id = asyncio.run(exercise())
@@ -255,14 +255,14 @@ class TestMemoryAsyncQueueEntries:
                 return await original_list_entries()
 
             queue.alist = list_entries
-            await worker._publish_first_seen_entries(queue)
-            await worker._publish_first_seen_entries(queue)
+            await worker._publish_new(queue)
+            await worker._publish_new(queue)
             return scan_count
 
         assert asyncio.run(exercise()) == 1
 
     def test_observer_rejects_event_queue(self, monkeypatch):
-        handler = django_queue.QueueHandler(
+        handler = django_queue.QueueRegistry(
             {
                 "events": {
                     "BACKEND": "tests.test_entry_queue.ObserverEventQueue",
@@ -282,7 +282,7 @@ class TestMemoryAsyncQueueEntries:
         registration = _Registration(lambda entry: None, None, initialising=False)
         with observers.lock:
             observers.registrations.append(registration)
-        entry = observer_queue.get_entry(observer_queue.enqueue("work"))
+        entry = observer_queue.find(observer_queue.enqueue("work"))
 
         for _ in range(_EVENT_QUEUE_SIZE + 2):
             observers.publish(entry)
@@ -321,7 +321,7 @@ class TestMemoryAsyncQueueEntries:
 
     def test_observer_orders_a_terminated_snapshot_during_bootstrap(self, queue):
         entry_id = queue.enqueue("completed")
-        queued = queue.get_entry(entry_id)
+        queued = queue.find(entry_id)
         running = queue._mark_running(entry_id)
         succeeded = queue._mark_succeeded(entry_id, "done")
         terminated = replace(
@@ -339,8 +339,8 @@ class TestMemoryAsyncQueueEntries:
     def test_synchronous_entry_api_uses_the_asynchronous_implementation(self, queue):
         entry_id = queue.enqueue({"request_id": 42})
 
-        entry = queue.get_entry(entry_id)
-        dequeued = queue.dequeue_entry()
+        entry = queue.find(entry_id)
+        dequeued = queue.dequeue()
         running = queue._mark_running(entry_id)
         completed = queue._mark_succeeded(entry_id, {"ok": True})
 
@@ -352,8 +352,8 @@ class TestMemoryAsyncQueueEntries:
     def test_asynchronous_entry_api_matches_the_synchronous_surface(self, queue):
         async def exercise():
             entry_id = await queue.aenqueue({"request_id": 42})
-            entry = await queue.aget_entry(entry_id)
-            dequeued = await queue.adequeue_entry()
+            entry = await queue.afind(entry_id)
+            dequeued = await queue.adequeue()
             running = await queue._amark_running(entry_id)
             completed = await queue._amark_succeeded(entry_id, {"ok": True})
             return entry_id, entry, dequeued, running, completed
@@ -384,12 +384,12 @@ class TestMemoryAsyncQueueEntries:
         finally:
             entry_enqueued.disconnect(failing_receiver)
 
-        assert queue.get_entry(entry_id).payload == "work"
+        assert queue.find(entry_id).payload == "work"
 
     def test_enqueue_returns_an_id_and_persists_queued_entry(self, queue):
         entry_id = queue.enqueue({"request_id": 42})
 
-        entry = queue.get_entry(entry_id)
+        entry = queue.find(entry_id)
 
         assert entry.id == entry_id
         assert entry.queue == "requests"
@@ -402,12 +402,12 @@ class TestMemoryAsyncQueueEntries:
     ):
         entry_id = queue.enqueue("work")
 
-        entry = queue.dequeue_entry()
+        entry = queue.dequeue()
 
         assert entry.id == entry_id
-        assert queue.get_entry(entry_id) == entry
+        assert queue.find(entry_id) == entry
         with pytest.raises(QueueEmptyException):
-            queue.dequeue_entry()
+            queue.dequeue()
 
     def test_records_lifecycle_transitions(self, queue):
         entry_id = queue.enqueue("work")
@@ -437,11 +437,11 @@ class TestMemoryAsyncQueueEntries:
         assert failed.status is QueueEntryStatus.FAILED
         assert failed.dispatched_at is None
         assert failed.finished_at == FIXED_CLOCK_TIME
-        assert not queue.has_pending_entries()
+        assert not queue.has_pending()
 
-    def test_get_entry_reports_a_missing_retained_entry(self, queue):
+    def test_find_reports_a_missing_retained_record(self, queue):
         with pytest.raises(QueueEntryNotFoundError):
-            queue.get_entry(uuid4())
+            queue.find(uuid4())
 
     def test_prune_removes_a_terminal_entry_and_notifies_observers(
         self, observer_queue
@@ -459,16 +459,16 @@ class TestMemoryAsyncQueueEntries:
         )
         try:
             entry_id = observer_queue.enqueue("work")
-            observer_queue.dequeue_entry()
+            observer_queue.dequeue()
             observer_queue._mark_running(entry_id)
             observer_queue._mark_succeeded(entry_id, "done")
 
-            observer_queue.prune_entry(entry_id)
+            observer_queue.prune(entry_id)
 
             assert terminated.wait(1)
             assert snapshots[-1].status is QueueEntryStatus.TERMINATED
             with pytest.raises(QueueEntryNotFoundError):
-                observer_queue.get_entry(entry_id)
+                observer_queue.find(entry_id)
         finally:
             subscription.unsubscribe()
 
@@ -482,12 +482,12 @@ class TestMemoryAsyncQueueEntries:
 
         async def publish(entry):
             with pytest.raises(QueueEntryNotFoundError):
-                await queue.aget_entry(entry.id)
+                await queue.afind(entry.id)
             snapshots.append(entry)
 
-        monkeypatch.setattr(queue, "apublish_lifecycle_snapshot", publish)
+        monkeypatch.setattr(queue, "apublish", publish)
 
-        queue.prune_entry(entry_id)
+        queue.prune(entry_id)
 
         assert snapshots[-1].status is QueueEntryStatus.TERMINATED
 
@@ -495,13 +495,13 @@ class TestMemoryAsyncQueueEntries:
         entry_id = queue.enqueue("work")
 
         with pytest.raises(ValueError, match="terminal"):
-            queue.prune_entry(entry_id)
+            queue.prune(entry_id)
 
-        assert queue.get_entry(entry_id).status is QueueEntryStatus.QUEUED
+        assert queue.find(entry_id).status is QueueEntryStatus.QUEUED
 
     def test_prune_reports_an_absent_entry(self, queue):
         with pytest.raises(QueueEntryNotFoundError):
-            queue.prune_entry(uuid4())
+            queue.prune(uuid4())
 
     def test_expired_terminal_entries_are_pruned(self):
         clock = FixedClock()
@@ -512,9 +512,9 @@ class TestMemoryAsyncQueueEntries:
         queue._mark_succeeded(entry_id, "done")
         clock.timestamp = FIXED_CLOCK_TIME + 10
 
-        assert asyncio.run(queue._aprune_expired_entries()) == 1
+        assert asyncio.run(queue._aprune_expired()) == 1
         with pytest.raises(QueueEntryNotFoundError):
-            queue.get_entry(entry_id)
+            queue.find(entry_id)
 
     def test_expired_pre_dispatch_failures_are_pruned(self):
         clock = FixedClock()
@@ -524,9 +524,9 @@ class TestMemoryAsyncQueueEntries:
         queue._mark_failed(entry_id, ValueError("transport unavailable"))
         clock.timestamp = FIXED_CLOCK_TIME + 10
 
-        assert asyncio.run(queue._aprune_expired_entries()) == 1
+        assert asyncio.run(queue._aprune_expired()) == 1
         with pytest.raises(QueueEntryNotFoundError):
-            queue.get_entry(entry_id)
+            queue.find(entry_id)
 
     def test_worker_prunes_expired_terminal_entries(self, observer_queue):
         terminated = threading.Event()
@@ -561,7 +561,7 @@ class TestMemoryAsyncQueueEntries:
 
             asyncio.run(exercise())
             with pytest.raises(QueueEntryNotFoundError):
-                observer_queue.get_entry(entry_id)
+                observer_queue.find(entry_id)
         finally:
             subscription.unsubscribe()
 
@@ -572,13 +572,26 @@ class TestMemoryAsyncQueueEntries:
         queue._mark_running(entry_id)
         queue._mark_succeeded(entry_id, "done")
 
-        assert asyncio.run(queue._aprune_expired_entries()) == 0
-        assert queue.get_entry(entry_id).status is QueueEntryStatus.SUCCEEDED
+        assert asyncio.run(queue._aprune_expired()) == 0
+        assert queue.find(entry_id).status is QueueEntryStatus.SUCCEEDED
 
     def test_only_async_queues_expose_entry_pruning(self):
-        assert hasattr(AsyncQueue, "prune_entry")
-        assert not hasattr(BaseQueue, "prune_entry")
-        assert not hasattr(EventQueue, "prune_entry")
+        assert hasattr(AsyncQueue, "prune")
+        assert not hasattr(BaseQueue, "prune")
+        assert not hasattr(EventQueue, "prune")
+
+    def test_async_queue_does_not_expose_superseded_lifecycle_names(self):
+        for name in (
+            "get_entry",
+            "aget_entry",
+            "dequeue_entry",
+            "adequeue_entry",
+            "has_pending_entries",
+            "ahas_pending_entries",
+            "prune_entry",
+            "aprune_entry",
+        ):
+            assert not hasattr(AsyncQueue, name)
 
     def test_rejects_invalid_lifecycle_transitions(self, queue):
         entry_id = queue.enqueue("work")
@@ -621,10 +634,10 @@ class TestMemoryAsyncQueueEntries:
     def test_persists_an_execution_budget_given_at_enqueue(self, queue):
         entry_id = queue.enqueue("work", timeout_seconds=2.5)
 
-        assert queue.get_entry(entry_id).timeout_seconds == 2.5
+        assert queue.find(entry_id).timeout_seconds == 2.5
 
     def test_carries_no_budget_when_none_was_given(self, queue):
-        assert queue.get_entry(queue.enqueue("work")).timeout_seconds is None
+        assert queue.find(queue.enqueue("work")).timeout_seconds is None
 
     @pytest.mark.parametrize("budget", [0, -1, float("nan"), float("inf")])
     def test_refuses_to_enqueue_an_invalid_budget(self, queue, budget):
@@ -641,7 +654,7 @@ class TestMemoryAsyncQueueEntries:
         queue.entry_class = CustomQueueEntry
 
         entry_id = queue.enqueue("work")
-        queued = queue.get_entry(entry_id)
+        queued = queue.find(entry_id)
         running = queue._mark_running(entry_id)
         completed = queue._mark_succeeded(entry_id, "done")
 
@@ -655,7 +668,7 @@ def test_memory_priority_queue_supports_identified_entries():
     queue = MemoryAsyncPriorityQueue(queue_name="priority")
 
     entry_id = queue.enqueue({"value": "work"})
-    entry = queue.dequeue_entry()
+    entry = queue.dequeue()
 
     assert entry.id == entry_id
 
@@ -666,5 +679,5 @@ def test_memory_stack_dequeues_newest_entry_first():
     first_id = queue.enqueue("first")
     latest_id = queue.enqueue("latest")
 
-    assert queue.dequeue_entry().id == latest_id
-    assert queue.dequeue_entry().id == first_id
+    assert queue.dequeue().id == latest_id
+    assert queue.dequeue().id == first_id

@@ -9,10 +9,11 @@ surface.
 
 ### Requirement: Present an asynchronous backend contract
 Queue backends SHALL expose every public operation that performs storage work
-as an awaitable method named with an `a` prefix: `aenqueue`, `aget_entry`,
-`adequeue_entry`, `ahas_pending_entries`, `aprune_entry`, and `aclose`. These
+as an awaitable method named with an `a` prefix: `aenqueue`, `afind`,
+`adequeue`, `ahas_pending`, and `aclose`. Retained `AsyncQueue` lifecycle
+backends SHALL additionally provide `aprune`. These
 SHALL be the implementations, not wrappers. A backend supporting identified
-entry dispatch MUST implement all of them. Lifecycle transitions to `running`,
+entry dispatch MUST implement the applicable operations. Lifecycle transitions to `running`,
 `succeeded`, `failed`, `cancelled`, and `timeout` are worker-internal
 operations and SHALL NOT be public queue APIs.
 
@@ -28,7 +29,7 @@ operations and SHALL NOT be public queue APIs.
 
 ### Requirement: Keep the synchronous names working for synchronous callers
 Each asynchronous operation SHALL have a synchronous counterpart under the name
-that operation has today -- `enqueue`, `get_entry`, `close`, and the rest --
+that operation has today -- `enqueue`, `find`, `close`, and the rest --
 delegating to the asynchronous implementation through the framework's
 synchronous-to-asynchronous bridge. A synchronous caller SHALL observe the same
 behaviour, return value, and exceptions as before this change.
@@ -81,15 +82,15 @@ bootstrap. The operations SHALL return queued, running, and terminal entries.
 - **THEN** it receives every retained entry snapshot in that queue
 
 ### Requirement: Prune a retained AsyncQueue entry
-`AsyncQueue` SHALL expose `aprune_entry(entry_id)` and its synchronous
-counterpart `prune_entry(entry_id)` for removing one retained terminal entry.
+`AsyncQueue` SHALL expose `aprune(entry_id)` and its synchronous counterpart
+`prune(entry_id)` for removing one retained terminal entry.
 `BaseQueue` and `EventQueue` SHALL NOT expose these entry-retention operations.
 Scheduled cleanup and explicit pruning SHALL use the same removal behavior.
 
 #### Scenario: Prune from synchronous application code
 - **WHEN** synchronous application code prunes one terminal AsyncQueue entry
 - **THEN** it observes the same removal and exception behavior as
-  `aprune_entry`
+  `aprune`
 
 ### Requirement: Report an identified AsyncQueue entry that does not exist
 AsyncQueue entry lookup and explicit pruning SHALL raise

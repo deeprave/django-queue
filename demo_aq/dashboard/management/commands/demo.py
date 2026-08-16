@@ -62,4 +62,4 @@ async def _clear_demo_queue(queue) -> None:
     # Deliberately provider-local demo-fixture cleanup; AsyncQueue does not
     # expose a general reset API because normal entries may only be pruned once
     # terminal.
-    await queue._provider.aclear_entries()
+    await queue._provider.aclear_records()

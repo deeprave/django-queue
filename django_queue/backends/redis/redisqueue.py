@@ -25,19 +25,19 @@ try:
             )
             self._queue_name = self._provider.queue_name
             self._clock = self._provider.clock
-            self._initialise_lifecycle_observers()
+            self._initialise_observers()
 
-        async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
+        async def apublish(self, entry: QueueEntry) -> None:
             try:
-                await self._provider.apublish_lifecycle_snapshot(entry)
+                await self._provider.apublish(entry)
             except Exception:
                 logger.exception(
                     "Unable to publish queue lifecycle snapshot for entry %s", entry.id
                 )
 
-        def _lifecycle_snapshot_receiver(self, on_snapshot):
+        def _observer_receiver(self, on_snapshot):
             self._configure_provider_entry_class()
-            return lambda: self._provider.receive_lifecycle_snapshots(on_snapshot)
+            return lambda: self._provider.observe(on_snapshot)
 
         async def aclose(self) -> None:
             await self._provider.aclose()

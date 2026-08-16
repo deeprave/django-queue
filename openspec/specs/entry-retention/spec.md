@@ -36,7 +36,7 @@ stored durably.
   lookup reports that the entry does not exist
 
 #### Scenario: Explicitly prune a terminal AsyncQueue entry
-- **WHEN** a caller invokes `prune_entry` or `aprune_entry` for a terminal
+- **WHEN** a caller invokes `prune` or `aprune` for a terminal
   AsyncQueue entry ID
 - **THEN** its observers receive a `terminated` copy and the durable record is
   removed

@@ -56,43 +56,43 @@ class QueueProviderMemory:
     def capacity(self) -> int:
         return self._maxsize
 
-    async def aadd_item(self, *items) -> None:
+    async def aadd(self, *items) -> None:
         for item in items:
             try:
                 self._items.put_nowait(item)
             except queue.Full as exc:
                 raise QueueFullException from exc
 
-    async def aget_item(self):
+    async def aget(self):
         try:
             return self._items.get_nowait()
         except queue.Empty as exc:
             raise QueueEmptyException from exc
 
-    async def apoll_item(self):
+    async def apoll(self):
         while True:
             try:
                 return self._items.get_nowait()
             except queue.Empty:
                 await asyncio.sleep(0.01)
 
-    async def apeek_item(self):
+    async def apeek(self):
         with self._items.mutex:
             if not self._items.queue:
                 raise QueueEmptyException
             return self._items.queue[-1] if self._stack else self._items.queue[0]
 
-    async def asize_items(self) -> int:
+    async def asize(self) -> int:
         return self._items.qsize()
 
-    async def aclear_items(self) -> None:
+    async def aclear(self) -> None:
         while True:
             try:
                 self._items.get_nowait()
             except queue.Empty:
                 return
 
-    async def aadd_priority_items(self, *items) -> None:
+    async def aadd_priority(self, *items) -> None:
         for item in items:
             priority, value = 0, item
             if isinstance(value, (tuple, list)):
@@ -103,29 +103,29 @@ class QueueProviderMemory:
             except queue.Full as exc:
                 raise QueueFullException from exc
 
-    async def aget_priority_item(self):
+    async def aget_priority(self):
         try:
             return self._priority_items.get_nowait()[1]
         except queue.Empty as exc:
             raise QueueEmptyException from exc
 
-    async def apoll_priority_item(self):
+    async def apoll_priority(self):
         while True:
             try:
                 return self._priority_items.get_nowait()[1]
             except queue.Empty:
                 await asyncio.sleep(0.01)
 
-    async def apeek_priority_item(self):
+    async def apeek_priority(self):
         with self._priority_items.mutex:
             if not self._priority_items.queue:
                 raise QueueEmptyException
             return self._priority_items.queue[0][1]
 
-    async def asize_priority_items(self) -> int:
+    async def asize_priority(self) -> int:
         return self._priority_items.qsize()
 
-    async def aclear_priority_items(self) -> None:
+    async def aclear_priority(self) -> None:
         while True:
             try:
                 self._priority_items.get_nowait()
@@ -145,7 +145,7 @@ class QueueProviderMemory:
                 entry.queued_at + entry.timeout_seconds
             )
 
-    async def aget(self, entry_id: UUID) -> QueueEntry:
+    async def afind(self, entry_id: UUID) -> QueueEntry:
         with self._lock:
             try:
                 return self._entries[entry_id]
@@ -163,7 +163,7 @@ class QueueProviderMemory:
             self._remove_pending(entry_id)
 
     async def aprune(self, entry_id: UUID) -> QueueEntry:
-        entry = await self.aget(entry_id)
+        entry = await self.afind(entry_id)
         if QueueEntryStatus.TERMINATED not in entry.status.next_state():
             raise ValueError("Only terminal queue entries can be pruned")
         await self.adelete(entry_id)
@@ -219,7 +219,7 @@ class QueueProviderMemory:
     ) -> QueueEntry:
         return await self._aclaim(worker_id, lease_seconds, expire_unclaimed=True)
 
-    async def adequeue_event(self) -> QueueEntry:
+    async def adequeue(self) -> QueueEntry:
         """Atomically remove and return the next unclaimed live event."""
         now = await self.clock.anow()
         with self._lock:

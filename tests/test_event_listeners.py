@@ -12,7 +12,7 @@ def clear_registered_listeners():
 
 
 def test_decorator_registers_a_listener_for_a_configured_event_queue(monkeypatch):
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -30,7 +30,7 @@ def test_decorator_registers_a_listener_for_a_configured_event_queue(monkeypatch
 
 
 def test_decorator_rejects_a_task_queue(monkeypatch):
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "tasks": {
                 "BACKEND": "django_queue.backends.MemoryAsyncQueue",

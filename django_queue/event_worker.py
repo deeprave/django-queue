@@ -61,7 +61,7 @@ class EventQueueWorker(BaseQueueWorker, ABC):
 
     async def adispatch_once(self) -> bool:
         """Receive one provider-specific delivery and dispatch its listeners."""
-        delivery = await self._next_event()
+        delivery = await self._next()
         if delivery is None:
             return False
         entry, lease_seconds = delivery
@@ -69,7 +69,7 @@ class EventQueueWorker(BaseQueueWorker, ABC):
         return True
 
     @abstractmethod
-    async def _next_event(self) -> tuple[QueueEntry, float | None] | None:
+    async def _next(self) -> tuple[QueueEntry, float | None] | None:
         """Receive one event using this worker's provider-specific delivery."""
         raise NotImplementedError
 

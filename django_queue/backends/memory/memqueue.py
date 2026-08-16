@@ -1,6 +1,6 @@
 from django_queue.clock import DEFAULT_CLOCK, QueueClock
 from django_queue.entries import QueueEntry
-from django_queue.observers import publish_snapshot
+from django_queue.observers import publish
 
 from ..base import AsyncQueue
 from .provider import QueueProviderMemory
@@ -22,10 +22,10 @@ class MemoryAsyncQueue(AsyncQueue):
             stack=self._stack,
             maxsize=maxsize,
         )
-        self._initialise_lifecycle_observers()
+        self._initialise_observers()
 
-    async def apublish_lifecycle_snapshot(self, entry: QueueEntry) -> None:
-        publish_snapshot(self, entry)
+    async def apublish(self, entry: QueueEntry) -> None:
+        publish(self, entry)
 
 
 class MemoryAsyncStack(MemoryAsyncQueue):

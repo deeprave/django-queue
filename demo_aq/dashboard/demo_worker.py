@@ -62,9 +62,7 @@ class DemoQueueWorker(RedisAsyncQueueWorker):
             except Exception:
                 logger.exception("Unable to enqueue a follow-up demo entry")
 
-    async def _next_entry(
-        self, queue: BaseQueue
-    ) -> tuple[QueueEntry, float | None] | None:
+    async def _next(self, queue: BaseQueue) -> tuple[QueueEntry, float | None] | None:
         await self._recover_expired_claims(queue)
         provider = self._providers[queue]
         entry = await provider.aclaim(
@@ -73,15 +71,15 @@ class DemoQueueWorker(RedisAsyncQueueWorker):
         try:
             transition_due = _transition_due(entry, QueueEntryStatus.RUNNING)
         except (TypeError, ValueError) as exc:
-            running_entry = await self._mark_claimed_running(queue, entry)
+            running_entry = await self._mark_running(queue, entry)
             if running_entry is None:
                 return None
-            await queue.apublish_lifecycle_snapshot(running_entry)
+            await queue.apublish(running_entry)
             await self._record_failure(queue, running_entry, exc, self._worker_id)
             return None
         if transition_due:
             lease_seconds = (
-                self.resolve_budget(queue, entry) + self._cancellation_grace_period
+                self.budget_for(queue, entry) + self._cancellation_grace_period
             )
             if await provider.arenew(entry.id, self._worker_id, lease_seconds):
                 return entry, lease_seconds
@@ -104,10 +102,10 @@ class DemoQueueWorker(RedisAsyncQueueWorker):
         entry: QueueEntry,
         lease_seconds: float | None = None,
     ) -> None:
-        running_entry = await self._mark_claimed_running(queue, entry)
+        running_entry = await self._mark_running(queue, entry)
         if running_entry is None:
             return
-        await queue.apublish_lifecycle_snapshot(running_entry)
+        await queue.apublish(running_entry)
         task = asyncio.create_task(self._complete_entry(queue, handler, running_entry))
         self._handler_tasks.add(task)
         task.add_done_callback(self._handler_tasks.discard)

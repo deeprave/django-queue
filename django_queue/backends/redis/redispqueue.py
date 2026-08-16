@@ -13,10 +13,10 @@ try:
             return self._run_synchronously(self.apoll, timeout, retries)
 
         async def aadd(self, *items):
-            await self._provider.aadd_priority_items(*items)
+            await self._provider.aadd_priority(*items)
 
         async def aget(self):
-            return await self._provider.aget_priority_item()
+            return await self._provider.aget_priority()
 
         async def apoll(self, timeout: int = 0, retries: int = 10):
             """Remove and return the highest-priority item.
@@ -26,7 +26,7 @@ try:
             ``QueueEmptyException``; with a positive timeout, zero retries
             means keep trying.
             """
-            return await self._provider.apoll_priority_item(timeout, retries)
+            return await self._provider.apoll_priority(timeout, retries)
 
         async def apeek(self):
             """
@@ -34,20 +34,20 @@ try:
             :return: The item with the highest priority.
             Raises QueueEmptyException if the queue is empty.
             """
-            return await self._provider.apeek_priority_item()
+            return await self._provider.apeek_priority()
 
         async def asize(self) -> int:
             """
             Get the current size of the priority queue.
             :return: Number of items in the queue.
             """
-            return await self._provider.asize_priority_items()
+            return await self._provider.asize_priority()
 
         async def aclear(self) -> None:
             """
             Clear all items in the queue.
             """
-            await self._provider.aclear_priority_items()
+            await self._provider.aclear_priority()
 
 except ImportError:
     pass

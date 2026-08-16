@@ -30,7 +30,7 @@ class MemoryEventQueueWorker(EventQueueWorker):
         super().__init__(queue, **kwargs)
         self._provider = queue._provider
 
-    async def _next_event(self) -> tuple[QueueEntry, float | None] | None:
+    async def _next(self) -> tuple[QueueEntry, float | None] | None:
         expired_entry_ids = await self._provider.aexpire_due()
         for entry_id in expired_entry_ids:
             logger.warning(

@@ -32,3 +32,18 @@ callable, import alias, configuration key, or documentation spelling.
 #### Scenario: Application uses an old spelling
 - **WHEN** application code imports or invokes a removed spelling
 - **THEN** the package does not provide a compatibility alias or fallback
+
+### Requirement: Keep raw values distinct from lifecycle records
+Raw queue-value operations SHALL use `add`, `get`, `poll`, `peek`, `size`, and
+`clear`. Retained lifecycle-record operations SHALL use `enqueue`, `find`,
+`dequeue`, `has_pending`, `alist`, and `prune`, with asynchronous counterparts
+where applicable. A queue API SHALL NOT use redundant `_entry` or `_entries`
+suffixes for those lifecycle operations.
+
+#### Scenario: Inspect a retained lifecycle record
+- **WHEN** application code retrieves an identified retained record
+- **THEN** it calls `find` or `afind`, rather than a raw-value operation
+
+#### Scenario: Publish an observed lifecycle record
+- **WHEN** a worker publishes one immutable record to lifecycle observers
+- **THEN** it calls `apublish`

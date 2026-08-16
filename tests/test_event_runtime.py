@@ -39,7 +39,7 @@ class FlakyEventWorker(MemoryEventQueueWorker):
 def test_first_request_adds_only_configured_event_queues_to_the_shared_runtime(
     monkeypatch,
 ):
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -59,7 +59,7 @@ def test_first_request_adds_only_configured_event_queues_to_the_shared_runtime(
         lambda: initialisations.append(configured) or configured,
     )
     monkeypatch.setattr(
-        "django_queue.event_runtime.event_runtime.start_configured",
+        "django_queue.event_runtime.event_runtime.start",
         lambda queues: started.append(queues),
     )
 
@@ -74,7 +74,7 @@ def test_first_request_adds_only_configured_event_queues_to_the_shared_runtime(
 
 def test_task_only_configuration_does_not_start_an_event_loop():
     runtime = EventRuntime()
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "tasks": {
                 "BACKEND": "django_queue.backends.MemoryAsyncQueue",
@@ -83,13 +83,13 @@ def test_task_only_configuration_does_not_start_an_event_loop():
         }
     )
 
-    runtime.start_configured(configured)
+    runtime.start(configured)
 
     assert runtime._thread is None
 
 
 def test_runtime_dispatches_an_event_on_its_single_background_loop(monkeypatch):
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -109,7 +109,7 @@ def test_runtime_dispatches_an_event_on_its_single_background_loop(monkeypatch):
     )
     runtime = EventRuntime()
     try:
-        runtime.start_configured(configured)
+        runtime.start(configured)
         configured["events"].enqueue("event")
         deadline = time.monotonic() + 1
         while not received and time.monotonic() < deadline:
@@ -120,7 +120,7 @@ def test_runtime_dispatches_an_event_on_its_single_background_loop(monkeypatch):
 
 
 def test_runtime_looks_up_listeners_by_configured_alias(monkeypatch):
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -140,7 +140,7 @@ def test_runtime_looks_up_listeners_by_configured_alias(monkeypatch):
     )
     runtime = EventRuntime()
     try:
-        runtime.start_configured(configured)
+        runtime.start(configured)
         configured["events"].enqueue("event")
         deadline = time.monotonic() + 1
         while not received and time.monotonic() < deadline:
@@ -152,7 +152,7 @@ def test_runtime_looks_up_listeners_by_configured_alias(monkeypatch):
 
 def test_runtime_reuses_one_loop_and_starts_one_worker_per_event_queue():
     runtime = EventRuntime()
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "first": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -165,9 +165,9 @@ def test_runtime_reuses_one_loop_and_starts_one_worker_per_event_queue():
         }
     )
     try:
-        runtime.start_configured(configured)
+        runtime.start(configured)
         first_thread = runtime._thread
-        runtime.start_configured(configured)
+        runtime.start(configured)
         deadline = time.monotonic() + 1
         while len(runtime._workers) != 2 and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -178,7 +178,7 @@ def test_runtime_reuses_one_loop_and_starts_one_worker_per_event_queue():
 
 
 def test_event_queue_rejects_task_handler_metadata():
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -201,7 +201,7 @@ def test_event_queue_uses_its_configured_event_worker_class():
             super().__init__(*args, **kwargs)
 
     runtime = EventRuntime()
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -211,7 +211,7 @@ def test_event_queue_uses_its_configured_event_worker_class():
         }
     )
     try:
-        runtime.start_configured(configured)
+        runtime.start(configured)
         deadline = time.monotonic() + 1
         while not created and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -223,7 +223,7 @@ def test_event_queue_uses_its_configured_event_worker_class():
 def test_runtime_closes_event_queue_resources_on_shutdown():
     ClosingEventQueue.closed = 0
     runtime = EventRuntime()
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "tests.test_event_runtime.ClosingEventQueue",
@@ -232,7 +232,7 @@ def test_runtime_closes_event_queue_resources_on_shutdown():
         }
     )
     try:
-        runtime.start_configured(configured)
+        runtime.start(configured)
         deadline = time.monotonic() + 1
         while not runtime._workers and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -248,7 +248,7 @@ def test_runtime_restarts_a_worker_after_an_infrastructure_failure(caplog):
     runtime = EventRuntime()
     runtime.restart_initial_delay = 0.001
     runtime.restart_max_delay = 0.001
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
@@ -258,7 +258,7 @@ def test_runtime_restarts_a_worker_after_an_infrastructure_failure(caplog):
         }
     )
     try:
-        runtime.start_configured(configured)
+        runtime.start(configured)
         deadline = time.monotonic() + 1
         while FlakyEventWorker.runs < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -272,7 +272,7 @@ def test_runtime_restarts_a_worker_after_an_infrastructure_failure(caplog):
 
 
 def test_event_queue_rejects_a_task_worker_class():
-    configured = django_queue.QueueHandler(
+    configured = django_queue.QueueRegistry(
         {
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",

@@ -29,7 +29,7 @@ def test_init(redis_url):
 def test_uses_a_redis_specific_default_worker():
     queue = RedisAsyncQueue("redis://localhost:6379/0")
 
-    assert queue.resolve_worker_class("tasks") is RedisAsyncQueueWorker
+    assert queue.resolve_worker("tasks") is RedisAsyncQueueWorker
 
 
 def test_rejects_the_generic_worker_for_a_redis_queue(redis_url):
@@ -47,7 +47,7 @@ def test_rejects_a_generic_worker_override_for_a_redis_queue(redis_url):
     queue.worker_class = AsyncQueueWorker
 
     with pytest.raises(InvalidQueueBackendError, match="requires a redis worker"):
-        queue.resolve_worker_class("tasks")
+        queue.resolve_worker("tasks")
 
 
 def test_rejects_a_spoofed_redis_worker_override(redis_url):
@@ -58,7 +58,7 @@ def test_rejects_a_spoofed_redis_worker_override(redis_url):
     queue.worker_class = SpoofedRedisWorker
 
     with pytest.raises(InvalidQueueBackendError, match="not compatible"):
-        queue.resolve_worker_class("tasks")
+        queue.resolve_worker("tasks")
 
 
 def test_capacity(redis_queue):

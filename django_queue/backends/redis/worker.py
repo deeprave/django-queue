@@ -59,23 +59,21 @@ class RedisAsyncQueueWorker(AsyncQueueWorker):
                     "s" if discarded != 1 else "",
                 )
 
-    async def _next_entry(self, queue) -> tuple[QueueEntry, float | None] | None:
+    async def _next(self, queue) -> tuple[QueueEntry, float | None] | None:
         """Claim the next Redis entry and establish its delivery lease."""
         await self._recover_expired_claims(queue)
         provider = self._providers[queue]
         entry = await provider.aclaim(
             self._worker_id, queue.default_claim_lease_seconds
         )
-        lease_seconds = (
-            self.resolve_budget(queue, entry) + self._cancellation_grace_period
-        )
+        lease_seconds = self.budget_for(queue, entry) + self._cancellation_grace_period
         if not await provider.arenew(entry.id, self._worker_id, lease_seconds):
             logger.warning("Lost claim for queue entry %s before dispatch", entry.id)
             return None
         self._last_claim_conflict_at.pop(entry.id, None)
         return entry, lease_seconds
 
-    async def _discard_missing_entry_claim(self, queue, entry_id: UUID) -> None:
+    async def _discard_missing(self, queue, entry_id: UUID) -> None:
         """Discard a Redis claim whose durable entry is unexpectedly absent."""
         try:
             acknowledged = await self._providers[queue].aack(entry_id, self._worker_id)
@@ -114,11 +112,9 @@ class RedisAsyncQueueWorker(AsyncQueueWorker):
             logger.exception("Unable to renew claim for queue entry %s", entry.id)
             return False
 
-    async def _mark_claimed_running(
-        self, queue, entry: QueueEntry
-    ) -> QueueEntry | None:
+    async def _mark_running(self, queue, entry: QueueEntry) -> QueueEntry | None:
         """Persist running status only while this Redis worker owns the claim."""
-        queued_entry = await queue.aget_entry(entry.id)
+        queued_entry = await queue.afind(entry.id)
         running_entry = replace(
             queued_entry,
             status=QueueEntryStatus.RUNNING,
@@ -133,7 +129,7 @@ class RedisAsyncQueueWorker(AsyncQueueWorker):
             return None
         return running_entry
 
-    async def _settle_claimed(self, queue, entry: QueueEntry) -> bool:
+    async def _settle(self, queue, entry: QueueEntry) -> bool:
         """Atomically store a terminal record and release its Redis claim."""
         return await self._providers[queue].asettle(self._worker_id, entry)
 
@@ -149,7 +145,7 @@ class RedisEventQueueWorker(EventQueueWorker):
         self._provider = queue._provider
         self._last_recovery_at = float("-inf")
 
-    async def _next_event(self) -> tuple[QueueEntry, float | None] | None:
+    async def _next(self) -> tuple[QueueEntry, float | None] | None:
         expired_entry_ids = await self._provider.aexpire_due()
         for entry_id in expired_entry_ids:
             logger.warning(
