@@ -2,7 +2,7 @@
 
 - [x] 1.1 In `django_queue/backends/redis/provider.py`, add
       `async def aobserve(self, on_snapshot) -> None` to `QueueProviderRedis`,
-      using `async_redis.Redis.from_url(self._redis_url)` (the module's
+      using `async_redis.from_url(self._redis_url)` (the module's
       existing `redis.asyncio` import) instead of `_observer_redis_client()`.
 - [x] 1.2 Replace `pubsub.listen()` (blocking generator) with
       `async for message in pubsub.listen():`, keeping the existing
