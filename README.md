@@ -2,7 +2,7 @@
 
 This is an implementation of message queues for Django.
 
-The current implementation supports an in-memory queue and a redis-backed pub/sub queue with custom LUA for atomic updates.
+The current implementation supports an in-memory queue and a Redis-backed pub/sub queue with custom Lua for atomic updates.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ Queues are configured in the Django settings module, and use a simple and famili
 
 ### Async queues
 
-An async queue is good choice for task monitoring or collecting results from code that has been handed off to another thread, process or computer.
+An async queue is a good choice for task monitoring or collecting results from code that has been handed off to another thread, process, or computer.
 
 An async queue used only by producers is configured as follows:
 
@@ -197,7 +197,7 @@ the wrong type raises `TypeError` — including a `bool`, which is an integer in
 
 An instant does not convert to a number implicitly. `float(instant)` raises, and so does `json.dumps` on one, so a caller that wants a number asks for it.
 
-In a redis-backed environment the base instant used is that returned by the redis server's TIME command, so that multiple consumers across systems (such as a horizontally scaled Django application) are effectively synced with the redis server when it comes to internal handling of event times and durations.
+In a Redis-backed environment the base instant used is that returned by the Redis server's TIME command, so that multiple consumers across systems (such as a horizontally scaled Django application) are effectively synced with the Redis server when it comes to internal handling of event times and durations.
 
 ### Identified lifecycle records
 
@@ -308,7 +308,7 @@ The worker dispatches one entry at a time and runs until cancelled. On cancellat
 Redis queues use leased claims for at-least-once delivery. A worker claims an
 entry, renews its lease while dispatching, and atomically settles its terminal entry outcome only while it still owns that claim. Expired claims return the same entry ID to pending work, so a process failure can cause the handler to execute more than once. Handlers that make external changes must therefore be idempotent. Queue backends without claim-lease support retain best-effort delivery.
 
-Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, scripts, timestamps, and record layout are not public contract.Redis Cluster is not supported by the Redis delivery implementation.
+Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, scripts, timestamps, and record layout are not public contract. Redis Cluster is not supported by the Redis delivery implementation.
 
 If a terminal outcome cannot be persisted because of an infrastructure failure, the worker logs the failure and continues. When it can still read a `running` entry, it makes one best-effort attempt to record a safe `QueuePersistenceError` failure outcome. If it cannot confirm either terminal outcome, the worker raises `QueuePersistenceError` rather than accepting further entries.
 
@@ -403,7 +403,7 @@ Start it as its own service or container command:
 python manage.py runqueues
 ```
 
-`runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero on a configuration error, then waits to create each configured worker until that alias has pending entry work. It reports the configured handler count at startup and each alias as its worker begins. Once started, a worker runs until it receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers. Queue definitions without `HANDLER` remain available to application code but are not dispatched; when no handlers are configured, the command reports this and  exits successfully. A worker failure is logged while the remaining queues stay watched; the command exits non-zero only when no configured queue is left.
+`runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero on a configuration error, then waits to create each configured worker until that alias has pending entry work. It reports the configured handler count at startup and each alias as its worker begins. Once started, a worker runs until it receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers. Queue definitions without `HANDLER` remain available to application code but are not dispatched; when no handlers are configured, the command reports this and exits successfully. A worker failure is logged while the remaining queues stay watched; the command exits non-zero only when no configured queue is left.
 
 With all queues, the `get()`, `peek()`, and `poll()` methods return the object. With priority queues the priority is only used with and relevant to `add()`. Identified entries have no priority parameter, so their worker dispatch remains FIFO until priority-aware entry enqueueing is introduced.
 
