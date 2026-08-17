@@ -34,6 +34,7 @@ jobs:
         shell: bash
         run: |
           version=$(python -c "import tomllib; from pathlib import Path; print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
       - name: Create release tag
@@ -60,3 +61,34 @@ jobs:
         if: matrix.python-version == env.TARGET_PYTHON_VERSION
         shell: bash
         run: uv publish
+
+      - name: Create GitHub release
+        if: matrix.python-version == env.TARGET_PYTHON_VERSION
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          python - "$VERSION" > release-notes.md <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text().splitlines()
+          heading = re.compile(rf"^## v{re.escape(version)}(?:\s|$)")
+          start = next((index + 1 for index, line in enumerate(lines) if heading.match(line)), None)
+          if start is None:
+              raise SystemExit(f"CHANGELOG.md has no entry for v{version}")
+          notes = []
+          for line in lines[start:]:
+              if line.startswith("## "):
+                  break
+              notes.append(line)
+          text = "\n".join(notes).strip()
+          if not text:
+              raise SystemExit(f"CHANGELOG.md entry for v{version} has no release notes")
+          print(text)
+          PY
+          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
