@@ -2,11 +2,6 @@ name: Build and Publish Python Package
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to build and publish (for example, v1.0.0)
-        required: true
-        type: string
 
 env:
   TARGET_PYTHON_VERSION: '3.14'
@@ -15,7 +10,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     strategy:
       matrix:
@@ -26,14 +21,74 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: refs/tags/${{ inputs.tag }}
+          ref: main
 
       - name: Test and Build
         uses: ./.github/actions/test-and-build
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Read release version
+        id: release
+        if: matrix.python-version == env.TARGET_PYTHON_VERSION
+        shell: bash
+        run: |
+          version=$(python -c "import tomllib; from pathlib import Path; print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release tag
+        if: matrix.python-version == env.TARGET_PYTHON_VERSION
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          head=$(git rev-parse HEAD)
+          if existing=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
+            if [[ "$existing" != "$head" ]]; then
+              echo "Release tag $TAG already points to a different commit." >&2
+              exit 1
+            fi
+            echo "Release tag $TAG already points to this commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" --message "Release $TAG"
+          git push origin "refs/tags/$TAG"
+
       - name: build and publish package
         if: matrix.python-version == env.TARGET_PYTHON_VERSION
         shell: bash
         run: uv publish
+
+      - name: Create GitHub release
+        if: matrix.python-version == env.TARGET_PYTHON_VERSION
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          python - "$VERSION" > release-notes.md <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text().splitlines()
+          heading = re.compile(rf"^## v{re.escape(version)}(?:\s|$)")
+          start = next((index + 1 for index, line in enumerate(lines) if heading.match(line)), None)
+          if start is None:
+              raise SystemExit(f"CHANGELOG.md has no entry for v{version}")
+          notes = []
+          for line in lines[start:]:
+              if line.startswith("## "):
+                  break
+              notes.append(line)
+          text = "\n".join(notes).strip()
+          if not text:
+              raise SystemExit(f"CHANGELOG.md entry for v{version} has no release notes")
+          print(text)
+          PY
+          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
