@@ -2,11 +2,6 @@ name: Build and Publish Python Package
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to build and publish (for example, v1.0.0)
-        required: true
-        type: string
 
 env:
   TARGET_PYTHON_VERSION: '3.14'
@@ -15,7 +10,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     strategy:
       matrix:
@@ -26,12 +21,40 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: refs/tags/${{ inputs.tag }}
+          ref: main
 
       - name: Test and Build
         uses: ./.github/actions/test-and-build
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Read release version
+        id: release
+        if: matrix.python-version == env.TARGET_PYTHON_VERSION
+        shell: bash
+        run: |
+          version=$(python -c "import tomllib; from pathlib import Path; print(tomllib.loads(Path('pyproject.toml').read_text())['project']['version'])")
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release tag
+        if: matrix.python-version == env.TARGET_PYTHON_VERSION
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          head=$(git rev-parse HEAD)
+          if existing=$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}"); then
+            if [[ "$existing" != "$head" ]]; then
+              echo "Release tag $TAG already points to a different commit." >&2
+              exit 1
+            fi
+            echo "Release tag $TAG already points to this commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" --message "Release $TAG"
+          git push origin "refs/tags/$TAG"
 
       - name: build and publish package
         if: matrix.python-version == env.TARGET_PYTHON_VERSION
