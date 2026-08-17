@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-timeout-governance. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Resolve a per-entry execution budget
 The system SHALL resolve one execution budget for every dispatched entry, in
 precedence order: the worker's configured override, then the budget carried on
@@ -137,3 +139,18 @@ heartbeat cannot be distinguished from a dishonest one.
 - **WHEN** the heartbeat is documented for application authors
 - **THEN** the documentation states that a handler which heartbeats on a
   schedule has disabled its own budget
+
+### Requirement: Resolve an event lifetime
+For an event queue, `timeout_seconds` SHALL resolve as an explicit entry
+value, then queue `TIMEOUT`, then 60 seconds. Each resolved lifetime MUST be
+finite and strictly positive. It governs an event only while it is unclaimed;
+an active listener is governed by its claim lease instead. An event queue SHALL
+NOT accept a task-worker execution-budget override.
+
+#### Scenario: Use the event lifetime default
+- **WHEN** an event queue enqueues without an explicit lifetime or queue `TIMEOUT`
+- **THEN** the event expires after 60 seconds if it remains unconsumed
+
+#### Scenario: Prefer the explicit lifetime
+- **WHEN** an event queue enqueue supplies a positive `timeout_seconds`
+- **THEN** expiry uses that value instead of the queue default

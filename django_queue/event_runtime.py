@@ -66,7 +66,7 @@ class EventRuntime:
                 self._ready.clear()
                 self._thread = threading.Thread(
                     target=self._run_loop,
-                    name="django-queue-events",
+                    name="django-queues-events",
                     daemon=True,
                 )
                 self._thread.start()

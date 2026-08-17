@@ -2,7 +2,7 @@ try:
     import redis  # noqa: F401 - verifies the optional Redis backend dependency.
 except ModuleNotFoundError as exc:
     raise ImportError(
-        "Redis queue backends require the 'redis' extra; install django-queue[redis]"
+        "Redis queue backends require the 'redis' extra; install django-queues[redis]"
     ) from exc
 
 from .rediseventqueue import RedisEventQueue

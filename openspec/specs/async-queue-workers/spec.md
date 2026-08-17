@@ -4,7 +4,9 @@
 
 Define the generic asynchronous worker contract for dispatching identified
 entries from named queues.
+
 ## Requirements
+
 ### Requirement: Dispatch registered queue handlers asynchronously
 The system SHALL provide an asynchronous worker that dispatches entries from
 named queues to registered asynchronous handlers. The worker MUST mark an entry
@@ -112,6 +114,7 @@ another entry.
   owner handles the retry
 
 ### Requirement: Activate configured worker types per queue
+
 The `runqueues` command SHALL ask each configured queue to resolve its `WORKER`
 at startup, without constructing it. A queue without `WORKER` SHALL use its
 concrete backend's selected compatible default worker. When the command

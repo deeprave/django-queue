@@ -7,6 +7,7 @@ Define broker-neutral reliable delivery and Redis claim-lease recovery.
 ## Requirements
 
 ### Requirement: Keep Redis reliable delivery internal to Redis workers
+
 Redis-aware workers SHALL use their queue-owned Redis provider for claim,
 renewal, settlement, and expired-claim recovery. Queue-facing APIs and the
 common provider protocol SHALL NOT expose those delivery operations or Redis

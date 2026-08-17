@@ -1,6 +1,6 @@
 [project]
-name = "django-queue"
-version = "0.9.0"
+name = "django-queues"
+version = "1.0.0"
 description = "Implementation of message queues for Django"
 readme = "README.md"
 license = { file = "LICENSE.md" }
@@ -46,8 +46,12 @@ redis = [
 default-groups = ["dev", "redis"]
 
 [build-system]
-requires = ["flit-core"]
-build-backend = "flit_core.buildapi"
+requires = ["uv_build>=0.12.5,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "django_queue"
+module-root = ""
 
 [tool.ty.src]
 include = ["django_queue"]

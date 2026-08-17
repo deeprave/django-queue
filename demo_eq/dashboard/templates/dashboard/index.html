@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Event Queue Demo</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+      main { margin: 0; max-width: none; padding: var(--pico-spacing); width: 100%; }
+      .dashboard-header {
+        align-items: center;
+        background: var(--pico-primary-background);
+        color: var(--pico-primary-inverse);
+        padding: 1rem var(--pico-spacing);
+      }
+      .dashboard-header h1 { margin-bottom: 0; }
+      .chart { min-height: 28rem; width: 100%; }
+      .chart line, .chart path { vector-effect: non-scaling-stroke; }
+      .axis { stroke: var(--pico-muted-border-color); stroke-width: 1; }
+      .axis-label, .tick-label { fill: var(--pico-muted-color); font-size: 13px; }
+      .segment-faster { stroke: #6ee7b7; }
+      .segment-slower { stroke: var(--pico-del-color); }
+      .segment-steady { stroke: var(--pico-primary); }
+      .segment { fill: none; stroke-width: 3; }
+      .point { fill: white; }
+      .event-feed { max-height: 15rem; overflow-y: auto; }
+      .event-feed table { margin-bottom: 0; }
+      .event-feed th, .event-feed td { white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="dashboard-header">
+        <h1>Event Queue Demo</h1>
+        <p>Listener-delivered movement events, streamed live from Django.</p>
+      </header>
+      <article>
+        <header>
+          <strong>Distance from origin</strong>
+          <small>Recent 60 seconds; green accelerates, red decelerates, blue is steady.</small>
+        </header>
+        <svg class="chart" viewBox="0 0 960 420" role="img" aria-label="Distance from origin over time"></svg>
+      </article>
+      <article>
+        <header>
+          <strong>Latest events</strong>
+          <small>The newest received movement event appears first.</small>
+        </header>
+        <div class="event-feed" aria-live="polite">
+          <table>
+            <thead><tr><th>Event</th><th>Speed</th><th>Direction</th><th>Distance</th></tr></thead>
+            <tbody id="event-feed"></tbody>
+          </table>
+        </div>
+      </article>
+    </main>
+    <script>
+      const chart = document.querySelector(".chart");
+      const eventFeed = document.querySelector(".event-feed");
+      const eventRows = document.querySelector("#event-feed");
+      const svgNamespace = "http://www.w3.org/2000/svg";
+      const width = 960;
+      const height = 420;
+      const padding = { top: 28, right: 28, bottom: 48, left: 72 };
+      const windowSeconds = 60;
+
+      function svgElement(name, attributes = {}) {
+        const element = document.createElementNS(svgNamespace, name);
+        Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+        return element;
+      }
+
+      function appendText(text, x, y, className, anchor = "start") {
+        const label = svgElement("text", { x, y, "text-anchor": anchor, class: className });
+        label.textContent = text;
+        chart.append(label);
+      }
+
+      function lineClass(previous, current) {
+        if (current.speed > previous.speed) return "segment-faster";
+        if (current.speed < previous.speed) return "segment-slower";
+        return "segment-steady";
+      }
+
+      function renderEventFeed(points) {
+        eventRows.replaceChildren(...points.slice(-5).reverse().map((point) => {
+          const row = document.createElement("tr");
+          [point.id, `${point.speed.toFixed(1)} units/s`, point.direction, `${point.distance.toFixed(1)} units`]
+            .forEach((value) => {
+              const cell = document.createElement("td");
+              cell.textContent = value;
+              row.append(cell);
+            });
+          return row;
+        }));
+        eventFeed.scrollTop = 0;
+      }
+
+      function render(snapshot) {
+        const points = snapshot.points || [];
+        const latest = snapshot.latest;
+        chart.replaceChildren();
+        if (!latest) return;
+
+        renderEventFeed(points);
+
+        const endTime = latest.received_at;
+        const startTime = endTime - windowSeconds;
+        const visible = points.filter((point) => point.received_at >= startTime);
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+        const maxDistance = Math.max(1, ...visible.map((point) => point.distance));
+        const x = (point) => padding.left + ((point.received_at - startTime) / windowSeconds) * plotWidth;
+        const y = (point) => padding.top + (1 - point.distance / maxDistance) * plotHeight;
+
+        chart.append(svgElement("line", { x1: padding.left, y1: padding.top, x2: padding.left, y2: height - padding.bottom, class: "axis" }));
+        chart.append(svgElement("line", { x1: padding.left, y1: height - padding.bottom, x2: width - padding.right, y2: height - padding.bottom, class: "axis" }));
+        appendText("distance from origin", padding.left, 18, "axis-label");
+        appendText("seconds", width - padding.right, height - 12, "axis-label", "end");
+
+        for (let step = 0; step <= 4; step += 1) {
+          const ratio = step / 4;
+          const yPosition = padding.top + (1 - ratio) * plotHeight;
+          chart.append(svgElement("line", { x1: padding.left - 5, y1: yPosition, x2: padding.left, y2: yPosition, class: "axis" }));
+          appendText((maxDistance * ratio).toFixed(0), padding.left - 10, yPosition + 4, "tick-label", "end");
+          const xPosition = padding.left + ratio * plotWidth;
+          chart.append(svgElement("line", { x1: xPosition, y1: height - padding.bottom, x2: xPosition, y2: height - padding.bottom + 5, class: "axis" }));
+          appendText(`${Math.round((ratio - 1) * windowSeconds)}s`, xPosition, height - padding.bottom + 22, "tick-label", "middle");
+        }
+
+        visible.slice(1).forEach((point, index) => {
+          const previous = visible[index];
+          chart.append(svgElement("line", { x1: x(previous), y1: y(previous), x2: x(point), y2: y(point), class: `segment ${lineClass(previous, point)}` }));
+        });
+        visible.forEach((point) => chart.append(svgElement("circle", { cx: x(point), cy: y(point), r: 2, class: "point" })));
+      }
+
+      const stream = new EventSource("{% url 'events' %}");
+      stream.onmessage = ({ data }) => render(JSON.parse(data));
+      stream.onerror = (error) => console.error(error);
+    </script>
+  </body>
+</html>
