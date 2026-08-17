@@ -6,13 +6,13 @@ import asyncio
 import inspect
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from queue import Full, Queue
 from typing import Any
 from uuid import UUID
 
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 
 from django_queue.backends.base import AsyncQueue
 from django_queue.entries import QueueEntry
@@ -123,9 +123,9 @@ class _QueueObservers:
                 )
                 self.drop_logged = True
 
-    def _run_receiver(self, receiver: Callable[[], None]) -> None:
+    def _run_receiver(self, receiver: Callable[[], Awaitable[None]]) -> None:
         try:
-            receiver()
+            async_to_sync(receiver)()
             logger.warning(
                 "Queue lifecycle receiver stopped",
                 extra={"queue": self.queue.queue_name},

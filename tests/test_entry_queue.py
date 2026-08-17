@@ -183,6 +183,27 @@ class TestMemoryAsyncQueueEntries:
             QueueEntryStatus.SUCCEEDED,
         ]
 
+    def test_observer_dispatches_an_async_callback(self, observer_queue):
+        statuses = []
+        completed = threading.Event()
+
+        async def callback(entry):
+            statuses.append(entry.status)
+            if entry.status is QueueEntryStatus.SUCCEEDED:
+                completed.set()
+
+        subscription = queue_observer("requests", callback)
+
+        asyncio.run(_process_one(observer_queue))
+
+        assert completed.wait(1)
+        subscription.unsubscribe()
+        assert statuses == [
+            QueueEntryStatus.QUEUED,
+            QueueEntryStatus.RUNNING,
+            QueueEntryStatus.SUCCEEDED,
+        ]
+
     def test_worker_publishes_a_first_seen_terminal_entry(self, observer_queue):
         observed = threading.Event()
         statuses = []
@@ -298,7 +319,10 @@ class TestMemoryAsyncQueueEntries:
         observers = _observers_for(observer_queue)
         observers.receiver = threading.current_thread()
 
-        observers._run_receiver(lambda callback: None)
+        async def receiver():
+            raise RuntimeError("receiver failed")
+
+        observers._run_receiver(receiver)
 
         assert observers.receiver is None
 
