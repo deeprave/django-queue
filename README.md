@@ -1,3 +1,9 @@
+[![Build Status](https://img.shields.io/github/actions/workflow/status/deeprave/django-queues/python-test-and-build.yml?branch=main&label=CI&logo=github)](https://github.com/deeprave/django-queues/actions/workflows/python-test-and-build.yml)
+[![Maintenance](https://img.shields.io/badge/maintenance-active-brightgreen.svg)](https://github.com/deeprave/django-queues)
+[![PyPI version](https://img.shields.io/pypi/v/django-queues.svg?logo=pypi&logoColor=white)](https://pypi.org/project/django-queues/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/django-queues.svg?logo=pypi&logoColor=white)](https://pypi.org/project/django-queues/)
+[![Python versions](https://img.shields.io/pypi/pyversions/django-queues.svg?logo=python&logoColor=white)](https://pypi.org/project/django-queues/)
+
 # Django Queues
 
 This is an implementation of message queues for Django.
