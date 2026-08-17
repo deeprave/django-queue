@@ -4,7 +4,9 @@
 
 Define identified queue entries, their lifecycle, and their timekeeping
 contract across generic queue backends.
+
 ## Requirements
+
 ### Requirement: Enqueue identified JSON-serialisable entries
 The system SHALL provide an entry-oriented enqueue operation that accepts any
 JSON-serialisable payload value, generates a UUID version 7 identifier, records
@@ -107,16 +109,11 @@ duration, not an instant, and SHALL remain a plain count of seconds.
   budget
 
 ### Requirement: Record entry lifecycle outcomes
-The system SHALL represent lifecycle status with a string enum and SHALL
-transition an entry only from `queued` to `running` or `failed`. A `running`
-entry MAY transition back to `queued`, or transition to exactly one completed
-status of `succeeded`, `failed`, `cancelled`, or `timeout`. Each completed
-status SHALL transition only to `terminated`, and `terminated` SHALL have no
-valid successor. The system MUST set `dispatched_at` when it marks an entry
-running and MUST set `finished_at` when it records a completed outcome. A
-direct `queued` to `failed` transition MUST leave `dispatched_at` absent. The
-system SHALL reject any status value outside this set when restoring an entry
-from its durable representation.
+
+AsyncQueue lifecycle transitions are worker-internal operations. A worker SHALL
+record `running`, terminal, and recovery outcomes without exposing public queue
+mutation methods for those transitions. `cancelled` remains a valid reserved
+terminal status, but no current worker path produces it.
 
 #### Scenario: Record successful handling
 - **WHEN** a worker handler returns a result for a running entry
@@ -140,10 +137,6 @@ from its durable representation.
   cancelled
 - **THEN** the entry is stored with status `cancelled` and a non-null
   `finished_at` timestamp
-- **AND** no worker path currently produces this status: a handler that
-  finishes during shutdown records its own outcome and one that overruns
-  records `timeout`, so `cancelled` is reserved for a deliberate cancellation
-  the queue does not yet offer
 
 #### Scenario: Record a timed-out handling
 - **WHEN** a worker abandons a handler that exceeded its execution budget
@@ -224,3 +217,17 @@ that require an entry value.
   entry subclass
 - **THEN** it restores the configured subclass and preserves its standard
   lifecycle transition semantics
+
+### Requirement: Remove expired event entries
+For an event queue, `timeout_seconds` SHALL mean the event's positive lifetime
+while it is unclaimed. A consumed, rejected, or expired unclaimed event SHALL
+be removed without a task terminal result. Redis and memory backends SHALL
+prune expired unclaimed events while receiving and during idle cleanup.
+
+#### Scenario: Expire an unconsumed event
+- **WHEN** an unclaimed event remains available for its resolved lifetime
+- **THEN** the backend logs and removes it without a terminal entry record
+
+#### Scenario: Reach expiry while claiming
+- **WHEN** an unclaimed event reaches its resolved lifetime immediately before a worker claims it
+- **THEN** the claim atomically removes the event and does not dispatch it

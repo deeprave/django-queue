@@ -1,11 +1,12 @@
-# Django Queue
+# Django Queues
 
 This is an implementation of message queues for Django.
 
+The current implementation supports an in-memory queue and a redis-backed pub/sub queue with custom LUA for atomic updates.
+
 ## Requirements
 
-`django-queue` requires Python 3.14 or later. Queue entry IDs use the
-standard-library UUIDv7 implementation introduced in Python 3.14.
+`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14.
 
 ## Choose a queue type
 
@@ -14,28 +15,32 @@ Choose the semantic queue type first; choose its memory or Redis backend second.
 | Choose | Use it for | Classes | Consumer model | Retention |
 | --- | --- | --- | --- | --- |
 | **Async queue** | Work that runs later and whose progress or outcome must be inspectable | `MemoryAsyncQueue`, `RedisAsyncQueue`, and their stack/priority variants | An async `HANDLER`, normally run by `manage.py runqueues` | A durable lifecycle: `queued`, `running`, then `succeeded`, `failed`, or `timeout` until pruning |
-| **Event queue** | Short-lived notifications delivered to local listeners | `MemoryEventQueue`, `RedisEventQueue` | `@queue_listener`; Django starts the event runtime when the process first handles a request | Consumed, retried, or expired; no durable outcome record |
+| **Event queue** | Short-lived notifications delivered to one or more local listeners | `MemoryEventQueue`, `RedisEventQueue` | `@queue_listener`; Django starts the event runtime when the process first handles a request | Consumed, retried, or expired; no durable outcome record |
 
-Async queues are the right choice when a producer needs to find a later result,
-observe lifecycle progress, or retain completed work temporarily. Event queues
-are the right choice when registered listeners should react to a transient
-event and no result needs to be retrieved afterwards.
+Async queues are the correct choice when a producer needs to determine a result, observe lifecycle progress, or retain completed work temporarily.
+
+Event queues are for streaming data in "fan-out" fashion to one or more consumers, and no result needs to be retrieved afterwards.
 
 ## Backend choices
+
+Currently only two:
 
 - **Memory** queues exist only while the application process runs. Configured
   `MemoryAsyncQueue` instances are local to the resolving process and thread;
   `MemoryEventQueue` is process-scoped.
 - **Redis** queues are shared and persistent. Use them when producers and
   consumers run in different processes, containers, or hosts. Install support
-  with `pip install "django-queue[redis]"`.
+  with `pip install "django-queues[redis]"`.
 
-FIFO, LIFO stack, and priority ordering are available for async queues. Event
-queues use their selected backend's transient delivery semantics.
+FIFO, LIFO stack, and priority ordering are available for async queues. Event queues use their selected backend's transient delivery semantics.
 
 ## Configuration
 
 Queues are configured in the Django settings module, and use a simple and familiar configuration format like **DATABASES** and **CACHES**.
+
+### Async queues
+
+An async queue is good choice for task monitoring or collecting results from code that has been handed off to another thread, process or computer.
 
 An async queue used only by producers is configured as follows:
 
@@ -49,28 +54,43 @@ QUEUES = {
 }
 ```
 
-This configures a Redis-backed FIFO async queue with JSON values. Redis-backed
-queues own their asynchronous connections; application code does not supply
-Redis client instances.
+This configures a Redis-backed FIFO async queue with JSON values. Redis-backed queues own their asynchronous connections; application code does not supply Redis client instances.
 
 To implement a stack (FILO), use
 `django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`.
 
-All aliases are validated and initialised when Django starts. Application code
-can retrieve a configured queue through `queues["alias"]`; initialisation only
-constructs queue services and never starts a worker.
-Queue aliases cannot contain `*`, `?`, `[` or `]`.
+All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`; initialisation only constructs queue services and never starts a worker. Queue aliases cannot contain `*`, `?`, `[` or `]`.
 
-The explicit supported settings are `BACKEND`, `LOCATION`, `HANDLER`, `WORKER`,
-`ENTRY_CLASS`, `TIMEOUT`, and `RETENTION_TIMEOUT`; backend-specific options are
-passed through to the selected backend.
+### Configuration reference
 
-### Transient event queues
+The alias is the queue's stable application identity. It is the key in
+`QUEUES`, not a separate setting; `queue_name` is not a supported option.
 
-`MemoryEventQueue` and `RedisEventQueue` deliver short-lived events to local
-listeners instead of retaining async-work outcomes. Configure one explicitly,
-then
-register one or more listeners in application code:
+| Setting | Applies to | Meaning |
+| --- | --- | --- |
+| `BACKEND` | All queues; required | Dotted class path for the queue backend. It selects both the semantic kind (`AsyncQueue` or `EventQueue`) and storage provider. |
+| `LOCATION` | All queues | Backend location. Redis backends require a Redis URL such as `redis://localhost:6379/12`; memory backends ignore it and may omit it. |
+| `HANDLER` | Async queues only | Dotted path to the async callable that handles entries. Its presence opts that alias into `manage.py runqueues`; it is not passed to the backend. Event queues reject it because they use listeners. |
+| `WORKER` | Optional | Compatible concrete worker class or dotted class path. Omit it to use the backend's default; Redis and memory workers are provider-specific. |
+| `ENTRY_CLASS` | Optional | `QueueEntry` subclass or dotted class path used for queue entries. It defaults to `QueueEntry`; extra fields must be JSON-serialisable. |
+| `TIMEOUT` | All queues | For an async queue, the default execution budget for its handlers (600 seconds when unset). For an event queue, the unclaimed event lifetime (60 seconds when unset). An entry-specific `timeout_seconds` takes precedence. |
+| `RETENTION_TIMEOUT` | Async queues only | Terminal-record retention in seconds. Defaults to 600; set to `None` to disable automatic cleanup. Event queues do not retain terminal records. |
+
+Built-in backend options are deliberately small:
+
+| Option | Applies to | Meaning |
+| --- | --- | --- |
+| `maxsize` | Memory and Redis raw-value operations | Maximum number of values accepted by `add`; `0` (the default) is unbounded. |
+| `stack` | Redis queues and memory async queues | Use LIFO ordering instead of FIFO. Prefer the explicit `RedisAsyncStack` backend where one exists. |
+| `encoding` | Redis queues | Python codec used for raw Redis values; defaults to UTF-8. |
+
+Custom backends may document additional options. Queue metadata (`HANDLER`,
+`WORKER`, `ENTRY_CLASS`, `TIMEOUT`, and `RETENTION_TIMEOUT`) is consumed by
+Django Queue and is never forwarded to a backend constructor.
+
+### Event queues
+
+`MemoryEventQueue` and `RedisEventQueue` deliver short-lived events to local listeners instead of retaining async-work outcomes. Configure one explicitly, then register one or more listeners in application code:
 
 ```python
 # settings.py
@@ -92,30 +112,11 @@ async def send_notification(entry):
     return True
 ```
 
-An eligible listener returning `True` consumes and removes the event. Returning
-`False` logs a rejection and also removes it; returning `None` lets the next
-listener see it. If every listener passes, or a filter/listener raises, the
-event is released for a short delayed retry. Events expire unconsumed after an
-entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default.
-They never acquire a task result or terminal entry record.
+An eligible listener returning `True` consumes and removes the event. Returning `False` logs a rejection and also removes it; returning `None` lets the next listener see it. If every listener passes, or a filter/listener raises, the event is released for a short delayed retry. Events expire unconsumed after an entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default. They never acquire a task result or terminal entry record.
 
-Django starts one process-local event runtime when each process handles its
-first HTTP request and at least one event queue is configured. It owns one
-asyncio loop and one worker task per event queue. An alias may set `WORKER` to
-an event-worker subclass compatible with the selected backend: memory event
-queues require a subclass of their memory-aware worker and Redis event queues
-require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata
-is invalid because listeners provide event dispatch. Memory event queues are
-local to that process. Redis workers use claims so processes
-compete for one active delivery, but ordering remains indeterminate across
-multiple listeners, processes, or retries. Use one listener in one process when
-strict ordering is required. An active Redis listener renews its claim while it
-runs; if its worker stops before settling the event, a later dispatcher recovers
-the expired claim for redelivery.
-The runtime retries an event dispatcher that stops from an infrastructure
-failure with bounded backoff.
+Django starts one process-local event runtime when each process handles its first HTTP request and at least one event queue is configured. It owns one asyncio loop and one worker task per event queue. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
 
-### Async queue extensions
+### Async queue handlers and extensions
 
 Each alias may optionally choose the concrete worker and entry types it uses:
 
@@ -131,39 +132,13 @@ QUEUES = {
 }
 ```
 
-`WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import
-path. `ENTRY_CLASS` defaults to `QueueEntry`. Each backend selects its own
-default worker: memory async and event queues use memory-aware workers, while
-Redis async and event queues use Redis-aware workers that manage their transport
-delivery internally. `AsyncQueueWorker` and `EventQueueWorker` are common
-orchestration bases; concrete backend workers own provider delivery mechanics.
-A configured async-queue worker must be compatible with the backend's selected
-worker type and use its normal queue-lookup and handler-mapping constructor. A
-queue constructs its worker with its own clock,
-so a subclass that overrides `__init__` must accept a `clock` keyword and pass
-it to `super().__init__`, or accept `**kwargs` and forward them. Entry classes
-must subclass `QueueEntry` and declare any additional fields as a frozen
-dataclass; those fields must be JSON-serialisable, and are persisted and
-restored without further work. Django validates and imports entry and worker
-types during queue configuration. A worker is constructed only when its queue
-first becomes active; an entry only when it is enqueued, restored, or updated.
+`HANDLER` must resolve to an asynchronous callable. `runqueues` imports each configured handler at startup, waits until that queue has work, then creates its configured worker and passes the handler to it. A queue without `HANDLER` remains producer-only until application code supplies another worker.
 
-`RETENTION_TIMEOUT` controls how long terminal entry records remain available.
-It defaults to 600 seconds; set it to `None` to explicitly disable automatic
-retention cleanup. A running worker removes expired terminal records during its
-normal loop. `prune(entry_id)` and `await aprune(entry_id)` remove
-one terminal record immediately.
+`WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import path. Each backend selects a provider-compatible default worker: memory async and event queues use memory-aware workers, while Redis async and event queues use Redis-aware workers that manage transport delivery internally. `AsyncQueueWorker` and `EventQueueWorker` are orchestration bases, not default workers for every backend. A configured async-queue worker must be compatible with its backend's selected worker type and use the normal queue-lookup and handler-mapping constructor. A queue constructs its worker with its own clock, so a subclass that overrides `__init__` must accept a `clock` keyword and pass it to `super().__init__`, or accept `**kwargs` and forward them. Django validates and imports entry and worker types during queue configuration. A worker is constructed only when its queue first becomes active; an entry only when it is enqueued, restored, or updated.
 
-Custom queue backends that support identified entry dispatch must implement
-`has_pending()`, returning whether `dequeue()` can immediately
-return an entry. They must also implement `aprune()` and
-`_aprune_expired()`: pruning rejects non-terminal entries, removes the
-durable record, and publishes an observer-only `terminated` snapshot. Workers
-publish an entry's initial lifecycle snapshot when they first observe it.
-Custom backends that emit Django's `entry_enqueued` signal must call
-`send_entry_enqueued()` after durable enqueue; that signal is separate from
-lifecycle observation. Built-in backends expose `queue_name`, their stable entry
-namespace.
+`RETENTION_TIMEOUT` controls how long terminal entry records remain available. A running worker removes expired terminal records during its normal loop. `prune(entry_id)` and `await aprune(entry_id)` remove one terminal record immediately.
+
+Custom queue backends that support identified entry dispatch must implement `has_pending()`, returning whether `dequeue()` can immediately return an entry. They must also implement `aprune()` and `_aprune_expired()`: pruning rejects non-terminal entries, removes the durable record, and publishes an observer-only `terminated` snapshot. Workers publish an entry's initial lifecycle snapshot when they first observe it. Custom backends that emit Django's `entry_enqueued` signal must call `send_entry_enqueued()` after durable enqueue; that signal is separate from lifecycle observation. Built-in backends expose `queue_name`, their stable entry namespace.
 
 ## Usage
 
@@ -191,10 +166,7 @@ Multiple values can be added in the one `add()` call if required.
 
 ### Instants
 
-`ClockTime` is how this package names a point in time: an immutable value
-holding whole seconds and microseconds since the Unix epoch. It exists so an
-instant and a duration cannot be confused — a duration stays a plain count of
-seconds.
+`ClockTime` is how this package names a point in time: an immutable value holding whole seconds and microseconds since the Unix epoch. It exists so an instant and a duration cannot be confused — a duration is expressed as a plain count of seconds.
 
 ```python
 from datetime import UTC, datetime
@@ -211,9 +183,7 @@ instant.to_timestamp()  # 1785800000.25, the durable form
 instant.to_datetime()  # an aware UTC datetime, for calendar work
 ```
 
-Instants compare and order chronologically. Subtracting one from another gives
-the seconds between them, and adding or subtracting a count of seconds gives
-another instant, with the duration on either side:
+Instants compare and order chronologically. Subtracting one from another gives the seconds between them, and adding or subtracting a count of seconds gives another instant, with the duration on either side:
 
 ```python
 elapsed = finished - started  # a float count of seconds
@@ -223,83 +193,47 @@ started + finished  # TypeError: adding two instants means nothing
 ```
 
 Construction rejects anything that cannot describe an instant. A component of
-the wrong type raises `TypeError` — including a `bool`, which is an integer in
-Python but not a moment. A microsecond component outside `[0, 1000000)`, a naive
-datetime, a count of seconds that is NaN or infinite, or a time before the epoch
-raises `ValueError`. The epoch is a floor on arithmetic too: shifting back past
-it fails rather than yielding a negative time.
+the wrong type raises `TypeError` — including a `bool`, which is an integer in Python but not a moment. A microsecond component outside `[0, 1000000)`, a naive datetime, a count of seconds that is NaN or infinite, or a time before the epoch raises `ValueError`. The epoch is a floor on arithmetic too: shifting back past it fails rather than yielding a negative time.
 
-An instant does not convert to a number implicitly. `float(instant)` raises, and
-so does `json.dumps` on one, so a caller that wants a number asks for it.
+An instant does not convert to a number implicitly. `float(instant)` raises, and so does `json.dumps` on one, so a caller that wants a number asks for it.
+
+In a redis-backed environment the base instant used is that returned by the redis server's TIME command, so that multiple consumers across systems (such as a horizontally scaled Django application) are effectively synced with the redis server when it comes to internal handling of event times and durations.
 
 ### Identified lifecycle records
 
-The lifecycle-record API is appropriate when a producer needs to poll the
-outcome of work processed later. Payloads and handler results must be
-JSON-serialisable. The queue generates the UUIDv7 identifier and owns all
-lifecycle timestamps, taking them from its own clock — Redis-aligned for a Redis
-queue, local time otherwise. That clock is available as `queue.clock`, so
-anything recording times alongside a queue's entries can share its basis.
+The lifecycle-record API is appropriate when a producer needs to poll the outcome of work processed later. Payloads and handler results must be JSON-serialisable. The queue generates the UUIDv7 identifier and owns all lifecycle timestamps, taking them from its own clock — Redis-aligned for a Redis queue, local time otherwise. That clock is available as `queue.clock`, so anything recording times alongside a queue's entries can share its basis.
 
-`queued_at`, `dispatched_at` and `finished_at` are `ClockTime` values, stored as
-a float count of seconds since the epoch. Nothing parses a string or resolves a
-timezone to read one, and a stored instant is directly usable as a Redis
-sorted-set score.
+`queued_at`, `dispatched_at` and `finished_at` are `ClockTime` values, stored as a float count of seconds since the epoch. Nothing parses a string or resolves a timezone to read one, and a stored instant is directly usable as a Redis sorted-set score.
 
-Because those instants share one basis, an entry can report elapsed time
-directly:
+Because those instants share one basis, an entry can report elapsed time directly:
 
 ```python
 entry.queued_for  # seconds it waited before a worker picked it up
 entry.ran_for  # seconds its handler took
 ```
 
-Each is a count of seconds carrying its microseconds, not a whole number of
-them — a handler that ran for 137 microseconds reports `0.000137`, which matters
-because most work finishes in well under a second.
+Each is a count of seconds carrying its microseconds, not a whole number of them — a handler that ran for 137 microseconds reports `0.000137`, which matters because most work finishes in well under a second.
 
-Both are derived from the instants rather than stored, so they cannot disagree
-with them, and both are `None` until the instants describing them exist — an
-entry still waiting has not waited zero seconds. They are also `None` if the
-instants contradict, which a clock recalibrating backwards can cause: a negative
-elapsed time is meaningless rather than merely small.
+Both are derived from the instants rather than stored, so they cannot disagree with them, and both are `None` until the instants describing them exist — an entry still waiting has not waited zero seconds. They are also `None` if the instants contradict, which a clock recalibrating backwards can cause: a negative elapsed time is meaningless rather than merely small.
 
 ### Asynchronous queue API and heartbeat
 
-The `a`-prefixed lifecycle operations are the primary API in asynchronous code:
-`aenqueue`, `afind`, `alist`, `adequeue`, and
-`ahas_pending`.
-Lifecycle transitions are worker-internal operations, not producer APIs.
-AsyncQueue backends also expose `aprune`
-for explicit retained-entry removal. Built-in queues also expose `aadd`, `aget`,
-`apoll`, `apeek`, `asize`, and `aclear` for raw queue values. Await these from
-an ASGI view, a handler, or another coroutine:
+The `a`-prefixed lifecycle operations are the primary API in asynchronous code: `aenqueue`, `afind`, `alist`, `adequeue`, and `ahas_pending`. All must be `await`ed when called.
+
+Lifecycle transitions are worker-internal operations, not producer APIs. AsyncQueue backends also expose `aprune` for explicit retained-entry removal. Built-in queues also expose `aadd`, `aget`, `apoll`, `apeek`, `asize`, and `aclear` for raw queue values. Await these from an ASGI view, a handler, or another coroutine:
 
 ```python
 entry_id = await queue.aenqueue({"request_id": 42})
 entry = await queue.afind(entry_id)
 ```
 
-The corresponding synchronous methods remain for synchronous Django code. They
-must not be called from a running event loop; use the `a`-prefixed operation
-instead. A custom backend implements the asynchronous methods, while the base
-class supplies the synchronous wrappers. `len(queue)`, `bool(queue)`, and
-`is_empty()` are likewise synchronous-only; use `asize()` or `ais_empty()` in
-an event loop. Synchronous wrapper calls release their bridge-loop resources
-after each operation, so a custom backend's `aclose()` must be idempotent.
+The corresponding synchronous methods remain for synchronous Django code. They must not be called from a running event loop; use the `a`-prefixed operation instead. A custom backend implements the asynchronous methods, while the base class supplies the synchronous wrappers. `len(queue)`, `bool(queue)`, and `is_empty()` are likewise synchronous-only; use `asize()` or `ais_empty()` in an event loop. Synchronous wrapper calls release their bridge-loop resources after each operation, so a custom backend's `aclose()` must be idempotent.
 
-`runqueues` disposes its queues on its owning event loop.
-Other async hosts must await `aclose_queues()` before closing that loop;
-`close_queues()` only serves synchronous-wrapper resources and cannot close a
-different loop's Redis client.
+`runqueues` disposes its queues on its owning event loop. Other async hosts must await `aclose_queues()` before closing that loop; `close_queues()` only serves synchronous-wrapper resources and cannot close a different loop's Redis client.
 
-For a Redis backend, a synchronous queue operation uses a fresh bridge-loop
-connection and Redis `TIME` calibration before closing it. Prefer the async API
-in asynchronous or high-volume producer code, where the loop-local client and
-clock are reused.
+For a Redis backend, a synchronous queue operation uses a fresh bridge-loop connection and Redis `TIME` calibration before closing it. Prefer the async API in asynchronous or high-volume producer code, where the loop-local client and clock are reused.
 
-Long-running handlers may call `heartbeat()` after genuine progress to restart
-their current execution budget as they approach its deadline:
+Long-running handlers may call `heartbeat()` after genuine progress to restart their current execution budget as they approach its deadline:
 
 ```python
 from django_queue import heartbeat
@@ -311,10 +245,7 @@ async def process_request(entry):
     return {"processed": True}
 ```
 
-Heartbeat extends only the local execution budget. It is neither a lease
-renewal nor an ownership or delivery guarantee; a later claim-and-recovery
-backend may add those guarantees. It is not a keepalive to call on a timer or
-in a loop: doing so disables the protection the budget provides.
+Heartbeat extends only the local execution budget. It is neither a lease renewal nor an ownership or delivery guarantee; a later claim-and-recovery backend may add those guarantees. It is not a keepalive to call on a timer or in a loop: doing so disables the protection the budget provides.
 
 ```python
 from django_queue import queue
@@ -327,9 +258,7 @@ assert entry.status == "queued"
 
 ### Lifecycle observation
 
-Use `queue_observer` for best-effort, passive async-queue monitoring. A subscription
-receives immutable entry snapshots from an async-queue worker; it cannot affect
-async-queue execution.
+Use `queue_observer` for best-effort, passive async-queue monitoring. A subscription receives immutable entry snapshots from an async-queue worker; it cannot affect async-queue execution.
 
 ```python
 from django_queue import queue_observer
@@ -343,56 +272,22 @@ subscription = queue_observer("default", update_dashboard)
 subscription.unsubscribe()  # stop future local delivery
 ```
 
-Memory queues notify only within the same Django process. Redis queues use
-best-effort Pub/Sub: a disconnected observer can miss transitions. Register a
-new observer when a new retained-state bootstrap is needed. Observer callback
-failures are logged and do not affect queue processing. Each observed queue's
-local delivery queue holds up to 128 snapshots; later snapshots are dropped
-when it is full, with one warning logged for that queue's process-local
-lifetime.
+Memory queues notify only within the same Django process. Redis queues use best-effort Pub/Sub: a disconnected observer can miss transitions. Register a new observer when a new retained-state bootstrap is needed. Observer callback failures are logged and do not affect queue processing. Each observed queue's local delivery queue holds up to 128 snapshots; later snapshots are dropped when it is full, with one warning logged for that queue's process-local lifetime.
 
-When a worker receives an entry, it first publishes that entry's persisted
-`queued` snapshot, then publishes `running` and its terminal state after each
-state is stored. A running worker also scans retained entries once per second
-and publishes snapshots it has not previously seen, using the queue-owned
-UUIDv7 IDs as its cursor. This makes entries changed outside the worker's own
-dispatch path observable; when the entry is later dispatched, the cursor avoids
-republishing its queued snapshot. An entry awaiting a worker remains available
-in the retained snapshots delivered at subscription.
+When a worker receives an entry, it first publishes that entry's persisted `queued` snapshot, then publishes `running` and its terminal state after each state is stored. A running worker also scans retained entries once per second and publishes snapshots it has not previously seen, using the queue-owned UUIDv7 IDs as its cursor. This makes entries changed outside the worker's own dispatch path observable; when the entry is later dispatched, the cursor avoids republishing its queued snapshot. An entry awaiting a worker remains available in the retained snapshots delivered at subscription.
 
-Retention cleanup and explicit pruning remove a terminal record and publish one
-final immutable entry-shaped snapshot to its observers with
-`status == "terminated"`. This final snapshot is never persisted as a retained
-record, although `terminated` is the final lifecycle state after any completed
-state. Dashboards can use it to remove the entry from their projection. A later
-`find()` or `afind()` for the removed ID raises
-`QueueEntryNotFoundError`.
+Retention cleanup and explicit pruning remove a terminal record and publish one final immutable entry-shaped snapshot to its observers with `status == "terminated"`. This final snapshot is never persisted as a retained record, although `terminated` is the final lifecycle state after any completed state. Dashboards can use it to remove the entry from their projection. A later `find()` or `afind()` for the removed ID raises `QueueEntryNotFoundError`.
 
-The first Redis observer for a queue starts one daemon receiver for that
-process. It blocks in Pub/Sub while idle rather than polling, consumes no CPU
-while it waits, and does not keep Django alive during shutdown. The receiver is
-intentionally retained for the process lifetime so later subscriptions can
-reuse it. If it exits because Redis fails, it logs the failure and clears its
-registration; a later observer registration starts a fresh receiver.
+The first Redis observer for a queue starts one daemon receiver for that process. It blocks in Pub/Sub while idle rather than polling, consumes no CPU while it waits, and does not keep Django alive during shutdown. The receiver is intentionally retained for the process lifetime so later subscriptions can reuse it. If it exits because Redis fails, it logs the failure and clears its registration; a later observer registration starts a fresh receiver.
 
 An entry normally transitions through `queued`, `running`, and one completed
-status: `succeeded`, `failed`, or `timeout`. Each completed status transitions
-to `terminated` when pruning removes its retained record. Failed entries expose
-only an exception type and safe message; the worker logs the traceback for
-diagnosis. A fourth completed status, `cancelled`, exists on the backend
-contract but no worker path produces it: a handler that finishes during
-shutdown is recorded by what it returned, and one that overruns is recorded as
-`timeout`. It is reserved for a deliberate per-entry cancellation the queue
-does not yet offer.
+status: `succeeded`, `failed`, or `timeout`. Each completed status transitions to `terminated` when pruning removes its retained record. Failed entries expose only an exception type and safe message; the worker logs the traceback for diagnosis. A fourth completed status, `cancelled`, exists on the backend contract but no worker path produces it: a handler that finishes during shutdown is recorded by what it returned, and one that overruns is recorded as `timeout`. It is reserved for a deliberate per-entry cancellation the queue does not yet offer.
 
-`failed` may also be recorded directly from `queued` when dispatch cannot
-begin, for example after queue-side validation or transport failure. Such an
-entry has `finished_at` but no `dispatched_at`.
+`failed` may also be recorded directly from `queued` when dispatch cannot begin, for example after queue-side validation or transport failure. Such an entry has `finished_at` but no `dispatched_at`.
 
 ### Asynchronous worker
 
-An application or management command explicitly owns the worker task. It must
-not be started from a request handler or Django app initialisation hook.
+An application or management command explicitly owns the worker task. It must not be started from a request handler or Django app initialisation hook.
 
 ```python
 import asyncio
@@ -408,42 +303,20 @@ worker = queues["default"].create_worker("default", process_request)
 asyncio.run(worker.run())
 ```
 
-The worker dispatches one entry at a time and runs until cancelled. On
-cancellation it stops accepting new entries, gives an active handler its
-configured grace period, then cancels it if needed.
+The worker dispatches one entry at a time and runs until cancelled. On cancellation it stops accepting new entries, gives an active handler its configured grace period, then cancels it if needed.
 
 Redis queues use leased claims for at-least-once delivery. A worker claims an
-entry, renews its lease while dispatching, and atomically settles its terminal
-entry outcome only while it still owns that claim. Expired claims return the
-same entry ID to pending work, so a process failure can cause the handler to
-execute more than once. Handlers that make external changes must therefore be
-idempotent. Queue backends without claim-lease support retain best-effort
-delivery.
+entry, renews its lease while dispatching, and atomically settles its terminal entry outcome only while it still owns that claim. Expired claims return the same entry ID to pending work, so a process failure can cause the handler to execute more than once. Handlers that make external changes must therefore be idempotent. Queue backends without claim-lease support retain best-effort delivery.
 
-Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery
-operations, owned by the Redis worker and its private queue provider rather
-than the public queue API. Other transports may use a different native model.
-Redis keys, scripts, timestamps, and record layout are not public contract.
-Redis Cluster is not supported by the Redis delivery implementation.
+Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, scripts, timestamps, and record layout are not public contract.Redis Cluster is not supported by the Redis delivery implementation.
 
-If a terminal outcome cannot be persisted because of an infrastructure failure,
-the worker logs the failure and continues. When it can still read a `running`
-entry, it makes one best-effort attempt to record a safe
-`QueuePersistenceError` failure outcome. If it cannot confirm either terminal
-outcome, the worker raises `QueuePersistenceError` rather than accepting
-further entries.
+If a terminal outcome cannot be persisted because of an infrastructure failure, the worker logs the failure and continues. When it can still read a `running` entry, it makes one best-effort attempt to record a safe `QueuePersistenceError` failure outcome. If it cannot confirm either terminal outcome, the worker raises `QueuePersistenceError` rather than accepting further entries.
 
-Loss of claim ownership is different: the worker stops handling that entry
-without recording an outcome, then continues serving later work. Recovery or
-the worker that acquired the claim owns the retry and its terminal outcome.
+Loss of claim ownership is different: the worker stops handling that entry without recording an outcome, then continues serving later work. Recovery or the worker that acquired the claim owns the retry and its terminal outcome.
 
 ### Execution budgets
 
-Every dispatch runs under a budget: a count of seconds after which the worker
-stops waiting, cancels the handler, and records the entry as `timeout`. The
-worker then moves to the next entry, so one handler that never returns cannot
-starve an alias. A budget is always in force — an unbounded handler is the
-defect the budget exists to remove — so there is no value meaning unlimited.
+Every dispatch runs under a budget: a count of seconds after which the worker stops waiting, cancels the handler, and records the entry as `timeout`. The worker then moves to the next entry, so one handler that never returns cannot starve an alias. A budget is always in force — an unbounded handler is the defect the budget exists to remove — so there is no value meaning unlimited.
 
 The budget is resolved per dispatch, taking the first of these that is set:
 
@@ -462,12 +335,7 @@ QUEUES = {
 }
 ```
 
-`TIMEOUT` is a finite positive number of seconds, validated when settings are
-initialised rather than at first dispatch, so a bad value fails at startup. The
-same rule applies wherever a budget is supplied — the setting, the `enqueue`
-keyword, and the worker override all reject a non-number with `TypeError` and a
-zero, negative, infinite or NaN value with `ValueError`, at the point it is
-supplied. There is no value meaning unlimited, infinity included.
+`TIMEOUT` is a finite positive number of seconds, validated when settings are initialised rather than at first dispatch, so a bad value fails at startup. The same rule applies wherever a budget is supplied — the setting, the `enqueue` keyword, and the worker override all reject a non-number with `TypeError` and a zero, negative, infinite or NaN value with `ValueError`, at the point it is supplied. There is no value meaning unlimited, infinity included.
 
 A single piece of work that legitimately takes longer carries its own budget:
 
@@ -475,32 +343,17 @@ A single piece of work that legitimately takes longer carries its own budget:
 entry_id = queue.enqueue({"request_id": 42}, timeout_seconds=120)
 ```
 
-The budget expires on the event loop's monotonic clock, while the entry's
-timestamps are read from the queue's own clock. They are deliberately
-independent: the budget decides when to stop, and the entry records what
-happened. A timed-out entry's `ran_for` is a wall-clock measurement and will not
-equal the budget that expired.
+The budget expires on the event loop's monotonic clock, while the entry's timestamps are read from the queue's own clock. They are deliberately independent: the budget decides when to stop, and the entry records what happened. A timed-out entry's `ran_for` is a wall-clock measurement and will not equal the budget that expired.
 
-Custom entry-capable backends must implement the worker-internal
-`_amark_timed_out(entry_id)`
-alongside the other terminal transitions, moving a `running` entry to `timeout`
-and setting `finished_at`.
+Custom entry-capable backends must implement the worker-internal `_amark_timed_out(entry_id)` alongside the other terminal transitions, moving a `running` entry to `timeout` and setting `finished_at`.
 
-The shutdown grace period is separate from the budget: it bounds how long a
-cancelled worker waits for an active handler, and its expiry is also recorded as
-`timeout`.
+The shutdown grace period is separate from the budget: it bounds how long a cancelled worker waits for an active handler, and its expiry is also recorded as `timeout`.
 
-A handler that raises `TimeoutError` of its own — from `asyncio.wait_for`, an
-HTTP client, or a database driver — is recorded `failed` with that error, not
-`timeout`. Only the budget actually running out means the handler never
-answered.
+A handler that raises `TimeoutError` of its own — from `asyncio.wait_for`, an HTTP client, or a database driver — is recorded `failed` with that error, not `timeout`. Only the budget actually running out means the handler never answered.
 
 ### Worker observability
 
-Each `AsyncQueueWorker` has a generated UUIDv7 identity and exposes a frozen,
-process-local `snapshot`. It reports the current run state, registered queue
-aliases, active queue name and entry ID, total dispatches, and confirmed persisted
-terminal outcomes:
+Each `AsyncQueueWorker` has a generated UUIDv7 identity and exposes a frozen, process-local `snapshot`. It reports the current run state, registered queue aliases, active queue name and entry ID, total dispatches, and confirmed persisted terminal outcomes:
 
 ```python
 from django_queue import WorkerSnapshot
@@ -514,47 +367,19 @@ health = {
 }
 ```
 
-The worker emits INFO lifecycle records with `queue_worker_event` set to
-`started`, `dispatch_started`, `terminal_recorded`, or `stopped`. Their
-structured fields are prefixed with `queue_worker_` and include the same worker
-ID, running state, registered queue aliases, active queue name and entry ID,
-start time, dispatch count, and outcome counters as the snapshot. Counters advance
-only after the corresponding terminal entry state has been confirmed in the
-backend. `timed_out_count` is counted separately from `cancelled_count`, so a
-handler abandoned on its budget is distinguishable from one the queue was told
-to cancel.
+The worker emits INFO lifecycle records with `queue_worker_event` set to `started`, `dispatch_started`, `terminal_recorded`, or `stopped`. Their structured fields are prefixed with `queue_worker_` and include the same worker ID, running state, registered queue aliases, active queue name and entry ID, start time, dispatch count, and outcome counters as the snapshot. Counters advance only after the corresponding terminal entry state has been confirmed in the backend. `timed_out_count` is counted separately from `cancelled_count`, so a handler abandoned on its budget is distinguishable from one the queue was told to cancel.
 
-`started_at` comes from the worker's clock, which its queue supplies when it
-creates the worker, so a worker's recorded time and the entries it dispatches
-share one basis and elapsed time across them is meaningful. A worker built
-directly defaults to local time and accepts a `clock` argument. Like every
-instant the package reports it is a `ClockTime`, rendered in structured log
-records as a count of seconds rather than an ISO string.
+`started_at` comes from the worker's clock, which its queue supplies when it creates the worker, so a worker's recorded time and the entries it dispatches share one basis and elapsed time across them is meaningful. A worker built directly defaults to local time and accepts a `clock` argument. Like every instant the package reports it is a `ClockTime`, rendered in structured log records as a count of seconds rather than an ISO string.
 
-`running_for` reports how long the worker has been running, measured on that
-same clock, and stops advancing once the worker leaves its dispatch loop so it
-reports how long it ran. Structured records carry it, and a terminal-outcome
-record also carries the entry's `queued_for` and `ran_for`.
+`running_for` reports how long the worker has been running, measured on that same clock, and stops advancing once the worker leaves its dispatch loop so it reports how long it ran. Structured records carry it, and a terminal outcome record also carries the entry's `queued_for` and `ran_for`.
 
-Reading a running worker's snapshot samples the queue clock to measure
-`running_for`, so on a Redis-backed queue a snapshot read takes the clock's lock
-and may trigger its periodic recalibration. A stopped worker reads its recorded
-stop instant instead and touches no clock. Read snapshots from the worker's
-event loop for a consistent observation; they do not coordinate cross-thread
-reads. A shutdown
-can interrupt the worker's acknowledgement of an in-flight terminal write, so
-the final snapshot records only terminal outcomes the worker observed before it
-stopped.
+Reading a running worker's snapshot samples the queue clock to measure `running_for`, so on a Redis-backed queue a snapshot read takes the clock's lock and may trigger its periodic recalibration. A stopped worker reads its recorded stop instant instead and touches no clock. Read snapshots from the worker's event loop for a consistent observation; they do not coordinate cross-thread reads. A shutdown can interrupt the worker's acknowledgement of an in-flight terminal write, so the final snapshot records only terminal outcomes the worker observed before it stopped.
 
-Snapshots and log records are local to the worker process. Collect logs or add
-an exporter in application infrastructure to aggregate multiple `runqueues` or
-web processes; this package does not provide distributed liveness or metrics.
+Snapshots and log records are local to the worker process. Collect logs or add an exporter in application infrastructure to aggregate multiple `runqueues` or web processes; this package does not provide distributed liveness or metrics.
 
 ### External `runqueues` worker
 
-For production, run queue processing as a separate Django process and use a
-shared backend such as Redis. Declare an asynchronous handler on each queue
-that the process should dispatch:
+For production, run queue processing as a separate Django process and use a shared backend such as Redis. Declare an asynchronous handler on each queue that the process should dispatch:
 
 ```python
 # settings.py
@@ -578,26 +403,13 @@ Start it as its own service or container command:
 python manage.py runqueues
 ```
 
-`runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero
-on a configuration error, then waits to create each configured worker until that
-alias has pending entry work. It reports the configured handler count at startup
-and each alias as its worker begins. Once started, a worker runs until it
-receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers.
-Queue definitions without `HANDLER` remain available to application code but are
-not dispatched; when no handlers are configured, the command reports this and
-exits successfully. A worker failure is logged while the remaining queues stay
-watched; the command exits non-zero only when no configured queue is left.
+`runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero on a configuration error, then waits to create each configured worker until that alias has pending entry work. It reports the configured handler count at startup and each alias as its worker begins. Once started, a worker runs until it receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers. Queue definitions without `HANDLER` remain available to application code but are not dispatched; when no handlers are configured, the command reports this and  exits successfully. A worker failure is logged while the remaining queues stay watched; the command exits non-zero only when no configured queue is left.
 
-With all queues, the `get()`, `peek()`, and `poll()` methods return the object.
-With priority queues the priority is only used with and relevant to `add()`.
-Identified entries have no priority parameter, so their worker dispatch remains
-FIFO until priority-aware entry enqueueing is introduced.
+With all queues, the `get()`, `peek()`, and `poll()` methods return the object. With priority queues the priority is only used with and relevant to `add()`. Identified entries have no priority parameter, so their worker dispatch remains FIFO until priority-aware entry enqueueing is introduced.
 
 ## API reference
 
-All queues expose raw-value operations. `stack`, `capacity`, and `queue_name`
-describe the selected backend; `len(queue)` and `bool(queue)` are synchronous
-conveniences.
+All queues expose raw-value operations. `stack`, `capacity`, and `queue_name` describe the selected backend; `len(queue)` and `bool(queue)` are synchronous conveniences.
 
 | Raw-value operation | Meaning |
 | --- | --- |
@@ -610,8 +422,7 @@ conveniences.
 
 ### AsyncQueue lifecycle API
 
-Only `AsyncQueue` implementations retain lifecycle records. Their synchronous
-methods have `a`-prefixed async counterparts.
+Only `AsyncQueue` implementations retain lifecycle records. Their synchronous methods have `a`-prefixed async counterparts.
 
 | Operation | Meaning |
 | --- | --- |
@@ -622,17 +433,11 @@ methods have `a`-prefixed async counterparts.
 | `list` / `alist` | Return retained records for administration or observer bootstrap. |
 | `prune` / `aprune` | Remove one retained terminal record and publish its observer-only `terminated` state. |
 
-Lifecycle transitions are worker-internal. `enqueue` emits Django's
-`entry_enqueued` signal after durable storage; lifecycle observers receive
-records when workers first observe them and as their state changes.
+Lifecycle transitions are worker-internal. `enqueue` emits Django's `entry_enqueued` signal after durable storage; lifecycle observers receive records when workers first observe them and as their state changes.
 
 ### EventQueue delivery API
 
-`EventQueue` uses `enqueue` / `aenqueue` to create a transient event,
-`find` / `afind` to inspect one live event, and `dequeue` / `adequeue` for
-direct consumption. It deliberately has no `list` or `prune` lifecycle API:
-event records are consumed or expire without a terminal outcome, and listeners
-receive them through `@queue_listener`.
+`EventQueue` uses `enqueue` / `aenqueue` to create a transient event, `find` / `afind` to inspect one live event, and `dequeue` / `adequeue` for direct consumption. It deliberately has no `list` or `prune` lifecycle API: event records are consumed or expire without a terminal outcome, and listeners receive them through `@queue_listener`.
 
 ### Exceptions
 

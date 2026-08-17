@@ -61,7 +61,7 @@ class _QueueObservers:
             if self.dispatcher is None:
                 self.dispatcher = threading.Thread(
                     target=self._run_dispatcher,
-                    name=f"django-queue-observers-{self.queue.queue_name}",
+                    name=f"django-queues-observers-{self.queue.queue_name}",
                     daemon=True,
                 )
                 self.dispatcher.start()
@@ -71,7 +71,7 @@ class _QueueObservers:
                     self.receiver = threading.Thread(
                         target=self._run_receiver,
                         args=(receiver,),
-                        name=f"django-queue-observer-{self.queue.queue_name}",
+                        name=f"django-queues-observer-{self.queue.queue_name}",
                         daemon=True,
                     )
                     self.receiver.start()
