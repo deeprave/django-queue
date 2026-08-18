@@ -589,17 +589,13 @@ class QueueProviderRedis:
         )
         return client
 
-    def _observer_redis_client(self) -> redis.Redis:
-        """Return an isolated synchronous client for observer Pub/Sub."""
-        return redis.Redis.from_url(self._redis_url)
-
-    def observe(self, on_snapshot) -> None:
+    async def aobserve(self, on_snapshot) -> None:
         """Receive and decode lifecycle snapshots through provider-owned Pub/Sub."""
-        client = self._observer_redis_client()
+        client = async_redis.from_url(self._redis_url)
         pubsub = client.pubsub(ignore_subscribe_messages=True)
         try:
-            pubsub.subscribe(self.lifecycle_channel)
-            for message in pubsub.listen():
+            await pubsub.subscribe(self.lifecycle_channel)
+            async for message in pubsub.listen():
                 if message["type"] != "message":
                     continue
                 try:
@@ -612,8 +608,8 @@ class QueueProviderRedis:
                     continue
                 on_snapshot(entry)
         finally:
-            pubsub.close()
-            client.close()
+            await pubsub.aclose()
+            await client.aclose()
 
     async def apublish(self, entry: QueueEntry) -> None:
         await self._async_redis().publish(

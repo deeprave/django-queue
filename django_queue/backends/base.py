@@ -251,7 +251,7 @@ class AsyncQueue(BaseQueue):
 
     def _observer_receiver(
         self, on_snapshot: Callable[[QueueEntry], None]
-    ) -> Callable[[], None] | None:
+    ) -> Callable[[], Awaitable[None]] | None:
         """Return this backend's optional cross-process lifecycle receiver."""
         return None
 

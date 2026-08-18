@@ -1,4 +1,5 @@
 try:
+    import functools
     import logging
 
     from django_queue.backends.base import AsyncQueue
@@ -37,7 +38,7 @@ try:
 
         def _observer_receiver(self, on_snapshot):
             self._configure_provider_entry_class()
-            return lambda: self._provider.observe(on_snapshot)
+            return functools.partial(self._provider.aobserve, on_snapshot)
 
         async def aclose(self) -> None:
             await self._provider.aclose()
