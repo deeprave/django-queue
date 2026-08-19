@@ -11,7 +11,9 @@ def clear_registered_listeners():
     reset_listeners()
 
 
-def test_decorator_registers_a_listener_for_a_configured_event_queue(monkeypatch):
+def test_decorator_registers_a_listener_for_a_configured_event_queue(
+    monkeypatch, no_runtime_startup
+):
     configured = django_queue.QueueRegistry(
         {
             "events": {
@@ -29,7 +31,7 @@ def test_decorator_registers_a_listener_for_a_configured_event_queue(monkeypatch
     assert listeners_for("events")[0].callback is receive
 
 
-def test_decorator_rejects_a_task_queue(monkeypatch):
+def test_decorator_rejects_a_task_queue(monkeypatch, no_runtime_startup):
     configured = django_queue.QueueRegistry(
         {
             "tasks": {

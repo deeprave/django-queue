@@ -39,6 +39,16 @@ except ImportError:
     pass
 
 
+@pytest.fixture
+def no_runtime_startup(monkeypatch):
+    """Suppress queue_runtime auto-start via ready()/QueueRegistry.create_connection."""
+    from django_queue.queue_runtime import queue_runtime
+
+    monkeypatch.setattr(queue_runtime, "start_thread", lambda: None)
+    monkeypatch.setattr(queue_runtime, "start", lambda queues: None)
+    monkeypatch.setattr(queue_runtime, "start_one", lambda alias, queue: None)
+
+
 def _slow_tests_enabled():
     return os.getenv("SLOW_TESTS") in ("true", "1", "enabled")
 

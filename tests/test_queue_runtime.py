@@ -6,12 +6,12 @@ from uuid import UUID
 import pytest
 
 import django_queue
-from django_queue.apps import DjangoQueueConfig, _start_event_runtime_on_request
+from django_queue.apps import DjangoQueueConfig
 from django_queue.backends import MemoryEventQueue
 from django_queue.backends.exceptions import InvalidQueueBackendError
 from django_queue.backends.memory import MemoryEventQueueWorker
-from django_queue.event_runtime import EventRuntime
 from django_queue.listeners import ListenerRegistration
+from django_queue.queue_runtime import QueueRuntime
 
 
 class ClosingEventQueue(MemoryEventQueue):
@@ -36,9 +36,7 @@ class FlakyEventWorker(MemoryEventQueueWorker):
         await asyncio.Event().wait()
 
 
-def test_first_request_adds_only_configured_event_queues_to_the_shared_runtime(
-    monkeypatch,
-):
+def test_ready_starts_the_thread_once_when_queues_are_configured(monkeypatch):
     configured = django_queue.QueueRegistry(
         {
             "events": {
@@ -51,29 +49,42 @@ def test_first_request_adds_only_configured_event_queues_to_the_shared_runtime(
             },
         }
     )
+    started_thread = []
     started = []
-    initialisations = []
 
+    monkeypatch.setattr("django_queue.initialise_queues", lambda: configured)
     monkeypatch.setattr(
-        "django_queue.initialise_queues",
-        lambda: initialisations.append(configured) or configured,
+        "django_queue.queue_runtime.queue_runtime.start_thread",
+        lambda: started_thread.append(True),
     )
     monkeypatch.setattr(
-        "django_queue.event_runtime.event_runtime.start",
+        "django_queue.queue_runtime.queue_runtime.start",
         lambda queues: started.append(queues),
     )
 
     DjangoQueueConfig("django_queue", django_queue).ready()
 
-    assert initialisations == [configured]
-    assert started == []
-    _start_event_runtime_on_request()
-    assert initialisations == [configured, configured]
+    assert started_thread == [True]
     assert started == [configured]
 
 
+def test_ready_does_not_start_the_thread_when_queues_is_empty(monkeypatch):
+    configured = django_queue.QueueRegistry({})
+    started_thread = []
+
+    monkeypatch.setattr("django_queue.initialise_queues", lambda: configured)
+    monkeypatch.setattr(
+        "django_queue.queue_runtime.queue_runtime.start_thread",
+        lambda: started_thread.append(True),
+    )
+
+    DjangoQueueConfig("django_queue", django_queue).ready()
+
+    assert started_thread == []
+
+
 def test_task_only_configuration_does_not_start_an_event_loop():
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     configured = django_queue.QueueRegistry(
         {
             "tasks": {
@@ -107,8 +118,9 @@ def test_runtime_dispatches_an_event_on_its_single_background_loop(monkeypatch):
         "django_queue.event_worker.listeners_for",
         lambda queue_name: (ListenerRegistration(receive),),
     )
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     try:
+        runtime.start_thread()
         runtime.start(configured)
         configured["events"].enqueue("event")
         deadline = time.monotonic() + 1
@@ -138,8 +150,9 @@ def test_runtime_looks_up_listeners_by_configured_alias(monkeypatch):
         "django_queue.event_worker.listeners_for",
         lambda alias: (ListenerRegistration(receive),) if alias == "events" else (),
     )
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     try:
+        runtime.start_thread()
         runtime.start(configured)
         configured["events"].enqueue("event")
         deadline = time.monotonic() + 1
@@ -151,7 +164,7 @@ def test_runtime_looks_up_listeners_by_configured_alias(monkeypatch):
 
 
 def test_runtime_reuses_one_loop_and_starts_one_worker_per_event_queue():
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     configured = django_queue.QueueRegistry(
         {
             "first": {
@@ -165,14 +178,15 @@ def test_runtime_reuses_one_loop_and_starts_one_worker_per_event_queue():
         }
     )
     try:
-        runtime.start(configured)
+        runtime.start_thread()
         first_thread = runtime._thread
         runtime.start(configured)
+        runtime.start(configured)
         deadline = time.monotonic() + 1
-        while len(runtime._workers) != 2 and time.monotonic() < deadline:
+        while len(runtime._tasks) != 2 and time.monotonic() < deadline:
             time.sleep(0.01)
         assert runtime._thread is first_thread
-        assert set(runtime._workers) == {"first", "second"}
+        assert set(runtime._tasks) == {"first", "second"}
     finally:
         runtime.shutdown()
 
@@ -183,7 +197,7 @@ def test_event_queue_rejects_task_handler_metadata():
             "events": {
                 "BACKEND": "django_queue.backends.MemoryEventQueue",
                 "LOCATION": "",
-                "HANDLER": "tests.test_event_runtime.receive",
+                "HANDLER": "tests.test_queue_runtime.receive",
             }
         }
     )
@@ -200,7 +214,7 @@ def test_event_queue_uses_its_configured_event_worker_class():
             created.append(self)
             super().__init__(*args, **kwargs)
 
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     configured = django_queue.QueueRegistry(
         {
             "events": {
@@ -211,6 +225,7 @@ def test_event_queue_uses_its_configured_event_worker_class():
         }
     )
     try:
+        runtime.start_thread()
         runtime.start(configured)
         deadline = time.monotonic() + 1
         while not created and time.monotonic() < deadline:
@@ -222,19 +237,20 @@ def test_event_queue_uses_its_configured_event_worker_class():
 
 def test_runtime_closes_event_queue_resources_on_shutdown():
     ClosingEventQueue.closed = 0
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     configured = django_queue.QueueRegistry(
         {
             "events": {
-                "BACKEND": "tests.test_event_runtime.ClosingEventQueue",
+                "BACKEND": "tests.test_queue_runtime.ClosingEventQueue",
                 "LOCATION": "",
             }
         }
     )
     try:
+        runtime.start_thread()
         runtime.start(configured)
         deadline = time.monotonic() + 1
-        while not runtime._workers and time.monotonic() < deadline:
+        while not runtime._tasks and time.monotonic() < deadline:
             time.sleep(0.01)
     finally:
         runtime.shutdown()
@@ -245,7 +261,7 @@ def test_runtime_closes_event_queue_resources_on_shutdown():
 def test_runtime_restarts_a_worker_after_an_infrastructure_failure(caplog):
     FlakyEventWorker.runs = 0
     FlakyEventWorker.worker_ids = []
-    runtime = EventRuntime()
+    runtime = QueueRuntime()
     runtime.restart_initial_delay = 0.001
     runtime.restart_max_delay = 0.001
     configured = django_queue.QueueRegistry(
@@ -258,6 +274,7 @@ def test_runtime_restarts_a_worker_after_an_infrastructure_failure(caplog):
         }
     )
     try:
+        runtime.start_thread()
         runtime.start(configured)
         deadline = time.monotonic() + 1
         while FlakyEventWorker.runs < 2 and time.monotonic() < deadline:
@@ -269,6 +286,120 @@ def test_runtime_restarts_a_worker_after_an_infrastructure_failure(caplog):
         runtime.shutdown()
 
     assert "Event worker stopped unexpectedly" in caplog.text
+
+
+def test_runtime_hosts_a_worker_and_a_receiver_concurrently(monkeypatch, redis_client):
+    """One QueueRuntime instance can host both task kinds on its one loop:
+    an EventQueue worker and an AsyncQueue observer receiver, for two
+    separately configured aliases, without interfering with each other.
+    """
+    from django_queue import queue_observer
+    from django_queue.observers import _discard_observers_for
+
+    _discard_observers_for("observed")
+    configured = django_queue.QueueRegistry(
+        {
+            "events": {
+                "BACKEND": "django_queue.backends.MemoryEventQueue",
+                "LOCATION": "",
+            },
+            "observed": {
+                "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
+                "LOCATION": redis_client,
+            },
+        }
+    )
+    monkeypatch.setattr(django_queue, "queues", configured)
+
+    received_event = []
+
+    async def receive(entry):
+        received_event.append(entry.payload)
+        return True
+
+    monkeypatch.setattr(
+        "django_queue.event_worker.listeners_for",
+        lambda alias: (ListenerRegistration(receive),) if alias == "events" else (),
+    )
+
+    subscription = queue_observer("observed", lambda entry: None)
+    runtime = QueueRuntime()
+    try:
+        runtime.start_thread()
+        runtime.start(configured)
+        configured["events"].enqueue("event")
+
+        deadline = time.monotonic() + 1
+        while (
+            not received_event or set(runtime._tasks) != {"events", "observed"}
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert received_event == ["event"]
+        assert set(runtime._tasks) == {"events", "observed"}
+    finally:
+        subscription.unsubscribe()
+        runtime.shutdown()
+        _discard_observers_for("observed")
+
+
+def test_two_threads_registering_for_one_alias_share_the_receiver(
+    redis_client, monkeypatch
+):
+    """Two threads that both register an observer for the same alias for
+    the first time must be served by one runtime-hosted receiver -- no
+    second backend connection.
+    """
+    import threading
+
+    from django_queue import queue_observer
+    from django_queue.observers import _discard_observers_for
+    from django_queue.queue_runtime import queue_runtime
+
+    _discard_observers_for("shared")
+    configured = django_queue.QueueRegistry(
+        {
+            "shared": {
+                "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
+                "LOCATION": redis_client,
+            }
+        }
+    )
+    monkeypatch.setattr(django_queue, "queues", configured)
+    queue_runtime.start_thread()
+
+    subscriptions = []
+    errors = []
+
+    def register():
+        try:
+            subscriptions.append(queue_observer("shared", lambda entry: None))
+        except Exception as exc:  # noqa: BLE001 - surfaced to the test thread below
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=register)
+        second = threading.Thread(target=register)
+        first.start()
+        second.start()
+        first.join()
+        second.join()
+
+        assert not errors
+        assert len(subscriptions) == 2
+
+        deadline = time.monotonic() + 1
+        while "shared" not in queue_runtime._tasks and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        # One receiver task for the alias, regardless of how many
+        # registrations (from however many threads) triggered it.
+        assert "shared" in queue_runtime._tasks
+    finally:
+        for subscription in subscriptions:
+            subscription.unsubscribe()
+        queue_runtime.stop_one("shared")
+        _discard_observers_for("shared")
 
 
 def test_event_queue_rejects_a_task_worker_class():

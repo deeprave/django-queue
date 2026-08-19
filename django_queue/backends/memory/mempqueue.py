@@ -19,7 +19,6 @@ class MemoryAsyncPriorityQueue(AsyncQueue):
             clock=self._clock,
             maxsize=maxsize,
         )
-        self._initialise_observers()
 
     async def aadd(self, *items):
         await self._provider.aadd_priority(*items)

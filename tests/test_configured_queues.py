@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
@@ -82,6 +83,17 @@ def reset_tracking_extension_instances():
     yield
     TrackingWorker.instances = 0
     TrackingEntry.instances = 0
+
+
+def _wait_for_task(runtime, alias, timeout=1.0):
+    """Poll until `runtime._tasks[alias]` exists, since scheduling a task
+    onto the runtime's loop (`call_soon_threadsafe`) is asynchronous with
+    respect to the calling thread.
+    """
+    deadline = time.monotonic() + timeout
+    while alias not in runtime._tasks and time.monotonic() < deadline:
+        time.sleep(0.001)
+    return runtime._tasks.get(alias)
 
 
 class TestConfiguredQueueInitialization:
@@ -176,7 +188,9 @@ class TestConfiguredQueueInitialization:
         assert default is handler["default"]
         assert events is handler["events"]
 
-    def test_configured_memory_event_queue_is_shared_across_threads(self):
+    def test_configured_memory_event_queue_is_shared_across_threads(
+        self, no_runtime_startup
+    ):
         handler = django_queue.QueueRegistry(
             {
                 "events": {
@@ -196,6 +210,157 @@ class TestConfiguredQueueInitialization:
 
         assert isinstance(first, MemoryEventQueue)
         assert from_other_thread == [first]
+
+    def test_create_connection_starts_the_runtime_for_an_event_queue(self):
+        """Covers the non-HTTP-process fallback: resolving an alias directly
+        through the registry (as a management command or any code path that
+        never fires request_started would) must still start the runtime.
+
+        `start_thread()` mirrors what `DjangoQueueConfig.ready()` already
+        did once at process start in production; it's idempotent, so
+        calling it here is safe regardless of whether an earlier test in
+        this process already started the shared thread.
+        """
+        from django_queue.queue_runtime import queue_runtime
+
+        queue_runtime.start_thread()
+        handler = django_queue.QueueRegistry(
+            {
+                "fallback-events": {
+                    "BACKEND": "django_queue.backends.MemoryEventQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        try:
+            handler["fallback-events"]
+
+            assert _wait_for_task(queue_runtime, "fallback-events") is not None
+        finally:
+            queue_runtime.stop_one("fallback-events")
+
+    def test_create_connection_starts_the_runtime_for_an_observed_async_queue(
+        self, redis_client, monkeypatch
+    ):
+        """Only a backend with a real receiver (Redis) schedules a task here
+        -- a memory-backed AsyncQueue's `_observer_receiver` returns None, so
+        `_start_receiver` bails out before ever adding a task, regardless of
+        registration state.
+        """
+        from django_queue import queue_observer
+        from django_queue.observers import _discard_observers_for
+        from django_queue.queue_runtime import queue_runtime
+
+        queue_runtime.start_thread()
+        handler = django_queue.QueueRegistry(
+            {
+                "fallback-observed": {
+                    "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
+                    "LOCATION": redis_client,
+                }
+            }
+        )
+        # queue_observer resolves through the module-level django_queue.queues,
+        # not any local registry a test constructs.
+        monkeypatch.setattr(django_queue, "queues", handler)
+        subscription = None
+        try:
+            handler["fallback-observed"]
+            assert "fallback-observed" not in queue_runtime._tasks
+
+            subscription = queue_observer("fallback-observed", lambda entry: None)
+
+            assert _wait_for_task(queue_runtime, "fallback-observed") is not None
+        finally:
+            if subscription is not None:
+                subscription.unsubscribe()
+            queue_runtime.stop_one("fallback-observed")
+            _discard_observers_for("fallback-observed")
+
+    def test_decorator_activation_on_first_resolution_builds_the_queue_once(
+        self, redis_client, monkeypatch
+    ):
+        """A decorator-registered observer activating on an alias's first
+        resolution must not cause create_connection to build a second queue
+        instance for that alias.
+
+        `create_connection` calls `queue_runtime.start_one(alias, queue)`
+        before Django's `BaseConnectionHandler.__getitem__` has cached the
+        alias. If activation re-resolved the queue via `queues[alias]`
+        instead of using the instance already in hand, that lookup would
+        recurse into `create_connection` for the same alias while it was
+        still uncached, building a second instance and firing `queue_created`
+        a second time.
+        """
+        from django_queue import queue_observer
+        from django_queue.observers import _discard_observers_for
+        from django_queue.queue_runtime import queue_runtime
+        from django_queue.signals import queue_created
+
+        queue_runtime.start_thread()
+        handler = django_queue.QueueRegistry(
+            {
+                "first-resolution": {
+                    "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
+                    "LOCATION": redis_client,
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", handler)
+
+        created = []
+
+        def on_created(sender, name, instance, **kwargs):
+            created.append(instance)
+
+        queue_created.connect(on_created)
+
+        @queue_observer("first-resolution")
+        def observe(entry):
+            pass
+
+        try:
+            # First resolution of this alias, through the same path a
+            # production process's first real access would use -- not a
+            # pre-resolving fixture, and not a direct call to
+            # _activate_pending_for.
+            resolved = handler["first-resolution"]
+
+            assert len(created) == 1
+            assert created[0] is resolved
+        finally:
+            queue_created.disconnect(on_created)
+            observe._queue_observer_subscription.unsubscribe()
+            queue_runtime.stop_one("first-resolution")
+            _discard_observers_for("first-resolution")
+
+    def test_create_connection_does_not_double_schedule_a_started_alias(self):
+        from django_queue.queue_runtime import queue_runtime
+
+        queue_runtime.start_thread()
+        handler = django_queue.QueueRegistry(
+            {
+                "fallback-once": {
+                    "BACKEND": "django_queue.backends.MemoryEventQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        try:
+            handler["fallback-once"]
+            first_task = _wait_for_task(queue_runtime, "fallback-once")
+
+            # A second resolution of the same alias (e.g. a later
+            # request_started firing after create_connection already
+            # started it) must reuse the existing task, not schedule
+            # another one.
+            handler["fallback-once"]
+            second_task = queue_runtime._tasks.get("fallback-once")
+
+            assert first_task is not None
+            assert first_task is second_task
+        finally:
+            queue_runtime.stop_one("fallback-once")
 
     @pytest.mark.parametrize(
         ("settings", "message"),
@@ -257,7 +422,9 @@ class TestConfiguredQueueInitialization:
         with pytest.raises(InvalidQueueBackendError, match=message):
             django_queue.initialise_queues(handler)
 
-    def test_app_ready_initializes_the_configured_registry(self, monkeypatch):
+    def test_app_ready_initializes_the_configured_registry(
+        self, monkeypatch, no_runtime_startup
+    ):
         handler = django_queue.QueueRegistry(
             {
                 "default": {
@@ -329,7 +496,9 @@ class TestConfiguredQueueInitialization:
         assert handler["default"].entry_class is TrackingEntry
         assert TrackingEntry.instances == 0
 
-    def test_passes_the_configured_entry_class_to_a_redis_event_provider(self):
+    def test_passes_the_configured_entry_class_to_a_redis_event_provider(
+        self, no_runtime_startup
+    ):
         handler = django_queue.QueueRegistry(
             {
                 "events": {

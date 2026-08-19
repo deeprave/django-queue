@@ -22,7 +22,6 @@ class MemoryAsyncQueue(AsyncQueue):
             stack=self._stack,
             maxsize=maxsize,
         )
-        self._initialise_observers()
 
     async def apublish(self, entry: QueueEntry) -> None:
         publish(self, entry)

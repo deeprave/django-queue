@@ -26,7 +26,6 @@ try:
             )
             self._queue_name = self._provider.queue_name
             self._clock = self._provider.clock
-            self._initialise_observers()
 
         async def apublish(self, entry: QueueEntry) -> None:
             try:
