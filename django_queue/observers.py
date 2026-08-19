@@ -405,6 +405,21 @@ def _register_deferred(
 
     Activation happens later, when the process-wide runtime starts and calls
     `_activate_pending_for` for this alias.
+
+    KNOWN GAP: if `queue_name` was already resolved and cached before this
+    decorator ever ran (e.g. a view module Django imports lazily, on first
+    request, well after `ready()`'s eager startup walk already resolved
+    every alias), nothing revisits that alias again -- `create_connection`
+    only runs on a cache miss -- so this registration stays pending forever
+    and silently never receives snapshots. Not yet fixed: an earlier attempt
+    to activate inline here (checking whether `queue_name` was already
+    cached) made this function's "record only, no I/O, no activation"
+    contract conditional, which broke tests that rely on activation being
+    fully explicit and deferred (e.g. tests controlling activation timing
+    directly via `_activate_pending_for`). Needs a fix that doesn't change
+    `_register_deferred` itself -- likely a way for the runtime or registry
+    to detect and revisit stranded pending registrations without coupling
+    decoration to activation.
     """
     pending = _PendingRegistration(callback, entry_id)
     with _pending_by_alias_lock:
@@ -463,6 +478,7 @@ def _activate_pending_for(queue_name: str, configured_queue: AsyncQueue) -> None
             pending.activating = True
         to_activate.append(pending)
     for pending in to_activate:
+        subscription = None
         try:
             subscription = _register_now(
                 queue_name, pending.callback, pending.entry_id, configured_queue
@@ -470,10 +486,10 @@ def _activate_pending_for(queue_name: str, configured_queue: AsyncQueue) -> None
         finally:
             with _pending_by_alias_lock:
                 pending.activating = False
-        pending.subscription = subscription
-        with _pending_by_alias_lock:
-            cancelled = pending.cancelled
-        if cancelled:
+                if subscription is not None:
+                    pending.subscription = subscription
+                cancelled = pending.cancelled
+        if cancelled and subscription is not None:
             subscription.unsubscribe()
 
 
