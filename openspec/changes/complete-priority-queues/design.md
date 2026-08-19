@@ -104,6 +104,7 @@ behind two small protected hooks:
 async def _apush_entry(self, entry: QueueEntry) -> None:
     await self._provider.apush(entry.id)
 
+
 async def _apop_entry(self) -> QueueEntry:
     return await self._provider.apop()
 ```
