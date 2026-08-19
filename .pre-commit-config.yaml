@@ -28,6 +28,7 @@ repos:
     rev: v1.2.2
     hooks:
       - id: osvcheck
+        always_run: true
 
   - repo: local
     hooks:
