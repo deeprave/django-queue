@@ -56,17 +56,23 @@ class QueueRuntime:
         thread is already running rather than starting it themselves --
         there is exactly one code path that kickstarts the runtime, not
         several conditional ones.
+
+        Always waits for `_ready` before returning, including when another
+        caller already started the thread -- a caller that returned early
+        without waiting could see `_loop` still `None` and have its own
+        `start`/`start_one` call silently no-op.
         """
         with self._lock:
-            if self._closed or self._thread is not None:
+            if self._closed:
                 return
-            self._ready.clear()
-            self._thread = threading.Thread(
-                target=self._run_loop,
-                name="django-queues-events",
-                daemon=True,
-            )
-            self._thread.start()
+            if self._thread is None:
+                self._ready.clear()
+                self._thread = threading.Thread(
+                    target=self._run_loop,
+                    name="django-queues-runtime",
+                    daemon=True,
+                )
+                self._thread.start()
         self._ready.wait()
 
     def start(self, queues: QueueLookup) -> None:

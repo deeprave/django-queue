@@ -49,7 +49,7 @@ _DISPATCHER_STOP = _DispatcherStop()
 
 
 class _QueueObservers:
-    """Local observer state owned by one AsyncQueue instance."""
+    """Local observer state for one alias, shared across all its AsyncQueue instances."""
 
     def __init__(self, queue: AsyncQueue) -> None:
         self.queue = queue
@@ -88,7 +88,15 @@ class _QueueObservers:
             dispatcher = self.dispatcher
         if dispatcher is None:
             return
-        self.events.put(_DISPATCHER_STOP)
+        try:
+            self.events.put(_DISPATCHER_STOP, timeout=timeout)
+        except Full:
+            logger.warning(
+                "Queue lifecycle observer delivery queue is full; "
+                "could not enqueue dispatcher stop sentinel",
+                extra={"queue": self.queue.queue_name},
+            )
+            return
         dispatcher.join(timeout=timeout)
 
     def unregister(self, registration: _Registration) -> None:
@@ -255,8 +263,10 @@ def _alias_has_observer_registration(alias: str) -> bool:
     """
     with _observers_by_alias_lock:
         observers = _observers_by_alias.get(alias)
-        if observers is not None and observers.registrations:
-            return True
+    if observers is not None:
+        with observers.lock:
+            if observers.registrations:
+                return True
     with _pending_by_alias_lock:
         pending = _pending_by_alias.get(alias)
         return pending is not None and any(
@@ -429,6 +439,15 @@ def _activate_pending_for(queue_name: str, configured_queue: AsyncQueue) -> None
     unreachably once `pending.subscription` is overwritten. `_register_now`
     itself stays outside the lock: it does blocking I/O and reenters this
     function for the same alias.
+
+    Resets `activating` under the same lock in a `finally`, whether or not
+    `_register_now` raised -- otherwise a failed activation (e.g. the
+    backend's `list()` call fails) would leave `activating` permanently
+    `True`, and every later activation attempt for that alias would skip the
+    entry forever, silently dropping the registration. If the registration
+    was unsubscribed (`cancelled`) while `_register_now` was in flight, the
+    freshly created subscription is torn down immediately rather than left
+    live and unreachable from `DecoratorSubscription`.
     """
     with _pending_by_alias_lock:
         pending_entries = list(_pending_by_alias.get(queue_name, ()))
@@ -444,10 +463,18 @@ def _activate_pending_for(queue_name: str, configured_queue: AsyncQueue) -> None
             pending.activating = True
         to_activate.append(pending)
     for pending in to_activate:
-        pending.subscription = _register_now(
-            queue_name, pending.callback, pending.entry_id, configured_queue
-        )
-        pending.activating = False
+        try:
+            subscription = _register_now(
+                queue_name, pending.callback, pending.entry_id, configured_queue
+            )
+        finally:
+            with _pending_by_alias_lock:
+                pending.activating = False
+        pending.subscription = subscription
+        with _pending_by_alias_lock:
+            cancelled = pending.cancelled
+        if cancelled:
+            subscription.unsubscribe()
 
 
 def queue_observer(
