@@ -21,7 +21,7 @@ Choose the semantic queue type first; choose its memory or Redis backend second.
 | Choose | Use it for | Classes | Consumer model | Retention |
 | --- | --- | --- | --- | --- |
 | **Async queue** | Work that runs later and whose progress or outcome must be inspectable | `MemoryAsyncQueue`, `RedisAsyncQueue`, and their stack/priority variants | An async `HANDLER`, normally run by `manage.py runqueues` | A durable lifecycle: `queued`, `running`, then `succeeded`, `failed`, or `timeout` until pruning |
-| **Event queue** | Short-lived notifications delivered to one or more local listeners | `MemoryEventQueue`, `RedisEventQueue` | `@queue_listener`; Django starts the event runtime when the process first handles a request | Consumed, retried, or expired; no durable outcome record |
+| **Event queue** | Short-lived notifications delivered to one or more local listeners | `MemoryEventQueue`, `RedisEventQueue` | `@queue_listener`; Django starts the queue runtime once at process startup when at least one queue is configured | Consumed, retried, or expired; no durable outcome record |
 
 Async queues are the correct choice when a producer needs to determine a result, observe lifecycle progress, or retain completed work temporarily.
 
@@ -120,7 +120,7 @@ async def send_notification(entry):
 
 An eligible listener returning `True` consumes and removes the event. Returning `False` logs a rejection and also removes it; returning `None` lets the next listener see it. If every listener passes, or a filter/listener raises, the event is released for a short delayed retry. Events expire unconsumed after an entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default. They never acquire a task result or terminal entry record.
 
-Django starts one process-local event runtime when each process handles its first HTTP request and at least one event queue is configured. It owns one asyncio loop and one worker task per event queue. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
+Django starts one process-local queue runtime once, at process startup, when `QUEUES` is non-empty. It owns one background thread and one asyncio loop, shared by every configured event queue's worker task and every observed async queue's Redis receiver task. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
 
 ### Async queue handlers and extensions
 
@@ -278,13 +278,26 @@ subscription = queue_observer("default", update_dashboard)
 subscription.unsubscribe()  # stop future local delivery
 ```
 
+`queue_observer` also works as a decorator, useful for registering an observer at import time without triggering any backend I/O immediately:
+
+```python
+from django_queue import queue_observer
+
+
+@queue_observer("default")
+def update_dashboard(entry):
+    print(entry.id, entry.status)
+```
+
+A decorator-registered observer records its registration immediately but activates — fetching retained snapshots and beginning delivery — only once the process-wide queue runtime starts. `update_dashboard._queue_observer_subscription` is usable immediately, before or after activation, to unsubscribe.
+
 Memory queues notify only within the same Django process. Redis queues use best-effort Pub/Sub: a disconnected observer can miss transitions. Register a new observer when a new retained-state bootstrap is needed. Observer callback failures are logged and do not affect queue processing. Each observed queue's local delivery queue holds up to 128 snapshots; later snapshots are dropped when it is full, with one warning logged for that queue's process-local lifetime.
 
 When a worker receives an entry, it first publishes that entry's persisted `queued` snapshot, then publishes `running` and its terminal state after each state is stored. A running worker also scans retained entries once per second and publishes snapshots it has not previously seen, using the queue-owned UUIDv7 IDs as its cursor. This makes entries changed outside the worker's own dispatch path observable; when the entry is later dispatched, the cursor avoids republishing its queued snapshot. An entry awaiting a worker remains available in the retained snapshots delivered at subscription.
 
 Retention cleanup and explicit pruning remove a terminal record and publish one final immutable entry-shaped snapshot to its observers with `status == "terminated"`. This final snapshot is never persisted as a retained record, although `terminated` is the final lifecycle state after any completed state. Dashboards can use it to remove the entry from their projection. A later `find()` or `afind()` for the removed ID raises `QueueEntryNotFoundError`.
 
-The first Redis observer for a queue starts one daemon receiver for that process. It blocks in Pub/Sub while idle rather than polling, consumes no CPU while it waits, and does not keep Django alive during shutdown. The receiver is intentionally retained for the process lifetime so later subscriptions can reuse it. If it exits because Redis fails, it logs the failure and clears its registration; a later observer registration starts a fresh receiver.
+All configured async-queue workers and Redis observer receivers share one process-wide background thread and asyncio loop (`QueueRuntime`), started once when the process comes up. A Redis-backed alias's receiver task begins as soon as that alias has its first observer registration, and is shared by every later registration for the same alias — no matter how many threads or queue instances register against it. It blocks in Pub/Sub while idle rather than polling, consumes no CPU while it waits, and does not keep Django alive during shutdown. If it exits because Redis fails, it logs the failure and clears its receiver task; existing observer registrations stay in place but stop receiving live snapshots until a later registration for that alias starts a fresh receiver task.
 
 An entry normally transitions through `queued`, `running`, and one completed
 status: `succeeded`, `failed`, or `timeout`. Each completed status transitions to `terminated` when pruning removes its retained record. Failed entries expose only an exception type and safe message; the worker logs the traceback for diagnosis. A fourth completed status, `cancelled`, exists on the backend contract but no worker path produces it: a handler that finishes during shutdown is recorded by what it returned, and one that overruns is recorded as `timeout`. It is reserved for a deliberate per-entry cancellation the queue does not yet offer.

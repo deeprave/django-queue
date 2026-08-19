@@ -21,8 +21,13 @@ from django_queue.backends.redis.redisqueue import RedisAsyncQueue
 from django_queue.entries import QueueEntryStatus
 from django_queue.observers import (
     _EVENT_QUEUE_SIZE,
+    _activate_pending_for,
+    _alias_has_observer_registration,
+    _discard_observers_for,
+    _observers_by_alias,
     _observers_for,
     _order_snapshots,
+    _pending_by_alias,
     _Registration,
 )
 from django_queue.signals import entry_enqueued
@@ -47,6 +52,9 @@ def queue(request):
     ids=["fifo", "priority", "stack"],
 )
 def observer_queue(request, monkeypatch):
+    # _observers_for is alias-scoped and process-global, so a prior test's
+    # "requests" registration/dispatch state would otherwise leak in here.
+    _discard_observers_for("requests")
     handler = django_queue.QueueRegistry(
         {
             "requests": {
@@ -56,7 +64,8 @@ def observer_queue(request, monkeypatch):
         }
     )
     monkeypatch.setattr(django_queue, "queues", handler)
-    return handler["requests"]
+    yield handler["requests"]
+    _discard_observers_for("requests")
 
 
 async def _event_queue_noop(*args, **kwargs):
@@ -110,7 +119,9 @@ class TestMemoryAsyncQueueEntries:
         ):
             assert not hasattr(queue, name)
 
-    def test_observer_routes_live_snapshots_by_backend_queue_name(self, monkeypatch):
+    def test_observer_routes_live_snapshots_by_backend_queue_name(
+        self, monkeypatch, no_runtime_startup
+    ):
         handler = django_queue.QueueRegistry(
             {
                 "alias": {
@@ -125,13 +136,16 @@ class TestMemoryAsyncQueueEntries:
         delivered = threading.Event()
 
         subscription = queue_observer("alias", lambda entry: delivered.set())
-        asyncio.run(_process_one(observed_queue, "alias"))
+        try:
+            asyncio.run(_process_one(observed_queue, "alias"))
 
-        assert delivered.wait(1)
-        subscription.unsubscribe()
+            assert delivered.wait(1)
+        finally:
+            subscription.unsubscribe()
+            _discard_observers_for("alias")
 
     def test_observers_are_sequential_and_isolate_callback_failure(
-        self, observer_queue, caplog
+        self, observer_queue, caplog, no_runtime_startup
     ):
         delivered = threading.Event()
         calls = []
@@ -162,7 +176,9 @@ class TestMemoryAsyncQueueEntries:
         ]
         assert "Queue lifecycle observer failed" in caplog.text
 
-    def test_observer_receives_worker_lifecycle(self, observer_queue):
+    def test_observer_receives_worker_lifecycle(
+        self, observer_queue, no_runtime_startup
+    ):
         statuses = []
         completed = threading.Event()
 
@@ -183,7 +199,9 @@ class TestMemoryAsyncQueueEntries:
             QueueEntryStatus.SUCCEEDED,
         ]
 
-    def test_observer_dispatches_an_async_callback(self, observer_queue):
+    def test_observer_dispatches_an_async_callback(
+        self, observer_queue, no_runtime_startup
+    ):
         statuses = []
         completed = threading.Event()
 
@@ -204,7 +222,9 @@ class TestMemoryAsyncQueueEntries:
             QueueEntryStatus.SUCCEEDED,
         ]
 
-    def test_worker_publishes_a_first_seen_terminal_entry(self, observer_queue):
+    def test_worker_publishes_a_first_seen_terminal_entry(
+        self, observer_queue, no_runtime_startup
+    ):
         observed = threading.Event()
         statuses = []
 
@@ -282,7 +302,7 @@ class TestMemoryAsyncQueueEntries:
 
         assert asyncio.run(exercise()) == 1
 
-    def test_observer_rejects_event_queue(self, monkeypatch):
+    def test_observer_rejects_event_queue(self, monkeypatch, no_runtime_startup):
         handler = django_queue.QueueRegistry(
             {
                 "events": {
@@ -313,18 +333,222 @@ class TestMemoryAsyncQueueEntries:
             "Queue lifecycle observer delivery queue is full; dropping snapshots"
         ]
 
-    def test_observer_receiver_clears_its_queue_registration_on_exit(
-        self, observer_queue
+    def test_observers_share_state_across_instances_of_one_alias(self, queue):
+        """Two distinct queue objects for one alias must share observer state.
+
+        Simulates what two threads touching the same QUEUES alias get under
+        QueueRegistry's default thread-local connection_scope: two separate
+        AsyncQueue instances. Registration/dispatch state must be keyed by
+        alias, not by instance, or a receiver on one instance never sees a
+        registration made through the other.
+        """
+        _discard_observers_for("requests")
+        try:
+            backend = type(queue)
+            first = backend(queue_name="requests", clock=FixedClock())
+            second = backend(queue_name="requests", clock=FixedClock())
+
+            assert _observers_for(first) is _observers_for(second)
+        finally:
+            _discard_observers_for("requests")
+
+    def test_alias_has_no_registration_before_anyone_subscribes(self, queue):
+        _discard_observers_for("requests")
+        assert _alias_has_observer_registration("requests") is False
+
+    def test_alias_has_no_registration_created_as_a_side_effect(self, queue):
+        """Querying registration state must not itself create a _QueueObservers."""
+        _discard_observers_for("requests")
+        try:
+            _alias_has_observer_registration("requests")
+            assert "requests" not in _observers_by_alias
+        finally:
+            _discard_observers_for("requests")
+
+    def test_discard_observers_stops_a_running_dispatcher_thread(
+        self, observer_queue, no_runtime_startup
     ):
+        """`_discard_observers_for` must not just forget an alias's
+        `_QueueObservers` -- it must stop the dispatcher thread too, or
+        that thread runs forever with nothing left able to reach it.
+        """
+        subscription = queue_observer("requests", lambda entry: None)
         observers = _observers_for(observer_queue)
-        observers.receiver = threading.current_thread()
+        dispatcher = observers.dispatcher
 
-        async def receiver():
-            raise RuntimeError("receiver failed")
+        assert dispatcher is not None
+        assert dispatcher.is_alive()
 
-        observers._run_receiver(receiver)
+        subscription.unsubscribe()
+        _discard_observers_for("requests")
 
-        assert observers.receiver is None
+        dispatcher.join(timeout=1)
+        assert not dispatcher.is_alive()
+
+    def test_alias_has_a_registration_once_subscribed(
+        self, observer_queue, no_runtime_startup
+    ):
+        subscription = queue_observer("requests", lambda entry: None)
+        try:
+            assert _alias_has_observer_registration("requests") is True
+        finally:
+            subscription.unsubscribe()
+
+    def test_alias_has_no_registration_after_unsubscribing(
+        self, observer_queue, no_runtime_startup
+    ):
+        subscription = queue_observer("requests", lambda entry: None)
+        subscription.unsubscribe()
+        assert _alias_has_observer_registration("requests") is False
+
+    def test_decorator_form_records_without_querying_a_backend(self, monkeypatch):
+        """Import-time safety: decorating must not touch any queue backend."""
+        calls = []
+
+        class TrackedRegistry(django_queue.QueueRegistry):
+            def __getitem__(self, alias):
+                calls.append(alias)
+                return super().__getitem__(alias)
+
+        monkeypatch.setattr(
+            django_queue,
+            "queues",
+            TrackedRegistry({"decorated": {"BACKEND": "not-a-real-backend"}}),
+        )
+        try:
+
+            @queue_observer("decorated")
+            def observe(entry):
+                return None
+
+            assert calls == []
+            assert _alias_has_observer_registration("decorated") is True
+        finally:
+            _pending_by_alias.pop("decorated", None)
+
+    def test_decorator_form_returns_the_original_callable_unchanged(self):
+        _pending_by_alias.pop("decorated", None)
+        try:
+
+            def observe(entry):
+                return entry
+
+            decorated = queue_observer("decorated")(observe)
+
+            assert decorated is observe
+        finally:
+            _pending_by_alias.pop("decorated", None)
+
+    def test_decorator_form_activates_on_runtime_start(
+        self, observer_queue, no_runtime_startup
+    ):
+        delivered = threading.Event()
+
+        @queue_observer("requests")
+        def observe(entry):
+            delivered.set()
+
+        try:
+            _activate_pending_for("requests", observer_queue)
+            asyncio.run(_process_one(observer_queue))
+
+            assert delivered.wait(1)
+        finally:
+            observe._queue_observer_subscription.unsubscribe()
+
+    def test_decorator_form_dispatches_an_async_callback(
+        self, observer_queue, no_runtime_startup
+    ):
+        delivered = threading.Event()
+
+        @queue_observer("requests")
+        async def observe(entry):
+            delivered.set()
+
+        try:
+            _activate_pending_for("requests", observer_queue)
+            asyncio.run(_process_one(observer_queue))
+
+            assert delivered.wait(1)
+        finally:
+            observe._queue_observer_subscription.unsubscribe()
+
+    def test_concurrent_activation_registers_a_pending_observer_once(
+        self, observer_queue, no_runtime_startup, monkeypatch
+    ):
+        """A second activation attempt for an alias already mid-activation
+        must not re-register the same pending observer -- that would
+        double-register the callback and leak the loser's subscription.
+
+        Holds the first thread inside `_register_now` (after it has already
+        set `pending.activating`) via a barrier, then runs a second
+        activation attempt concurrently and confirms it no-ops. This proves
+        `activating`'s idempotency guard holds under real concurrent access;
+        it does not reproduce the narrower unlocked check-then-set window
+        the fix closes (that window is 2-3 adjacent bytecodes with no
+        hookable call between them, not reliably forceable from a test
+        without a test-only seam in production code).
+        """
+        entered_register_now = threading.Barrier(2, timeout=1)
+        release_register_now = threading.Event()
+        original_register_now = django_queue.observers._register_now
+
+        def blocking_register_now(
+            queue_name, callback, entry_id, configured_queue=None
+        ):
+            entered_register_now.wait()
+            assert release_register_now.wait(timeout=1)
+            return original_register_now(
+                queue_name, callback, entry_id, configured_queue
+            )
+
+        monkeypatch.setattr(
+            django_queue.observers, "_register_now", blocking_register_now
+        )
+
+        calls = []
+
+        @queue_observer("requests")
+        def observe(entry):
+            calls.append(entry)
+
+        results = []
+
+        def activate():
+            results.append(_activate_pending_for("requests", observer_queue))
+
+        try:
+            first = threading.Thread(target=activate)
+            first.start()
+            entered_register_now.wait(timeout=1)
+
+            # The winner is now blocked inside _register_now, holding no
+            # lock. A second activation attempt for the same alias must see
+            # `activating` already set and do nothing further.
+            second = threading.Thread(target=activate)
+            second.start()
+            second.join(timeout=1)
+            assert not second.is_alive()
+
+            release_register_now.set()
+            first.join(timeout=1)
+            assert not first.is_alive()
+
+            observers = _observers_for(observer_queue)
+            assert len(observers.registrations) == 1
+        finally:
+            observe._queue_observer_subscription.unsubscribe()
+
+    def test_unsubscribing_before_activation_prevents_it(self, observer_queue):
+        @queue_observer("requests")
+        def observe(entry):
+            raise AssertionError("must not be invoked")
+
+        observe._queue_observer_subscription.unsubscribe()
+        _activate_pending_for("requests", observer_queue)
+
+        assert _alias_has_observer_registration("requests") is False
+        asyncio.run(_process_one(observer_queue))
 
     def test_entry_queues_are_async_queue_variants(self, queue):
         assert isinstance(queue, AsyncQueue)
@@ -468,7 +692,7 @@ class TestMemoryAsyncQueueEntries:
             queue.find(uuid4())
 
     def test_prune_removes_a_terminal_entry_and_notifies_observers(
-        self, observer_queue
+        self, observer_queue, no_runtime_startup
     ):
         terminated = threading.Event()
         snapshots = []
@@ -552,7 +776,9 @@ class TestMemoryAsyncQueueEntries:
         with pytest.raises(QueueEntryNotFoundError):
             queue.find(entry_id)
 
-    def test_worker_prunes_expired_terminal_entries(self, observer_queue):
+    def test_worker_prunes_expired_terminal_entries(
+        self, observer_queue, no_runtime_startup
+    ):
         terminated = threading.Event()
         subscription = queue_observer(
             "requests",

@@ -3,9 +3,8 @@ from __future__ import annotations
 import builtins
 import logging
 import os
-import threading
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid7
@@ -251,8 +250,15 @@ class AsyncQueue(BaseQueue):
 
     def _observer_receiver(
         self, on_snapshot: Callable[[QueueEntry], None]
-    ) -> Callable[[], Awaitable[None]] | None:
-        """Return this backend's optional cross-process lifecycle receiver."""
+    ) -> Callable[[], Coroutine[Any, Any, None]] | None:
+        """Return this backend's optional cross-process lifecycle receiver.
+
+        The returned callable, if any, must take no arguments -- bind
+        `on_snapshot` into it before returning (e.g. via `functools.partial`)
+        rather than expecting the caller to pass it. `QueueRuntime` calls the
+        result as `receiver()` with no arguments to get the coroutine it
+        schedules as a task.
+        """
         return None
 
     def _configure_provider_entry_class(self) -> None:
@@ -398,11 +404,6 @@ class AsyncQueue(BaseQueue):
         ):
             await self._provider.adiscard(entry_id)
         return entry
-
-    def _initialise_observers(self) -> None:
-        """Initialise the process-local observer state owned by this queue."""
-        self._lifecycle_observer_lock = threading.RLock()
-        self._lifecycle_observers = None
 
 
 class EventQueue(BaseQueue):

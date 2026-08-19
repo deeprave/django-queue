@@ -13,6 +13,8 @@ from django_queue.backends.exceptions import (
 )
 from django_queue.backends.redis import RedisAsyncQueue, RedisAsyncQueueWorker
 from django_queue.entries import QueueEntryStatus
+from django_queue.observers import _discard_observers_for
+from django_queue.queue_runtime import queue_runtime
 from tests.helpers import CustomQueueEntry
 
 
@@ -171,6 +173,7 @@ def test_redis_worker_records_failure(redis_client):
 def test_pruning_publishes_a_terminated_snapshot_to_an_observer(
     redis_client, monkeypatch
 ):
+    queue_runtime.start_thread()
     handler = django_queue.QueueRegistry(
         {
             "requests": {
@@ -211,3 +214,5 @@ def test_pruning_publishes_a_terminated_snapshot_to_an_observer(
         assert snapshots[-1].payload == []
     finally:
         subscription.unsubscribe()
+        queue_runtime.stop_one("requests")
+        _discard_observers_for("requests")

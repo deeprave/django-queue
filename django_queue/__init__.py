@@ -53,7 +53,7 @@ class QueueRegistry(BaseConnectionHandler):
 
     def __init__(self, settings=None) -> None:
         super().__init__(settings)
-        self._process_queues: dict[str, object] = {}
+        self._process_queues: dict[str, AsyncQueue | EventQueue] = {}
         self._process_queues_lock = threading.RLock()
 
     def configure_settings(self, settings):
@@ -125,14 +125,24 @@ class QueueRegistry(BaseConnectionHandler):
             params["entry_class"] = entry_class
         if getattr(backend_cls, "connection_scope", "thread") == "process":
             with self._process_queues_lock:
-                if (queue := self._process_queues.get(alias)) is not None:
-                    return queue
-                queue = self._build_queue(
-                    alias, backend_cls, location, params, entry_class
-                )
-                self._process_queues[alias] = queue
-                return queue
-        return self._build_queue(alias, backend_cls, location, params, entry_class)
+                if (queue := self._process_queues.get(alias)) is None:
+                    queue = self._build_queue(
+                        alias, backend_cls, location, params, entry_class
+                    )
+                    self._process_queues[alias] = queue
+        else:
+            queue = self._build_queue(alias, backend_cls, location, params, entry_class)
+        # Schedules this alias's task on the runtime's shared thread, started
+        # once by DjangoQueueConfig.ready(). Uses start_one, not start(queues),
+        # because this method runs inside BaseConnectionHandler.__getitem__
+        # before it caches this alias -- start(self) would re-resolve `alias`
+        # through queues[alias] here and recurse back into this method for
+        # the same, still-uncached alias. start_one is idempotent per alias,
+        # so a later resolution of the same alias is a no-op.
+        from django_queue.queue_runtime import queue_runtime
+
+        queue_runtime.start_one(alias, queue)
+        return queue
 
     def _build_queue(
         self, alias: str, backend_cls, location: str, params: dict, entry_class
