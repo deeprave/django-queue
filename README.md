@@ -436,7 +436,7 @@ python manage.py runqueues
 
 `runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero on a configuration error, then waits to create each configured worker until that alias has pending entry work. It reports the configured handler count at startup and each alias as its worker begins. Once started, a worker runs until it receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers. Queue definitions without `HANDLER` remain available to application code but are not dispatched; when no handlers are configured, the command reports this and exits successfully. A worker failure is logged while the remaining queues stay watched; the command exits non-zero only when no configured queue is left.
 
-With all queues, the `get()`, `peek()`, and `poll()` methods return the object. Priority queue backends honour priority on both APIs: the raw value API via `add()`'s `(priority, value)` tuple, and identified entries via `enqueue()`'s `priority` keyword — see [Entry priority](#entry-priority).
+With all queues, the `get()`, `peek()`, and `poll()` methods return the object. Priority queue backends honour priority on both APIs: the raw value API via `add()`'s `(priority, value)` tuple, and identified entries via `enqueue()`/`aenqueue()`'s `priority` keyword — see [Entry priority](#entry-priority).
 
 ## API reference
 
