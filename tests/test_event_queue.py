@@ -127,6 +127,103 @@ def test_redis_event_queue_uses_event_semantics(redis_client):
     assert isinstance(RedisEventQueue(redis_client), EventQueue)
 
 
+def test_redis_provider_adelete_removes_every_store_atomically(redis_client):
+    """adelete previously issued six separate, non-atomic Redis calls (DEL,
+    LREM, three ZREMs, plus adiscard_priority's own script) -- a crash
+    partway through left a partial clear with no way to detect or resume it
+    (cursor.json CR-2, re-flagged on a second review pass after being
+    deferred once as dead code, task 8.4). Fixed with one atomic
+    _DELETE_SCRIPT. Proves every store adelete's docstring claims to clean
+    is actually empty afterwards, exercised through EventQueue.aclear() --
+    adelete's only real caller. Two entries cover disjoint preconditions
+    that don't naturally coexist on one entry: an unclaimed event (record,
+    pending list, unclaimed-deadlines ZSET all populated by astore_event/
+    apush) and a claimed one (claim key, claim-deadlines ZSET populated by
+    aclaim_unexpired, which removes the entry from unclaimed-deadlines as
+    part of claiming it)."""
+    queue = RedisEventQueue(redis_client, queue_name=f"events-{uuid4().hex}")
+    provider = queue._provider
+
+    async def scenario():
+        # aclaim_unexpired claims FIFO, so the first-pushed entry is the one
+        # that ends up claimed; the second stays unclaimed.
+        claimed_id = await queue.aenqueue("claimed")
+        unclaimed_id = await queue.aenqueue("unclaimed")
+        worker_id = uuid4()
+        claimed = await provider.aclaim_unexpired(worker_id, lease_seconds=60)
+        assert claimed.id == claimed_id
+
+        await queue.aclear()
+
+        client = provider._async_redis()
+        results = {}
+        for label, entry_id in (("unclaimed", unclaimed_id), ("claimed", claimed_id)):
+            entry_id_value = str(entry_id)
+            results[label] = {
+                "record": await client.get(provider._entry_key(entry_id)),
+                "pending": await client.lpos(
+                    provider._entry_pending_name, entry_id_value
+                ),
+                "delayed": await client.zscore(
+                    provider._entry_delayed_name, entry_id_value
+                ),
+                "claim_deadline": await client.zscore(
+                    provider._entry_claim_deadlines_name, entry_id_value
+                ),
+                "unclaimed_deadline": await client.zscore(
+                    provider._entry_unclaimed_deadlines_name, entry_id_value
+                ),
+                "claim": await client.get(provider._claim_key(entry_id)),
+            }
+        await queue.aclose()
+        return results
+
+    results = asyncio.run(scenario())
+    empty = {
+        "record": None,
+        "pending": None,
+        "delayed": None,
+        "claim_deadline": None,
+        "unclaimed_deadline": None,
+        "claim": None,
+    }
+    assert results["unclaimed"] == empty
+    assert results["claimed"] == empty
+
+
+def test_redis_event_aenqueue_routes_through_the_atomic_store_and_push_path(
+    redis_client,
+):
+    """Event-queue equivalent of the atomic-enqueue wiring tests in
+    test_redis_entries.py / test_redispqueuejson.py -- aenqueue()'s
+    astore_event()+apush() split was previously two (astore_event() is
+    itself two writes) separate round-trips. RedisEventQueue._astore_and_push
+    should route through astore_event_and_push() instead, never the plain,
+    non-atomic astore_event()/apush() individually."""
+    queue = RedisEventQueue(redis_client, queue_name=f"events-{uuid4().hex}")
+    provider = queue._provider
+
+    async def _fail(*args, **kwargs):
+        raise AssertionError(
+            "aenqueue() must not call the non-atomic astore_event/apush"
+        )
+
+    provider.astore_event = _fail
+    provider.apush = _fail
+
+    async def exercise():
+        event_id = await queue.aenqueue("event")
+        entry = await queue.afind(event_id)
+        dequeued = await queue.adequeue()
+        await queue.aclose()
+        return entry, dequeued, event_id
+
+    entry, dequeued, event_id = asyncio.run(exercise())
+
+    assert entry.id == event_id
+    assert dequeued.id == event_id
+
+
 def test_directly_dequeuing_a_redis_event_removes_its_record(redis_client):
     queue = RedisEventQueue(redis_client)
 

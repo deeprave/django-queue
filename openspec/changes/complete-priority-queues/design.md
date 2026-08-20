@@ -13,10 +13,14 @@ keyed directly on `self._queue_name`, no relation to `_entry_pending_name`)
 and a `queue.PriorityQueue`, both storing encoded *values*, not entry IDs, and
 with no link to `QueueEntry`/`astore`/`afind` at all.
 
-`AsyncQueueWorker` dispatches by calling `queue.adequeue()` directly
-(`django_queue/worker.py:338`) — there is no separate claim step in this path
-(that mechanism belongs to `EventQueue`, not `AsyncQueue`), so fixing
-`adequeue()`'s ordering is sufficient; no claim/lease code needs to change.
+Memory workers dispatch by calling `queue.adequeue()` directly
+(`django_queue/worker.py:338`), so the priority pending-store hooks are
+sufficient for that path. Redis workers instead claim entries before
+dispatching (`RedisAsyncQueueWorker._next`), recover expired claims, and
+release a claim that loses the running-state race. Consequently,
+`RedisAsyncPriorityQueue` must override queue-level `aclaim`, `arecover`, and
+`arelease` hooks as well as the pending-store hooks, routing each operation
+through the priority-aware Redis scripts rather than the plain FIFO list.
 
 ## Goals / Non-Goals
 
@@ -94,6 +98,37 @@ structure costs one extra Redis key / one extra in-memory queue and keeps the
 two paths genuinely independent, matching how `_entry_pending_name` already
 sits alongside the untouched plain-list raw store today.
 
+### Equal-priority entries dispatch in arrival order on both backends
+Not originally specified in this design; surfaced by a failing integration
+test during implementation (`test_preserves_arrival_order_within_one_priority`
+in `tests/test_redispqueuejson.py`).
+
+The memory backend's `queue.PriorityQueue` already gives this for free: Python
+heap ties resolve by comparing the second tuple element when priorities are
+equal, but `apush_priority`/`apop_priority` never let that happen — see
+below.
+
+Redis is the real gap. A ZSET's `zrevrange` breaks equal-score ties by
+member value (the encoded entry ID), not insertion order — and reversed
+lexicographic UUID order is closer to *reverse* arrival order than forward,
+since UUIDv7's leading bytes are a timestamp. Fixed by folding a Redis-wide
+monotonic sequence (`INCR` on `f"{self._queue_name}:entries:pending:priority:sequence"`)
+into the ZSET score's low bits: `score = priority * 2**32 - sequence`, so an
+earlier sequence number always yields a higher score at the same priority,
+and `zrevrange` returns arrival order among ties. `2**32` keeps `priority`
+safely inside a double's 53-bit exact-integer range up to roughly two
+million — far beyond any realistic use of an `int` priority field.
+
+The memory backend needed a symmetric fix for the same reason: `queue.
+PriorityQueue`'s tuple-comparison tie-break falls through to comparing
+`entry_id` (a `UUID`) directly once negated priorities are equal, which is
+unrelated to arrival order and would raise `TypeError` comparing a `UUID` to
+itself inconsistently besides. `apush_priority` counters this with a
+monotonic per-provider-instance counter (`self._pending_priority_sequence`,
+incremented under `self._lock`) as the tuple's second element:
+`(-priority, sequence, entry_id)` — `entry_id` is never reached during
+comparison because `sequence` alone already breaks every tie.
+
 ### Route priority subclasses through an overridable hook, not a rewritten `aenqueue`/`adequeue`
 Rather than duplicating `AsyncQueue.aenqueue()`/`adequeue()` in each priority
 subclass, factor the pending-store push/pop calls in the base implementation
@@ -101,16 +136,16 @@ behind two small protected hooks:
 
 ```python
 # base.py, inside AsyncQueue
-async def _apush_entry(self, entry: QueueEntry) -> None:
+async def _apush(self, entry: QueueEntry) -> None:
     await self._provider.apush(entry.id)
 
 
-async def _apop_entry(self) -> QueueEntry:
+async def _apop(self) -> QueueEntry:
     return await self._provider.apop()
 ```
 
-`aenqueue`/`adequeue` call `self._apush_entry(entry)` /
-`self._apop_entry()` instead of the provider methods directly.
+`aenqueue`/`adequeue` call `self._apush(entry)` /
+`self._apop()` instead of the provider methods directly.
 `RedisAsyncPriorityQueue`/`MemoryAsyncPriorityQueue` override just these two
 hooks to call `self._provider.apush_priority(entry.id, entry.priority)` /
 `self._provider.apop_priority()` (then `afind` to materialise the
@@ -132,7 +167,7 @@ path.
 `AsyncQueue.adequeue()` today is "best effort": `apop()` raises
 `QueueEmptyException` immediately when nothing is pending (`base.py:183`),
 and `AsyncQueueWorker` is what retries/waits (`worker.py:338` context). The
-priority hook's `_apop_entry()` follows the same contract — no
+priority hook's `_apop()` follows the same contract — no
 timeout/retries parameter, matching `apop`'s signature exactly. The raw
 path's blocking `apoll(timeout, retries)` (`redispqueue.py:20`) is untouched
 and irrelevant here, since it operates on the separate raw priority store.

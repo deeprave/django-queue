@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from dataclasses import replace
-from uuid import uuid4
+from uuid import uuid4, uuid7
 
 import pytest
 
@@ -18,7 +18,7 @@ from django_queue.backends.exceptions import (
     QueueEntryNotFoundError,
 )
 from django_queue.backends.redis.redisqueue import RedisAsyncQueue
-from django_queue.entries import QueueEntryStatus
+from django_queue.entries import QueueEntry, QueueEntryStatus
 from django_queue.observers import (
     _EVENT_QUEUE_SIZE,
     _activate_pending_for,
@@ -921,6 +921,173 @@ def test_memory_priority_queue_supports_identified_entries():
     entry = queue.dequeue()
 
     assert entry.id == entry_id
+
+
+def test_memory_priority_queue_has_pending_after_a_tracked_priority_enqueue():
+    """has_pending() previously only inspected the plain FIFO pending store,
+    so a priority-only queue never reported readiness -- runqueues polls
+    exactly this predicate before ever constructing a worker
+    (runqueues.py:104), so this bug meant a priority backend's worker was
+    never started at all."""
+    queue = MemoryAsyncPriorityQueue(queue_name="priority")
+
+    assert not queue.has_pending()
+    queue.enqueue("work", priority=5)
+    assert queue.has_pending()
+    queue.dequeue()
+    assert not queue.has_pending()
+
+
+def test_memory_priority_queue_dispatches_the_tracked_path_in_priority_order():
+    queue = MemoryAsyncPriorityQueue(queue_name="priority")
+
+    low_id = queue.enqueue("low", priority=1)
+    high_id = queue.enqueue("high", priority=10)
+
+    assert queue.dequeue().id == high_id
+    assert queue.dequeue().id == low_id
+
+
+def test_memory_priority_queue_preserves_arrival_order_within_one_priority():
+    queue = MemoryAsyncPriorityQueue(queue_name="priority")
+
+    first_id = queue.enqueue("first", priority=5)
+    second_id = queue.enqueue("second", priority=5)
+
+    assert queue.dequeue().id == first_id
+    assert queue.dequeue().id == second_id
+
+
+def test_memory_priority_queue_arrival_order_does_not_depend_on_uuid_ordering():
+    """Push order must win the tie-break even when entry IDs sort the
+    opposite way -- proves the provider's own monotonic sequence counter is
+    doing the work, not an incidental property of uuid.uuid7()'s current
+    (undocumented, implementation-specific) monotonicity."""
+    from django_queue.backends.memory.provider import QueueProviderMemory
+
+    provider = QueueProviderMemory()
+    first_id = uuid7()
+    second_id = uuid7()
+    assert first_id < second_id, "test setup requires an increasing UUID pair"
+    first_entry = QueueEntry.create(queue="priority", payload="first", priority=5)
+    second_entry = QueueEntry.create(queue="priority", payload="second", priority=5)
+    first_entry = replace(first_entry, id=second_id)
+    second_entry = replace(second_entry, id=first_id)
+
+    async def scenario():
+        await provider.astore(first_entry)
+        await provider.astore(second_entry)
+        await provider.apush_priority(first_entry.id, first_entry.priority)
+        await provider.apush_priority(second_entry.id, second_entry.priority)
+        return [await provider.apop_priority(), await provider.apop_priority()]
+
+    dispatched = asyncio.run(scenario())
+
+    assert [entry.id for entry in dispatched] == [first_entry.id, second_entry.id]
+
+
+def test_memory_provider_adelete_also_removes_a_still_pending_priority_entry():
+    """adelete's contract is "remove entry_id from every store it could be
+    sitting in" -- not reachable through the public AsyncQueue/EventQueue
+    API today (adelete is only ever called by EventQueue.aclear(), which
+    never touches the priority pending store), but a future caller must not
+    be able to silently orphan an entry that's still queued in a priority
+    backend's pending store."""
+    from django_queue.backends.memory.provider import QueueProviderMemory
+
+    provider = QueueProviderMemory()
+    entry = QueueEntry.create(queue="priority", payload="work", priority=5)
+
+    async def scenario():
+        await provider.astore(entry)
+        await provider.apush_priority(entry.id, entry.priority)
+        await provider.adelete(entry.id)
+        with pytest.raises(QueueEmptyException):
+            await provider.apop_priority()
+
+    asyncio.run(scenario())
+
+
+def test_memory_priority_queue_dequeued_entry_is_findable_and_runs_the_lifecycle():
+    queue = MemoryAsyncPriorityQueue(queue_name="priority")
+
+    entry_id = queue.enqueue("work", priority=3)
+    dequeued = queue.dequeue()
+
+    assert dequeued.id == entry_id
+    assert queue.find(entry_id).id == entry_id
+    running = queue._mark_running(entry_id)
+    assert running.status == QueueEntryStatus.RUNNING
+
+
+def test_memory_priority_queue_defaults_priority_to_zero(queue):
+    """`queue` is parametrized over fifo/priority/stack (see the fixture
+    above) -- covers a zero-priority entry still dispatching on the
+    priority variant, not getting stuck behind an always-nonzero
+    assumption, without a separate priority-only queue construction."""
+    entry_id = queue.enqueue("work")
+
+    entry = queue.find(entry_id)
+
+    assert entry.priority == 0
+    assert queue.dequeue().id == entry_id
+
+
+@pytest.mark.parametrize(
+    "queue_cls", [MemoryAsyncQueue, MemoryAsyncStack], ids=["fifo", "stack"]
+)
+def test_non_priority_backend_ignores_priority_and_dispatches_fifo(queue_cls):
+    queue = queue_cls(queue_name="non-priority")
+
+    first_id = queue.enqueue("first", priority=1)
+    second_id = queue.enqueue("second", priority=99)
+
+    first_dequeued = queue.dequeue().id
+    second_dequeued = queue.dequeue().id
+    if queue_cls is MemoryAsyncStack:
+        assert (first_dequeued, second_dequeued) == (second_id, first_id)
+    else:
+        assert (first_dequeued, second_dequeued) == (first_id, second_id)
+
+
+def test_memory_priority_queue_failure_removes_entry_from_priority_pending_store():
+    queue = MemoryAsyncPriorityQueue(queue_name="priority")
+
+    entry_id = queue.enqueue("work", priority=5)
+    queue._mark_failed(entry_id, ValueError("boom"))
+
+    with pytest.raises(QueueEmptyException):
+        queue.dequeue()
+
+
+def test_memory_priority_queue_discard_preserves_remaining_pop_order():
+    """Removing the highest-priority (heap-root) entry from the priority
+    pending store must not corrupt the heap ordering of the entries left
+    behind -- a plain filter of PriorityQueue's internal list without
+    re-heapifying can silently break future pop order without raising
+    anything. A small number of entries can survive a naive filter by luck
+    (the root's removal happens to leave a still-valid heap); this uses
+    enough entries, discarding the actual root, to force a real
+    parent-child violation if the fix regresses."""
+    queue = MemoryAsyncPriorityQueue(queue_name="priority")
+
+    ids = {
+        name: queue.enqueue(name, priority=priority)
+        for name, priority in [
+            ("a", 1),
+            ("b", 2),
+            ("c", 3),
+            ("d", 4),
+            ("e", 5),
+            ("f", 6),
+            ("g", 7),
+        ]
+    }
+
+    queue._mark_failed(ids["g"], ValueError("boom"))
+
+    dispatch_order = [queue.dequeue().id for _ in range(6)]
+    assert dispatch_order == [ids[name] for name in ["f", "e", "d", "c", "b", "a"]]
 
 
 def test_memory_stack_dequeues_newest_entry_first():

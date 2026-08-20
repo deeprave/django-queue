@@ -43,9 +43,7 @@ class RedisAsyncQueueWorker(AsyncQueueWorker):
             >= _RECOVERY_INTERVAL_SECONDS
         ):
             self._last_recovery_at[queue] = now
-            recovered, discarded = await self._providers[queue].arecover(
-                queue.recovery_batch_size
-            )
+            recovered, discarded = await queue.arecover(queue.recovery_batch_size)
             if recovered:
                 logger.warning(
                     "Recovered %s expired queue claim%s",
@@ -63,9 +61,7 @@ class RedisAsyncQueueWorker(AsyncQueueWorker):
         """Claim the next Redis entry and establish its delivery lease."""
         await self._recover_expired_claims(queue)
         provider = self._providers[queue]
-        entry = await provider.aclaim(
-            self._worker_id, queue.default_claim_lease_seconds
-        )
+        entry = await queue.aclaim(self._worker_id, queue.default_claim_lease_seconds)
         lease_seconds = self.budget_for(queue, entry) + self._cancellation_grace_period
         if not await provider.arenew(entry.id, self._worker_id, lease_seconds):
             logger.warning("Lost claim for queue entry %s before dispatch", entry.id)
@@ -122,7 +118,7 @@ class RedisAsyncQueueWorker(AsyncQueueWorker):
         )
         provider = self._providers[queue]
         if not await provider.amark_running(self._worker_id, running_entry):
-            if not await provider.arelease(
+            if not await queue.arelease(
                 entry.id, self._worker_id, _IMMEDIATE_RELEASE_DELAY_SECONDS
             ):
                 logger.warning("Lost claim for queue entry %s before release", entry.id)

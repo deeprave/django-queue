@@ -370,6 +370,18 @@ The shutdown grace period is separate from the budget: it bounds how long a canc
 
 A handler that raises `TimeoutError` of its own — from `asyncio.wait_for`, an HTTP client, or a database driver — is recorded `failed` with that error, not `timeout`. Only the budget actually running out means the handler never answered.
 
+### Entry priority
+
+`priority` is an `int` on `QueueEntry`, defaulting to `0`; a higher value dispatches first. It is only consulted by the priority-variant backends (`MemoryAsyncPriorityQueue`, `RedisAsyncPriorityQueue`, `RedisAsyncPriorityQueueJson`) on the identified-entry path — `enqueue`/`aenqueue` accept it as a keyword:
+
+```python
+entry_id = queue.enqueue({"request_id": 42}, priority=10)
+```
+
+Non-priority backends and event queues accept the keyword but ignore it, dispatching in their own existing order regardless. Equal-priority entries dispatch in arrival order on every priority backend.
+
+`QueueEntry` itself accepts any `int` — it does not know which backend an entry is destined for, and a non-priority backend must be free to ignore the value entirely, so it never rejects one on a priority backend's behalf. The Redis priority backend (`RedisAsyncPriorityQueue`, `RedisAsyncPriorityQueueJson`) packs `priority` and an arrival-order sequence number into one ZSET score, which is only exact up to a double's 53-bit integer range; that backend rejects a `priority` beyond ±100,000 with `ValueError` when the entry is actually pushed to its tracked pending store, keeping every score comfortably inside the exact range. The in-memory priority backend (`MemoryAsyncPriorityQueue`) has no such bound — Python integers are arbitrary precision.
+
 ### Worker observability
 
 Each `AsyncQueueWorker` has a generated UUIDv7 identity and exposes a frozen, process-local `snapshot`. It reports the current run state, registered queue aliases, active queue name and entry ID, total dispatches, and confirmed persisted terminal outcomes:
@@ -424,7 +436,7 @@ python manage.py runqueues
 
 `runqueues` validates every configured `HANDLER` and `WORKER`, exiting non-zero on a configuration error, then waits to create each configured worker until that alias has pending entry work. It reports the configured handler count at startup and each alias as its worker begins. Once started, a worker runs until it receives `SIGINT` or `SIGTERM`; shutdown cooperatively stops all active workers. Queue definitions without `HANDLER` remain available to application code but are not dispatched; when no handlers are configured, the command reports this and exits successfully. A worker failure is logged while the remaining queues stay watched; the command exits non-zero only when no configured queue is left.
 
-With all queues, the `get()`, `peek()`, and `poll()` methods return the object. With priority queues the priority is only used with and relevant to `add()`. Identified entries have no priority parameter, so their worker dispatch remains FIFO until priority-aware entry enqueueing is introduced.
+With all queues, the `get()`, `peek()`, and `poll()` methods return the object. Priority queue backends honour priority on both APIs: the raw value API via `add()`'s `(priority, value)` tuple, and identified entries via `enqueue()`'s `priority` keyword — see [Entry priority](#entry-priority).
 
 ## API reference
 

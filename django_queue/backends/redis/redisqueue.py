@@ -1,6 +1,7 @@
 try:
     import functools
     import logging
+    import uuid
 
     from django_queue.backends.base import AsyncQueue
     from django_queue.entries import QueueEntry
@@ -41,6 +42,58 @@ try:
 
         async def aclose(self) -> None:
             await self._provider.aclose()
+
+        async def _astore_and_push(self, entry: QueueEntry) -> None:
+            """Atomically store a freshly enqueued entry and add it to the
+            plain pending list -- see `QueueProviderRedis.astore_and_push`.
+
+            `RedisAsyncPriorityQueue` overrides this to store-and-push into
+            its own priority-ordered pending store instead.
+            """
+            await self._provider.astore_and_push(entry)
+
+        async def aclaim(
+            self, worker_id: uuid.UUID, lease_seconds: float | None = None
+        ) -> QueueEntry:
+            """Claim the next entry for `RedisAsyncQueueWorker`'s delivery lease.
+
+            `RedisAsyncPriorityQueue` overrides this (and `aclaim_unexpired`)
+            to claim from its own priority-ordered pending store instead --
+            `_CLAIM_SCRIPT`, which this default uses, only ever looks at the
+            plain pending list, so it can never see an entry a priority
+            backend pushed via `apush_priority`.
+            """
+            return await self._provider.aclaim(worker_id, lease_seconds)
+
+        async def aclaim_unexpired(
+            self, worker_id: uuid.UUID, lease_seconds: float | None = None
+        ) -> QueueEntry:
+            return await self._provider.aclaim_unexpired(worker_id, lease_seconds)
+
+        async def arecover(self, batch_size: int) -> tuple[int, int]:
+            """Recover expired claims for `RedisAsyncQueueWorker`.
+
+            `RedisAsyncPriorityQueue` overrides this to redeliver a
+            recovered entry via its priority score instead of the plain
+            pending list -- `_RECOVER_SCRIPT`, which this default uses,
+            always redelivers to the plain list.
+            """
+            return await self._provider.arecover(batch_size)
+
+        async def arelease(
+            self, entry_id: uuid.UUID, worker_id: uuid.UUID, delay_seconds: float
+        ) -> bool:
+            """Release a claim back for redelivery, e.g. after a lost race.
+
+            `RedisAsyncPriorityQueue` overrides this to redeliver via the
+            priority ZSET instead of the plain delayed set -- `_RELEASE_SCRIPT`,
+            which this default uses, always parks the released entry on the
+            plain delayed set, which `_CLAIM_SCRIPT_WITH_PRIORITY` promotes
+            onto the plain pending list and claims from before ever checking
+            the priority ZSET, letting a released entry jump ahead of a
+            genuinely higher-priority one still waiting.
+            """
+            return await self._provider.arelease(entry_id, worker_id, delay_seconds)
 
     class RedisAsyncStack(RedisAsyncQueue):
         def __init__(self, redis_url: str, options: dict | None = None, **kwargs):

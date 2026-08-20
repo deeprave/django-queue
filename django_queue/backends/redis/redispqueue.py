@@ -49,5 +49,33 @@ try:
             """
             await self._provider.aclear_priority()
 
+        async def _apush(self, entry) -> None:
+            await self._provider.apush_priority(entry.id, entry.priority)
+
+        async def _astore_and_push(self, entry) -> None:
+            await self._provider.astore_and_push_priority(entry)
+
+        async def _apop(self):
+            return await self._provider.apop_priority()
+
+        async def _adiscard(self, entry_id) -> None:
+            await self._provider.adiscard_priority(entry_id)
+
+        async def aclaim(self, worker_id, lease_seconds=None):
+            return await self._provider.aclaim_priority(worker_id, lease_seconds)
+
+        async def aclaim_unexpired(self, worker_id, lease_seconds=None):
+            return await self._provider.aclaim_priority_unexpired(
+                worker_id, lease_seconds
+            )
+
+        async def arecover(self, batch_size: int) -> tuple[int, int]:
+            return await self._provider.arecover_priority(batch_size)
+
+        async def arelease(self, entry_id, worker_id, delay_seconds):
+            return await self._provider.arelease_priority(
+                entry_id, worker_id, delay_seconds
+            )
+
 except ImportError:
     pass

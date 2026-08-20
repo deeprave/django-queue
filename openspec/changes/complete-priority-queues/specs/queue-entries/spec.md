@@ -84,23 +84,37 @@ duration, not an instant, and SHALL remain a plain count of seconds.
 - **THEN** the returned record and its durable representation carry priority
   `0`
 
-#### Scenario: Retrieve an entry enqueued with a priority
-- **WHEN** a caller retrieves an entry that was enqueued with an explicit
-  priority
+#### Scenario: Retrieve an AsyncQueue entry enqueued with a priority
+- **WHEN** a caller retrieves an `AsyncQueue` entry that was enqueued with an
+  explicit priority
 - **THEN** the returned record and its durable representation both carry that
   priority
 
 ## ADDED Requirements
 
-### Requirement: Enqueue an identified entry with a dispatch priority
-The entry-oriented enqueue operation SHALL accept an optional integer
-`priority`, defaulting to `0`, and persist it on the resulting entry alongside
-the standard lifecycle fields. Supplying a priority MUST NOT change any other
-enqueue behaviour: JSON validation, identifier generation, and the `queued`
-status and `queued_at` timestamp are unaffected.
+### Requirement: Enqueue an identified AsyncQueue entry with a dispatch priority
+`AsyncQueue`'s entry-oriented enqueue operation SHALL accept an optional
+integer `priority`, defaulting to `0`, and persist it on the resulting entry
+alongside the standard lifecycle fields. Supplying a priority MUST NOT change
+any other enqueue behaviour: JSON validation, identifier generation, and the
+`queued` status and `queued_at` timestamp are unaffected.
 
-#### Scenario: Enqueue with an explicit priority
-- **WHEN** a caller enqueues a JSON-serialisable payload with an explicit
-  priority value
+`EventQueue`'s entry-oriented enqueue operation SHALL accept the same
+optional `priority` keyword, for signature compatibility with the shared
+enqueue contract, but MUST ignore it: an event's persisted `priority` is
+always `0` regardless of the value supplied, and dispatch order is
+unaffected. Priority ordering is a task-dispatch concept; `EventQueue`
+delivers each event to every registered listener rather than to a single
+consumer, so a dispatch priority does not apply to it.
+
+#### Scenario: Enqueue an AsyncQueue entry with an explicit priority
+- **WHEN** a caller enqueues a JSON-serialisable payload on an `AsyncQueue`
+  with an explicit priority value
 - **THEN** the system persists an entry whose `priority` field equals that
   value, alongside the standard `queued` status and `queued_at` timestamp
+
+#### Scenario: EventQueue ignores a supplied priority
+- **WHEN** a caller enqueues a JSON-serialisable payload on an `EventQueue`
+  with an explicit priority value
+- **THEN** the system persists an entry whose `priority` field is `0`, and
+  delivery to registered listeners is unaffected
