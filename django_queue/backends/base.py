@@ -149,18 +149,36 @@ class BaseQueue(ABC):
         finally:
             await self.aclose()
 
-    def enqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+    def enqueue(
+        self,
+        payload,
+        *,
+        timeout_seconds: float | None = None,
+        priority: int = 0,
+    ) -> UUID:
         return self._run_synchronously(
-            self.aenqueue, payload, timeout_seconds=timeout_seconds
+            self.aenqueue,
+            payload,
+            timeout_seconds=timeout_seconds,
+            priority=priority,
         )
 
     @abstractmethod
-    async def aenqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+    async def aenqueue(
+        self,
+        payload,
+        *,
+        timeout_seconds: float | None = None,
+        priority: int = 0,
+    ) -> UUID:
         """Store a JSON-serialisable payload and return its queue-owned ID.
 
         An execution budget given here is carried on the entry and persisted
         with it, so it survives enqueue and reaches whichever worker dispatches
-        the entry.
+        the entry. `priority` is only consulted by priority-variant `AsyncQueue`
+        backends; ignored elsewhere (e.g. by `EventQueue` and non-priority
+        `AsyncQueue` backends, whose dispatch order -- FIFO, or LIFO for a
+        stack -- is unaffected by it).
         """
         raise NotImplementedError("aenqueue")
 
@@ -264,19 +282,61 @@ class AsyncQueue(BaseQueue):
     def _configure_provider_entry_class(self) -> None:
         self._provider.entry_class = self.entry_class
 
-    async def aenqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+    async def aenqueue(
+        self,
+        payload,
+        *,
+        timeout_seconds: float | None = None,
+        priority: int = 0,
+    ) -> UUID:
         validate_json_value(payload)
         entry = self.entry_class.create(
             queue=self.queue_name,
             payload=payload,
             queued_at=await self.clock.anow(),
             timeout_seconds=timeout_seconds,
+            priority=priority,
         )
         self._configure_provider_entry_class()
-        await self._provider.astore(entry)
-        await self._provider.apush(entry.id)
+        await self._astore_and_push(entry)
         send_entry_enqueued(self, entry=entry)
         return entry.id
+
+    async def _astore_and_push(self, entry: QueueEntry) -> None:
+        """Store a freshly enqueued entry and add it to the tracked pending
+        store.
+
+        Storing and pushing as one step (rather than two separate provider
+        calls) matters on a backend whose record durably outlives the
+        process, like Redis: without it, a crash between the two calls
+        leaves a stored entry with no pending-store index pointing to it — a
+        silent, permanent orphan, unlike the reverse case (an index entry
+        with no record), which `_apop`'s `afind()` already surfaces as a
+        named exception. The default here still does it as two calls, since
+        the in-memory backend has no durability to protect across a crash;
+        `RedisAsyncQueue`/`RedisAsyncPriorityQueue` override this with a
+        single atomic Lua script instead.
+        """
+        await self._provider.astore(entry)
+        await self._apush(entry)
+
+    async def _apush(self, entry: QueueEntry) -> None:
+        """Add a freshly enqueued entry to the tracked pending store.
+
+        Priority-variant backends override this (and `_apop`, `_adiscard`)
+        to route through their own priority-ordered pending store instead —
+        the only difference between a priority and non-priority `AsyncQueue`
+        backend's tracked dispatch path.
+        """
+        await self._provider.apush(entry.id)
+
+    async def _apop(self) -> QueueEntry:
+        """Remove and return the next entry from the tracked pending store."""
+        return await self._provider.apop()
+
+    async def _adiscard(self, entry_id: UUID) -> None:
+        """Remove one entry from the tracked pending store without dispatching it."""
+        await self._provider.adiscard(entry_id)
 
     async def afind(self, entry_id: UUID) -> QueueEntry:
         self._configure_provider_entry_class()
@@ -314,7 +374,7 @@ class AsyncQueue(BaseQueue):
 
     async def adequeue(self) -> QueueEntry:
         self._configure_provider_entry_class()
-        return await self._provider.apop()
+        return await self._apop()
 
     async def ahas_pending(self) -> bool:
         return await self._provider.ahas_pending()
@@ -402,7 +462,7 @@ class AsyncQueue(BaseQueue):
             previous_entry.status is QueueEntryStatus.QUEUED
             and status is QueueEntryStatus.FAILED
         ):
-            await self._provider.adiscard(entry_id)
+            await self._adiscard(entry_id)
         return entry
 
 
@@ -432,7 +492,15 @@ class EventQueue(BaseQueue):
         for entry in await self._provider.alist():
             await self._provider.adelete(entry.id)
 
-    async def aenqueue(self, payload, *, timeout_seconds: float | None = None) -> UUID:
+    async def aenqueue(
+        self,
+        payload,
+        *,
+        timeout_seconds: float | None = None,
+        priority: int = 0,
+    ) -> UUID:
+        """`priority` is accepted for signature compatibility with `AsyncQueue`
+        and ignored -- events always dispatch in arrival order."""
         validate_json_value(payload)
         lifetime = validate_budget(self._resolve_lifetime(timeout_seconds))
         entry = self.entry_class.create(
@@ -442,9 +510,19 @@ class EventQueue(BaseQueue):
             timeout_seconds=lifetime,
         )
         self._configure_provider_entry_class()
+        await self._astore_and_push(entry)
+        return entry.id
+
+    async def _astore_and_push(self, entry: QueueEntry) -> None:
+        """Store a freshly enqueued event and add it to the pending store.
+
+        Same rationale as `AsyncQueue._astore_and_push`: the in-memory
+        default does it as two (for events with a timeout, three) separate
+        calls, since there is no crash durability to protect; `RedisEventQueue`
+        overrides this with a single atomic Lua script.
+        """
         await self._provider.astore_event(entry)
         await self._provider.apush(entry.id)
-        return entry.id
 
     async def afind(self, entry_id: UUID) -> QueueEntry:
         self._configure_provider_entry_class()

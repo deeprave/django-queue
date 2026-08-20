@@ -115,6 +115,23 @@ def validate_budget(value: Any) -> float:
     return value
 
 
+def validate_priority(value: Any) -> int:
+    """Return *value* as a dispatch priority, or raise if it is not one.
+
+    A priority is a plain, unbounded integer at this level -- `QueueEntry`
+    itself does not know which backend an entry is destined for, and a
+    plain (non-priority) `AsyncQueue`/`EventQueue` MUST ignore the field
+    entirely, so it must never reject a value on those backends' behalf.
+    The Redis priority backend's tracked-path score encoding has its own
+    narrower magnitude bound, enforced where it actually applies -- see
+    `MAX_PRIORITY_MAGNITUDE` and `validate_redis_priority_magnitude` in
+    `django_queue.backends.redis.provider`.
+    """
+    if type(value) is not int:
+        raise TypeError(f"Queue entry priority must be an int, not {value!r}")
+    return value
+
+
 def validate_json_value(value: Any) -> None:
     """Raise ``TypeError`` unless *value* can be stored in the JSON wire format."""
     try:
@@ -139,6 +156,9 @@ class QueueEntry:
     # A duration, not the instant at which the entry expires: named for its
     # unit so it cannot be read as one of the lifecycle instants above.
     timeout_seconds: float | None = None
+    # Higher dispatches first; only consulted by priority-variant backends'
+    # tracked aenqueue/adequeue path. Ignored (FIFO) elsewhere.
+    priority: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, uuid.UUID):
@@ -155,6 +175,7 @@ class QueueEntry:
                 raise TypeError(f"Queue entry {name} must be a ClockTime or None")
         if self.timeout_seconds is not None:
             validate_budget(self.timeout_seconds)
+        validate_priority(self.priority)
         if self.id.version != 7:
             raise ValueError("Queue entry IDs must be UUIDv7 values")
         if not self.queue:
@@ -189,6 +210,7 @@ class QueueEntry:
         payload: Any,
         queued_at: ClockTime | None = None,
         timeout_seconds: float | None = None,
+        priority: int = 0,
     ) -> QueueEntry:
         """Create a newly queued entry with a queue-owned UUIDv7 and timestamp."""
         return cls(
@@ -202,6 +224,7 @@ class QueueEntry:
             result=None,
             error=None,
             timeout_seconds=timeout_seconds,
+            priority=priority,
         )
 
     def to_dict(self) -> dict[str, Any]:

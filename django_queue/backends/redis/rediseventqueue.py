@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from django_queue.entries import QueueEntry
+
 from ..base import EventQueue
 from .provider import QueueProviderRedis
 
@@ -30,3 +32,8 @@ class RedisEventQueue(EventQueue):
         )
         self._queue_name = self._provider.queue_name
         self._clock = self._provider.clock
+
+    async def _astore_and_push(self, entry: QueueEntry) -> None:
+        """Atomically store a freshly enqueued event and add it to the
+        pending list -- see `QueueProviderRedis.astore_event_and_push`."""
+        await self._provider.astore_event_and_push(entry)

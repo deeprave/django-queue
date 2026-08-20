@@ -65,6 +65,7 @@ class TestQueueEntry:
             "result": None,
             "error": None,
             "timeout_seconds": None,
+            "priority": 0,
         }
 
     def test_round_trips_a_terminal_entry(self):
@@ -238,6 +239,75 @@ class TestQueueEntry:
 
         assert stored["timeout_seconds"] == 2.5
         assert restored == entry
+
+    def test_defaults_priority_to_zero_when_enqueued_without_one(self):
+        entry = QueueEntry.create(queue="requests", payload=None)
+
+        assert entry.priority == 0
+        assert entry.to_dict()["priority"] == 0
+
+    def test_round_trips_a_nonzero_priority(self):
+        entry = QueueEntry.create(queue="requests", payload=None, priority=7)
+
+        stored = entry.to_dict()
+        restored = QueueEntry.from_dict(json.loads(json.dumps(stored)))
+
+        assert stored["priority"] == 7
+        assert restored.priority == 7
+        assert restored == entry
+
+    @pytest.mark.parametrize("priority", ["1", 2.5, True, object()])
+    def test_rejects_a_priority_that_is_not_an_int(self, priority):
+        with pytest.raises(TypeError, match="Queue entry priority"):
+            QueueEntry(
+                id=FIXED_UUID7,
+                queue="requests",
+                status=QueueEntryStatus.QUEUED,
+                queued_at=FIXED_CLOCK_TIME,
+                dispatched_at=None,
+                finished_at=None,
+                payload=None,
+                result=None,
+                error=None,
+                priority=priority,
+            )
+
+    @pytest.mark.parametrize("priority", [100_001, -100_001, 10**9, -(10**9)])
+    def test_accepts_a_priority_beyond_the_redis_encoding_range(self, priority):
+        """QueueEntry itself does not know which backend an entry is
+        destined for, and a plain (non-priority) AsyncQueue/EventQueue MUST
+        ignore `priority` entirely per spec -- so QueueEntry must never
+        reject a value on a Redis priority backend's behalf. The Redis
+        priority provider's own score-packing bound (see
+        `MAX_PRIORITY_MAGNITUDE`/`validate_redis_priority_magnitude` in
+        `django_queue.backends.redis.provider`) is exercised in
+        test_providers.py against the provider directly, not here."""
+        entry = QueueEntry(
+            id=FIXED_UUID7,
+            queue="requests",
+            status=QueueEntryStatus.QUEUED,
+            queued_at=FIXED_CLOCK_TIME,
+            dispatched_at=None,
+            finished_at=None,
+            payload=None,
+            result=None,
+            error=None,
+            priority=priority,
+        )
+
+        assert entry.priority == priority
+
+    def test_round_trips_a_priority_beyond_the_redis_encoding_range(self):
+        """A record carrying a priority beyond Redis's score-packing bound
+        must still restore correctly -- QueueEntry has no Redis-specific
+        opinion about it, and a plain backend's stored records may
+        legitimately carry such a value if it was only ever dispatched
+        through a non-priority queue."""
+        stored = QueueEntry.create(queue="requests", payload=None).to_dict()
+
+        restored = QueueEntry.from_dict(stored | {"priority": 100_001})
+
+        assert restored.priority == 100_001
 
     def test_rejects_a_restored_record_that_omits_a_required_field(self):
         """A missing key must not surface the dataclass constructor's own error."""

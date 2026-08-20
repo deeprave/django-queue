@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import queue
 from threading import RLock
 from uuid import UUID
@@ -38,6 +39,8 @@ class QueueProviderMemory:
         self._priority_items: queue.PriorityQueue = queue.PriorityQueue(maxsize=maxsize)
         self._entries = {} if entries is None else entries
         self._pending = pending or (queue.LifoQueue() if stack else queue.Queue())
+        self._pending_priority: queue.PriorityQueue = queue.PriorityQueue()
+        self._pending_priority_sequence = 0
         self._claims: dict[UUID, UUID] = {}
         self._claim_deadlines: dict[UUID, ClockTime] = {}
         self._available_at: dict[UUID, ClockTime] = {}
@@ -153,6 +156,17 @@ class QueueProviderMemory:
                 raise QueueEntryNotFoundError(entry_id) from exc
 
     async def adelete(self, entry_id: UUID) -> None:
+        # No caller relies on the priority-store cleanup below today --
+        # adelete is only reached via EventQueue.aclear(), which never
+        # touches the priority pending store -- but adelete's contract is
+        # "remove entry_id from every store it could be sitting in", and
+        # leaving it out would silently orphan an entry if a future caller
+        # ever reached here while the entry was still queued in a priority
+        # backend. Nested inside this same self._lock (an RLock, so
+        # re-entrant) rather than acquired after releasing it, so a
+        # concurrent apop_priority can never observe the entry still
+        # present in the priority store after its durable record is
+        # already gone.
         with self._lock:
             self._entries.pop(entry_id, None)
             self._claims.pop(entry_id, None)
@@ -161,6 +175,7 @@ class QueueProviderMemory:
             self._unclaimed_deadlines.pop(entry_id, None)
             self._unclaimed_remaining.pop(entry_id, None)
             self._remove_pending(entry_id)
+            await self.adiscard_priority(entry_id)
 
     async def aprune(self, entry_id: UUID) -> QueueEntry:
         entry = await self.afind(entry_id)
@@ -205,9 +220,41 @@ class QueueProviderMemory:
         with self._lock:
             self._remove_pending(entry_id)
 
+    async def apush_priority(self, entry_id: UUID, priority: int) -> None:
+        # A bare (-priority, entry_id) tuple ties equal priorities by
+        # comparing entry_id -- which happens to sort chronologically for
+        # uuid.uuid7()'s current CPython implementation, but that is an
+        # implementation detail this queue does not control or document as
+        # a promise, not an explicit ordering contract. A monotonic sequence
+        # as the tuple's middle element breaks every tie before entry_id is
+        # ever reached, giving arrival order deterministically. Matches the
+        # Redis backend's own sequence counter (apush_priority there).
+        with self._lock:
+            self._pending_priority_sequence += 1
+            self._pending_priority.put_nowait(
+                (-int(priority), self._pending_priority_sequence, entry_id)
+            )
+
+    async def apop_priority(self) -> QueueEntry:
+        with self._lock:
+            try:
+                _, _, entry_id = self._pending_priority.get_nowait()
+                return self._entries[entry_id]
+            except queue.Empty as exc:
+                raise QueueEmptyException from exc
+            except KeyError as exc:
+                raise QueueEntryNotFoundError(entry_id) from exc
+
+    async def adiscard_priority(self, entry_id: UUID) -> None:
+        with self._lock, self._pending_priority.mutex:
+            self._pending_priority.queue = [
+                item for item in self._pending_priority.queue if item[2] != entry_id
+            ]
+            heapq.heapify(self._pending_priority.queue)
+
     async def ahas_pending(self) -> bool:
         with self._lock:
-            return not self._pending.empty()
+            return not self._pending.empty() or not self._pending_priority.empty()
 
     async def aclaim(
         self, worker_id: UUID, lease_seconds: float | None = None

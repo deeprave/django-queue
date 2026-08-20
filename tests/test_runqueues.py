@@ -121,6 +121,58 @@ class TestRunQueuesCommand:
             "Started queue handler for second.",
         }
 
+    def test_starts_a_worker_for_a_priority_backend_with_only_priority_entries(
+        self, monkeypatch
+    ):
+        """ahas_pending() previously never inspected the priority pending
+        store, so _activate_worker's `while not await queue.ahas_pending()`
+        loop (runqueues.py:104) spun forever for a queue that only ever
+        received priority-tracked entries -- a worker was never
+        constructed. Exercises the real runqueues command path, not just
+        the provider method in isolation."""
+        asyncio.run(
+            self._starts_a_worker_for_a_priority_backend_with_only_priority_entries(
+                monkeypatch
+            )
+        )
+
+    async def _starts_a_worker_for_a_priority_backend_with_only_priority_entries(
+        self, monkeypatch
+    ):
+        queues = django_queue.QueueRegistry(
+            {
+                "priority": {
+                    "BACKEND": "django_queue.backends.MemoryAsyncPriorityQueue",
+                    "HANDLER": "tests.test_runqueues.handle_entry",
+                    "LOCATION": "",
+                    "WORKER": "tests.test_runqueues.TrackingWorker",
+                },
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", queues)
+        command = Command(stdout=StringIO())
+        shutdown = asyncio.Event()
+
+        activations = command._create_workers()
+        task = asyncio.create_task(
+            command._run_configured_workers(activations, shutdown)
+        )
+        await asyncio.sleep(0)
+        assert TrackingWorker.instances == 0
+
+        entry_id = await queues["priority"].aenqueue("work", priority=5)
+
+        async def entry_completed():
+            entry = await queues["priority"].afind(entry_id)
+            return entry.result is not None
+
+        await asyncio.wait_for(self._wait_until(entry_completed), timeout=1)
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=1)
+
+        assert (await queues["priority"].afind(entry_id)).result == {"handled": "work"}
+        assert TrackingWorker.instances == 1
+
     def test_reports_each_queue_alias_as_its_worker_starts(self, monkeypatch):
         asyncio.run(self._reports_each_queue_alias_as_its_worker_starts(monkeypatch))
 

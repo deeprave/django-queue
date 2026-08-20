@@ -1,6 +1,6 @@
 [project]
 name = "django-queues"
-version = "1.0.2"
+version = "1.0.3"
 description = "Implementation of message queues for Django"
 readme = "README.md"
 license = { file = "LICENSE.md" }

@@ -114,6 +114,51 @@ def test_raw_values_and_retained_entries_are_independent(redis_entry_queue):
     assert redis_entry_queue.find(entry_id).payload == {"request_id": 42}
 
 
+def test_adelete_does_not_create_a_priority_sequence_key_for_a_plain_queue(
+    redis_entry_queue,
+):
+    """adelete unconditionally calls adiscard_priority as one of its cleanup
+    steps (RedisAsyncQueue never populates the priority store, but adelete's
+    contract is to clean up every store an entry could be sitting in). That
+    call must not create a stray, otherwise-unused sequence key on a queue
+    type that never uses the priority path at all."""
+
+    async def scenario():
+        try:
+            entry_id = await redis_entry_queue.aenqueue("work")
+            await redis_entry_queue._provider.adelete(entry_id)
+            client = redis_entry_queue._provider._async_redis()
+            return await client.get(
+                redis_entry_queue._provider._entry_pending_priority_sequence_name
+            )
+        finally:
+            await redis_entry_queue.aclose()
+
+    assert asyncio.run(scenario()) is None
+
+
+def test_aenqueue_routes_through_the_atomic_store_and_push_path(redis_entry_queue):
+    """aenqueue()'s astore()+apush() split was previously two separate
+    round-trips -- a crash between them left a durably stored entry with no
+    pending-store index pointing to it. RedisAsyncQueue._astore_and_push
+    should route through the atomic astore_and_push() script instead,
+    never calling the plain, non-atomic astore()/apush() individually.
+    Monkeypatching astore()/apush() to raise proves aenqueue() never calls
+    them for a Redis-backed queue."""
+    provider = redis_entry_queue._provider
+
+    async def _fail(*args, **kwargs):
+        raise AssertionError("aenqueue() must not call the non-atomic astore/apush")
+
+    provider.astore = _fail
+    provider.apush = _fail
+
+    entry_id = redis_entry_queue.enqueue("work")
+
+    assert redis_entry_queue.find(entry_id).id == entry_id
+    assert redis_entry_queue.dequeue().id == entry_id
+
+
 def test_redis_queue_restores_the_configured_entry_class(redis_client):
     queue = RedisAsyncQueue(
         redis_client,

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Priority Queue Demo</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+      main { max-width: none; width: 100%; }
+      .dashboard-header {
+        align-items: center;
+        background: var(--pico-primary-background);
+        color: var(--pico-primary-inverse);
+        gap: 1rem;
+        padding: 1rem var(--pico-spacing);
+      }
+      .dashboard-header h1 { margin-bottom: 0; }
+      .dashboard-header form { margin-bottom: 0; }
+      .dashboard-header button {
+        background: var(--pico-primary-inverse);
+        border-color: var(--pico-primary-inverse);
+        color: var(--pico-primary);
+      }
+      .table-wrap { width: 100%; }
+      table { width: 100%; }
+      .entry-id {
+        display: block;
+        max-width: 11rem;
+        overflow: hidden;
+        font-family: var(--pico-font-family-monospace);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .timestamp { white-space: nowrap; }
+      .message {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .state {
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+      .state-queued { color: var(--pico-primary); }
+      .state-running { color: #b8860b; }
+      .state-succeeded { color: var(--pico-ins-color); }
+      .state-failed, .state-timeout { color: var(--pico-del-color); }
+      .priority-badge {
+        border-radius: 999px;
+        display: inline-block;
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 0.1rem 0.6rem;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      .priority-low {
+        background: var(--pico-muted-border-color);
+        color: var(--pico-muted-color);
+      }
+      .priority-normal {
+        background: var(--pico-primary-background);
+        color: var(--pico-primary-inverse);
+      }
+      .priority-high {
+        background: #b8860b;
+        color: #1a1a1a;
+      }
+      .priority-urgent {
+        background: var(--pico-del-color);
+        color: #fff;
+      }
+      tr[data-priority-label="urgent"] { outline: 2px solid var(--pico-del-color); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="dashboard-header">
+        <h1>Priority Queue Demo</h1>
+        <form action="{% url 'refresh' %}" method="post">
+          {% csrf_token %}
+          <button type="submit">Refresh</button>
+        </form>
+      </header>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Priority</th>
+              <th>State</th>
+              <th>Message</th>
+              <th>Queued</th>
+              <th>Started</th>
+              <th>Finished</th>
+            </tr>
+          </thead>
+          <tbody id="entries"></tbody>
+        </table>
+      </div>
+    </main>
+    <script>
+      const entries = document.querySelector("#entries");
+
+      function timestamp(value) {
+        return value === null
+          ? "—"
+          : new Date(value * 1000).toISOString().slice(0, 19) + "Z";
+      }
+
+      function render(entry) {
+        let row = entries.querySelector(`[data-entry-id="${entry.id}"]`);
+        if (!row) {
+          row = document.createElement("tr");
+          row.dataset.entryId = entry.id;
+          for (let index = 0; index < 7; index += 1) {
+            row.append(document.createElement("td"));
+          }
+          row.cells[4].classList.add("timestamp");
+          row.cells[5].classList.add("timestamp");
+          row.cells[6].classList.add("timestamp");
+          row.cells[3].classList.add("message");
+          row.cells[0].append(document.createElement("span"));
+          row.cells[1].append(document.createElement("span"));
+          row.cells[2].append(document.createElement("span"));
+        }
+
+        row.dataset.priorityLabel = entry.priority_label;
+
+        const id = row.cells[0].firstElementChild;
+        id.className = "entry-id";
+        id.textContent = entry.id;
+        const priority = row.cells[1].firstElementChild;
+        priority.className = `priority-badge priority-${entry.priority_label}`;
+        priority.textContent = `${entry.priority_label} (${entry.priority})`;
+        const state = row.cells[2].firstElementChild;
+        state.className = `state state-${entry.state}`;
+        state.textContent = entry.state;
+        row.cells[3].textContent = entry.message;
+        row.cells[4].textContent = timestamp(entry.queued_at);
+        row.cells[5].textContent = timestamp(entry.started_at);
+        row.cells[6].textContent = timestamp(entry.finished_at);
+
+        // The server always sends `snapshot` sorted highest-priority first;
+        // appending an already-attached row moves it rather than
+        // duplicating it, so processing rows in that order keeps the table
+        // visibly reordered on every update, not just newly created rows.
+        entries.append(row);
+      }
+
+      const stream = new EventSource("{% url 'events' %}");
+      stream.onmessage = ({ data }) => {
+        const snapshot = JSON.parse(data).entries;
+        const entryIds = new Set(snapshot.map((entry) => entry.id));
+        entries.querySelectorAll("tr").forEach((row) => {
+          if (!entryIds.has(row.dataset.entryId)) {
+            row.remove();
+          }
+        });
+        snapshot.forEach(render);
+      };
+      stream.onerror = (error) => console.error(error);
+    </script>
+  </body>
+</html>

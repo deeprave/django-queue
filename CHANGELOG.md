@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.3 - 2026-08-20
+
+- Added priority-aware dispatch for tracked entries on memory and Redis priority queues. `enqueue(..., priority=0)` now records an entry priority; higher priorities dispatch first and equal priorities retain arrival order.
+
 ## v1.0.2 — 2026-08-19
 
 - `queue_observer` now supports decorator syntax (`@queue_observer("alias")`) alongside the existing direct call, deferring backend activation until the shared runtime starts.
