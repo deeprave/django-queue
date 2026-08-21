@@ -380,6 +380,26 @@ entry_id = queue.enqueue({"request_id": 42}, priority=10)
 
 Non-priority backends and event queues accept the keyword but ignore it, dispatching in their own existing order regardless. Equal-priority entries dispatch in arrival order on every priority backend.
 
+### Scheduled availability
+
+Identified async queues also accept `available_at`, a `ClockTime` absolute
+instant at which work becomes eligible for ordinary dispatch:
+
+```python
+from django_queue.clock import ClockTime
+
+entry_id = queue.enqueue(
+    {"request_id": 42}, available_at=ClockTime.from_datetime(run_after)
+)
+```
+
+An omitted or already-passed instant dispatches normally. A future instant is
+retained as queued work but does not reserve a worker; the Redis backend uses
+its server clock to promote due work, while the memory backend uses its queue
+clock. This is designed for upstream task APIs to translate their absolute
+schedule instant directly. Event queues accept `available_at` for API
+compatibility and ignore it.
+
 `QueueEntry` itself accepts any `int` — it does not know which backend an entry is destined for, and a non-priority backend must be free to ignore the value entirely, so it never rejects one on a priority backend's behalf. The Redis priority backend (`RedisAsyncPriorityQueue`, `RedisAsyncPriorityQueueJson`) packs `priority` and an arrival-order sequence number into one ZSET score, which is only exact up to a double's 53-bit integer range; that backend rejects a `priority` beyond ±100,000 with `ValueError` when the entry is actually pushed to its tracked pending store, keeping every score comfortably inside the exact range. The in-memory priority backend (`MemoryAsyncPriorityQueue`) has no such bound — Python integers are arbitrary precision.
 
 ### Worker observability

@@ -52,14 +52,24 @@ try:
         async def _apush(self, entry) -> None:
             await self._provider.apush_priority(entry.id, entry.priority)
 
-        async def _astore_and_push(self, entry) -> None:
-            await self._provider.astore_and_push_priority(entry)
+        async def _astore_and_push(self, entry, *, available_at=None) -> None:
+            if available_at is None:
+                await self._provider.astore_and_push_priority(entry)
+            else:
+                await self._provider.astore_available(
+                    entry, available_at, priority=True
+                )
+
+        async def _apromote_scheduled(self) -> None:
+            await self._provider.apromote_scheduled_priority()
 
         async def _apop(self):
+            await self._apromote_scheduled()
             return await self._provider.apop_priority()
 
         async def _adiscard(self, entry_id) -> None:
             await self._provider.adiscard_priority(entry_id)
+            await self._provider.adiscard_scheduled(entry_id)
 
         async def aclaim(self, worker_id, lease_seconds=None):
             return await self._provider.aclaim_priority(worker_id, lease_seconds)

@@ -33,14 +33,15 @@ claim, worker, execution slot, timer, or coroutine while waiting.
 - **WHEN** a worker checks the queue at or after an entry's availability instant
 - **THEN** the entry becomes eligible through the normal claim and lifecycle path
 
-### Requirement: Preserve priority when scheduled work becomes eligible
-A priority-enabled AsyncQueue backend SHALL insert a due scheduled entry into
-the same priority order used for immediately enqueued entries. Equal priorities
-SHALL retain the backend's ordinary arrival-order guarantee.
+### Requirement: Order scheduled work by availability then priority
+A priority-enabled AsyncQueue backend SHALL select scheduled work by ascending
+availability instant. When multiple scheduled entries share the same available
+instant, it SHALL select higher priority first; remaining ties use the
+backend's ordinary arrival order.
 
-#### Scenario: Promote a due high-priority entry
-- **WHEN** a delayed high-priority entry becomes due while lower-priority work is pending
-- **THEN** the high-priority entry is selected according to the normal priority ordering
+#### Scenario: Select priority within one availability group
+- **WHEN** delayed entries share an availability instant and have different priorities
+- **THEN** the higher-priority entry is selected first
 
 ### Requirement: Remove scheduled membership with an entry
 Removing a scheduled entry, or transitioning it from `queued` to a terminal

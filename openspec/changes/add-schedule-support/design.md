@@ -42,25 +42,33 @@ upstream absolute run-after value.
 ### Maintain a dedicated scheduled ZSET
 
 Redis stores future entry IDs in `{queue}:entries:scheduled`, scored by UTC
-epoch microseconds. Immediate entries use the existing pending list or priority
-ZSET. The scheduled ZSET does not reuse `{queue}:entries:delayed`: that index
-means a previously claimed entry has been released and carries recovery/retry
-semantics, whereas scheduled membership means the entry has never been
-dispatchable.
+epoch microseconds. Its logical selection order is `available_at`, then higher
+priority, then arrival: a claim releases only the first due availability group,
+selecting its highest-priority entry. Immediate entries use the existing pending
+list or priority ZSET. The scheduled ZSET does not reuse
+`{queue}:entries:delayed`: that index means a previously claimed entry has been
+released and carries recovery/retry semantics, whereas scheduled membership
+means the entry has never been dispatchable.
 
 Alternative: one key per entry. Rejected because finding due work would require
 key scans and cannot preserve atomic batch promotion.
 
-### Use Lua for atomic enqueue, promotion, and cleanup
+### Use atomic Lua scripts for enqueue, promotion, and cleanup
 
-The delayed enqueue script writes the entry record and either scheduled or
-ordinary pending membership in one transaction. The claim scripts read Redis
-`TIME`, promote all due scheduled IDs, resolve each entry's priority where
-needed, then execute their existing claim selection. Delete and queued-terminal
-cleanup scripts remove scheduled membership alongside all existing indexes.
+The Redis provider's Lua scripts own the scheduling mutations for enqueue,
+promotion, claim, and cleanup. The delayed-enqueue script writes the entry
+record and either scheduled or ordinary pending membership in one transaction.
+Its claim and direct-dequeue scripts read Redis `TIME`, atomically release at
+most one due scheduled entry per attempt, and use priority only to select within
+that entry's availability group. Delete and queued-terminal cleanup scripts
+remove scheduled membership alongside all existing indexes.
 
 This eliminates the race where a worker claims an entry after it is stored but
 before a separate scheduling write parks it.
+
+Reusable Redis Functions are deferred to the separate `refactor-lua-functions`
+change. That refactor will consolidate the shared Lua behaviour without
+changing this scheduling contract.
 
 Alternative: have a worker timer promote entries. Rejected because crashes,
 multiple workers, and polling races would make promotion non-durable and
@@ -82,8 +90,8 @@ ignore `available_at`, matching their separate delivery model.
 
 - [A worker polls future-only work repeatedly] → Keep normal idle polling; no
   entry is claimed or retained by the worker before it is due.
-- [Promotion of many overdue entries extends claim latency] → Promote bounded
-  batches per claim and continue promotion on later claim cycles.
+- [Promotion of many overdue entries extends claim latency] → Release one due
+  scheduled entry per claim and continue on later claim cycles.
 - [A scheduled ID survives record deletion] → Use the same atomic cleanup path
   for explicit deletion and queued-to-terminal transitions.
 - [Priority score rules differ from scheduling scores] → Keep priority storage

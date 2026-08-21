@@ -42,10 +42,15 @@ class MemoryAsyncPriorityQueue(AsyncQueue):
         await self._provider.apush_priority(entry.id, entry.priority)
 
     async def _apop(self):
+        await self._apromote_scheduled()
         return await self._provider.apop_priority()
+
+    async def _apromote_scheduled(self) -> None:
+        await self._provider.apromote_scheduled_priority()
 
     async def _adiscard(self, entry_id) -> None:
         await self._provider.adiscard_priority(entry_id)
+        await self._provider.adiscard_scheduled(entry_id)
 
     aenqueue = MemoryAsyncQueue.aenqueue
     afind = MemoryAsyncQueue.afind

@@ -11,6 +11,7 @@ from django_queue.backends import (
     MemoryAsyncPriorityQueue,
     MemoryAsyncQueue,
     MemoryAsyncStack,
+    MemoryEventQueue,
 )
 from django_queue.backends.base import AsyncQueue, BaseQueue, EventQueue
 from django_queue.backends.exceptions import (
@@ -678,7 +679,7 @@ class TestMemoryAsyncQueueEntries:
         assert failed.error == {"type": "ValueError", "message": "invalid request"}
 
     def test_records_a_pre_dispatch_failure_without_a_dispatch_timestamp(self, queue):
-        entry_id = queue.enqueue("work")
+        entry_id = queue.enqueue("work", available_at=FIXED_CLOCK_TIME + 10)
 
         failed = queue._mark_failed(entry_id, ValueError("transport unavailable"))
 
@@ -686,6 +687,9 @@ class TestMemoryAsyncQueueEntries:
         assert failed.dispatched_at is None
         assert failed.finished_at == FIXED_CLOCK_TIME
         assert not queue.has_pending()
+        queue.clock.timestamp = FIXED_CLOCK_TIME + 10
+        with pytest.raises(QueueEmptyException):
+            queue.dequeue()
 
     def test_find_reports_a_missing_retained_record(self, queue):
         with pytest.raises(QueueEntryNotFoundError):
@@ -921,6 +925,98 @@ def test_memory_priority_queue_supports_identified_entries():
     entry = queue.dequeue()
 
     assert entry.id == entry_id
+
+
+def test_memory_async_queue_holds_a_future_available_entry_until_due():
+    """A future `available_at` is durable pending work, not dequeueable work."""
+    clock = FixedClock()
+    queue = MemoryAsyncQueue(queue_name="scheduled", clock=clock)
+
+    entry_id = queue.enqueue("later", available_at=FIXED_CLOCK_TIME + 10)
+
+    assert queue.has_pending()
+    with pytest.raises(QueueEmptyException):
+        queue.dequeue()
+
+    clock.timestamp = FIXED_CLOCK_TIME + 10
+    assert queue.dequeue().id == entry_id
+
+
+def test_memory_async_queue_releases_one_earliest_due_entry_per_round():
+    clock = FixedClock()
+    queue = MemoryAsyncQueue(queue_name="scheduled", clock=clock)
+
+    later_id = queue.enqueue("later", available_at=FIXED_CLOCK_TIME + 20)
+    earlier_id = queue.enqueue("earlier", available_at=FIXED_CLOCK_TIME + 10)
+    clock.timestamp = FIXED_CLOCK_TIME + 20
+
+    assert queue.dequeue().id == earlier_id
+    assert queue.dequeue().id == later_id
+
+
+def test_memory_async_queue_rejects_a_non_clocktime_available_at(queue):
+    with pytest.raises(TypeError, match="available_at must be a ClockTime or None"):
+        queue.enqueue("work", available_at=10)
+
+
+@pytest.mark.parametrize("available_at", [FIXED_CLOCK_TIME, FIXED_CLOCK_TIME - 1])
+def test_memory_async_queue_dispatches_an_already_due_available_entry(available_at):
+    queue = MemoryAsyncQueue(queue_name="scheduled-now", clock=FixedClock())
+
+    entry_id = queue.enqueue("now", available_at=available_at)
+
+    assert queue.dequeue().id == entry_id
+
+
+def test_memory_event_queue_ignores_available_at():
+    queue = MemoryEventQueue(queue_name="events", clock=FixedClock())
+
+    entry_id = queue.enqueue("event", available_at=FIXED_CLOCK_TIME + 60)
+
+    assert queue.dequeue().id == entry_id
+
+
+def test_memory_priority_queue_promotes_due_scheduled_work_by_priority():
+    clock = FixedClock()
+    queue = MemoryAsyncPriorityQueue(queue_name="scheduled-priority", clock=clock)
+
+    future_high_id = queue.enqueue(
+        "later", priority=10, available_at=FIXED_CLOCK_TIME + 10
+    )
+    immediate_low_id = queue.enqueue("now", priority=1)
+
+    assert queue.dequeue().id == immediate_low_id
+
+    clock.timestamp = FIXED_CLOCK_TIME + 10
+    assert queue.dequeue().id == future_high_id
+
+
+def test_memory_priority_queue_releases_one_earliest_due_entry_per_round():
+    clock = FixedClock()
+    queue = MemoryAsyncPriorityQueue(queue_name="scheduled-priority", clock=clock)
+
+    earlier_low_id = queue.enqueue(
+        "earlier", priority=1, available_at=FIXED_CLOCK_TIME + 10
+    )
+    later_high_id = queue.enqueue(
+        "later", priority=10, available_at=FIXED_CLOCK_TIME + 20
+    )
+    clock.timestamp = FIXED_CLOCK_TIME + 20
+
+    assert queue.dequeue().id == earlier_low_id
+    assert queue.dequeue().id == later_high_id
+
+
+def test_memory_priority_queue_orders_an_availability_group_by_priority():
+    clock = FixedClock()
+    queue = MemoryAsyncPriorityQueue(queue_name="scheduled-priority", clock=clock)
+
+    low_id = queue.enqueue("low", priority=1, available_at=FIXED_CLOCK_TIME + 10)
+    high_id = queue.enqueue("high", priority=10, available_at=FIXED_CLOCK_TIME + 10)
+    clock.timestamp = FIXED_CLOCK_TIME + 10
+
+    assert queue.dequeue().id == high_id
+    assert queue.dequeue().id == low_id
 
 
 def test_memory_priority_queue_has_pending_after_a_tracked_priority_enqueue():
