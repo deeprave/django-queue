@@ -35,11 +35,13 @@ its existing name for callers that are not running on an event loop.
 The system SHALL represent entries in Python as frozen value objects and SHALL
 serialise them as JSON objects for durable storage. Entry records MUST contain
 `id`, `queue`, `status`, `queued_at`, `dispatched_at`, `finished_at`, `payload`,
-`result`, `error`, and `timeout_seconds` fields. The `timeout_seconds` field
+`result`, `error`, `timeout_seconds`, and `priority` fields. The `timeout_seconds` field
 carries that entry's execution budget, or nothing when the entry was enqueued
 without one. It is named for what it holds: a duration, not the instant at which
 the entry expires, which is the one confusion the lifecycle instants beside it
-make easy.
+make easy. The `priority` field is an integer dispatch priority, defaulting to
+`0` when an entry is enqueued without one; a higher value SHALL dispatch before
+a lower one.
 
 Lifecycle timestamps SHALL be held as `ClockTime` values and stored as a float
 count of seconds since the Unix epoch. The durable representation MUST NOT
@@ -107,6 +109,44 @@ duration, not an instant, and SHALL remain a plain count of seconds.
   budget
 - **THEN** the returned record and its durable representation both carry that
   budget
+
+#### Scenario: Default an entry's priority
+- **WHEN** a caller enqueues a payload without specifying a priority
+- **THEN** the returned record and its durable representation carry priority
+  `0`
+
+#### Scenario: Retrieve an AsyncQueue entry enqueued with a priority
+- **WHEN** a caller retrieves an `AsyncQueue` entry that was enqueued with an
+  explicit priority
+- **THEN** the returned record and its durable representation both carry that
+  priority
+
+### Requirement: Enqueue an identified AsyncQueue entry with a dispatch priority
+`AsyncQueue`'s entry-oriented enqueue operation SHALL accept an optional
+integer `priority`, defaulting to `0`, and persist it on the resulting entry
+alongside the standard lifecycle fields. Supplying a priority MUST NOT change
+any other enqueue behaviour: JSON validation, identifier generation, and the
+`queued` status and `queued_at` timestamp are unaffected.
+
+`EventQueue`'s entry-oriented enqueue operation SHALL accept the same optional
+`priority` keyword, for signature compatibility with the shared enqueue
+contract, but MUST ignore it: an event's persisted `priority` is always `0`
+regardless of the value supplied, and dispatch order is unaffected. Priority
+ordering is a task-dispatch concept; `EventQueue` delivers each event to every
+registered listener rather than to a single consumer, so a dispatch priority
+does not apply to it.
+
+#### Scenario: Enqueue an AsyncQueue entry with an explicit priority
+- **WHEN** a caller enqueues a JSON-serialisable payload on an `AsyncQueue`
+  with an explicit priority value
+- **THEN** the system persists an entry whose `priority` field equals that
+  value, alongside the standard `queued` status and `queued_at` timestamp
+
+#### Scenario: EventQueue ignores a supplied priority
+- **WHEN** a caller enqueues a JSON-serialisable payload on an `EventQueue`
+  with an explicit priority value
+- **THEN** the system persists an entry whose `priority` field is `0`, and
+  delivery to registered listeners is unaffected
 
 ### Requirement: Record entry lifecycle outcomes
 
