@@ -46,11 +46,11 @@ try:
         async def _astore_and_push(
             self, entry: QueueEntry, *, available_at=None
         ) -> None:
-            """Atomically store a freshly enqueued entry and add it to the
-            plain pending list -- see `QueueProviderRedis.astore_and_push`.
+            """Atomically store a freshly enqueued entry for immediate dispatch
+            or scheduled availability.
 
-            `RedisAsyncPriorityQueue` overrides this to store-and-push into
-            its own priority-ordered pending store instead.
+            `RedisAsyncPriorityQueue` overrides this to select its priority-aware
+            pending or scheduled store instead.
             """
             if available_at is None:
                 await self._provider.astore_and_push(entry)

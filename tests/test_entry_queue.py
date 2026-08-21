@@ -954,6 +954,11 @@ def test_memory_async_queue_releases_one_earliest_due_entry_per_round():
     assert queue.dequeue().id == later_id
 
 
+def test_memory_async_queue_rejects_a_non_clocktime_available_at(queue):
+    with pytest.raises(TypeError, match="available_at must be a ClockTime or None"):
+        queue.enqueue("work", available_at=10)
+
+
 @pytest.mark.parametrize("available_at", [FIXED_CLOCK_TIME, FIXED_CLOCK_TIME - 1])
 def test_memory_async_queue_dispatches_an_already_due_available_entry(available_at):
     queue = MemoryAsyncQueue(queue_name="scheduled-now", clock=FixedClock())

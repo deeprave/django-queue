@@ -295,6 +295,8 @@ class AsyncQueue(BaseQueue):
         available_at: ClockTime | None = None,
     ) -> UUID:
         validate_json_value(payload)
+        if available_at is not None and not isinstance(available_at, ClockTime):
+            raise TypeError("available_at must be a ClockTime or None")
         entry = self.entry_class.create(
             queue=self.queue_name,
             payload=payload,
