@@ -43,14 +43,27 @@ try:
         async def aclose(self) -> None:
             await self._provider.aclose()
 
-        async def _astore_and_push(self, entry: QueueEntry) -> None:
+        async def _astore_and_push(
+            self, entry: QueueEntry, *, available_at=None
+        ) -> None:
             """Atomically store a freshly enqueued entry and add it to the
             plain pending list -- see `QueueProviderRedis.astore_and_push`.
 
             `RedisAsyncPriorityQueue` overrides this to store-and-push into
             its own priority-ordered pending store instead.
             """
-            await self._provider.astore_and_push(entry)
+            if available_at is None:
+                await self._provider.astore_and_push(entry)
+            else:
+                await self._provider.astore_available(
+                    entry, available_at, priority=False
+                )
+
+        async def _apromote_scheduled(self) -> None:
+            await self._provider.apromote_scheduled()
+
+        async def _astore_and_discard(self, entry: QueueEntry) -> None:
+            await self._provider.astore_and_discard(entry)
 
         async def aclaim(
             self, worker_id: uuid.UUID, lease_seconds: float | None = None

@@ -16,7 +16,7 @@ from django_queue.backends.exceptions import (
     InvalidQueueBackendError,
     QueueEntryNotFoundError,
 )
-from django_queue.clock import DEFAULT_CLOCK, QueueClock
+from django_queue.clock import DEFAULT_CLOCK, ClockTime, QueueClock
 from django_queue.entries import (
     QueueEntry,
     QueueEntryStatus,
@@ -155,12 +155,14 @@ class BaseQueue(ABC):
         *,
         timeout_seconds: float | None = None,
         priority: int = 0,
+        available_at: ClockTime | None = None,
     ) -> UUID:
         return self._run_synchronously(
             self.aenqueue,
             payload,
             timeout_seconds=timeout_seconds,
             priority=priority,
+            available_at=available_at,
         )
 
     @abstractmethod
@@ -170,12 +172,14 @@ class BaseQueue(ABC):
         *,
         timeout_seconds: float | None = None,
         priority: int = 0,
+        available_at: ClockTime | None = None,
     ) -> UUID:
         """Store a JSON-serialisable payload and return its queue-owned ID.
 
         An execution budget given here is carried on the entry and persisted
         with it, so it survives enqueue and reaches whichever worker dispatches
-        the entry. `priority` is only consulted by priority-variant `AsyncQueue`
+        the entry. `available_at` delays eligibility where scheduling is
+        supported. `priority` is only consulted by priority-variant `AsyncQueue`
         backends; ignored elsewhere (e.g. by `EventQueue` and non-priority
         `AsyncQueue` backends, whose dispatch order -- FIFO, or LIFO for a
         stack -- is unaffected by it).
@@ -288,6 +292,7 @@ class AsyncQueue(BaseQueue):
         *,
         timeout_seconds: float | None = None,
         priority: int = 0,
+        available_at: ClockTime | None = None,
     ) -> UUID:
         validate_json_value(payload)
         entry = self.entry_class.create(
@@ -298,11 +303,16 @@ class AsyncQueue(BaseQueue):
             priority=priority,
         )
         self._configure_provider_entry_class()
-        await self._astore_and_push(entry)
+        if available_at is None:
+            await self._astore_and_push(entry)
+        else:
+            await self._astore_and_push(entry, available_at=available_at)
         send_entry_enqueued(self, entry=entry)
         return entry.id
 
-    async def _astore_and_push(self, entry: QueueEntry) -> None:
+    async def _astore_and_push(
+        self, entry: QueueEntry, *, available_at: ClockTime | None = None
+    ) -> None:
         """Store a freshly enqueued entry and add it to the tracked pending
         store.
 
@@ -318,7 +328,10 @@ class AsyncQueue(BaseQueue):
         single atomic Lua script instead.
         """
         await self._provider.astore(entry)
-        await self._apush(entry)
+        if available_at is not None and available_at > await self.clock.anow():
+            await self._provider.aschedule(entry.id, available_at)
+        else:
+            await self._apush(entry)
 
     async def _apush(self, entry: QueueEntry) -> None:
         """Add a freshly enqueued entry to the tracked pending store.
@@ -332,11 +345,16 @@ class AsyncQueue(BaseQueue):
 
     async def _apop(self) -> QueueEntry:
         """Remove and return the next entry from the tracked pending store."""
+        await self._apromote_scheduled()
         return await self._provider.apop()
+
+    async def _apromote_scheduled(self) -> None:
+        """Promote due scheduled entries before direct dequeue where supported."""
 
     async def _adiscard(self, entry_id: UUID) -> None:
         """Remove one entry from the tracked pending store without dispatching it."""
         await self._provider.adiscard(entry_id)
+        await self._provider.adiscard_scheduled(entry_id)
 
     async def afind(self, entry_id: UUID) -> QueueEntry:
         self._configure_provider_entry_class()
@@ -457,13 +475,19 @@ class AsyncQueue(BaseQueue):
                 f"Cannot transition queue entry from {previous_entry.status} to {status}"
             )
         entry = replace(previous_entry, status=status, **changes)
-        await self._provider.astore(entry)
         if (
             previous_entry.status is QueueEntryStatus.QUEUED
             and status is QueueEntryStatus.FAILED
         ):
-            await self._adiscard(entry_id)
+            await self._astore_and_discard(entry)
+        else:
+            await self._provider.astore(entry)
         return entry
+
+    async def _astore_and_discard(self, entry: QueueEntry) -> None:
+        """Persist a queued terminal entry and remove dispatch membership."""
+        await self._provider.astore(entry)
+        await self._adiscard(entry.id)
 
 
 class EventQueue(BaseQueue):
@@ -498,9 +522,10 @@ class EventQueue(BaseQueue):
         *,
         timeout_seconds: float | None = None,
         priority: int = 0,
+        available_at: ClockTime | None = None,
     ) -> UUID:
-        """`priority` is accepted for signature compatibility with `AsyncQueue`
-        and ignored -- events always dispatch in arrival order."""
+        """`priority` and `available_at` are accepted for signature compatibility
+        with `AsyncQueue` and ignored -- events always dispatch in arrival order."""
         validate_json_value(payload)
         lifetime = validate_budget(self._resolve_lifetime(timeout_seconds))
         entry = self.entry_class.create(

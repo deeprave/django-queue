@@ -44,6 +44,7 @@ class QueueProviderMemory:
         self._claims: dict[UUID, UUID] = {}
         self._claim_deadlines: dict[UUID, ClockTime] = {}
         self._available_at: dict[UUID, ClockTime] = {}
+        self._scheduled: dict[UUID, ClockTime] = {}
         self._unclaimed_deadlines: dict[UUID, ClockTime] = {}
         self._unclaimed_remaining: dict[UUID, float] = {}
 
@@ -172,6 +173,7 @@ class QueueProviderMemory:
             self._claims.pop(entry_id, None)
             self._claim_deadlines.pop(entry_id, None)
             self._available_at.pop(entry_id, None)
+            self._scheduled.pop(entry_id, None)
             self._unclaimed_deadlines.pop(entry_id, None)
             self._unclaimed_remaining.pop(entry_id, None)
             self._remove_pending(entry_id)
@@ -193,6 +195,7 @@ class QueueProviderMemory:
                 return False
             self._entries.pop(entry_id)
             self._available_at.pop(entry_id, None)
+            self._scheduled.pop(entry_id, None)
             self._unclaimed_deadlines.pop(entry_id, None)
             self._unclaimed_remaining.pop(entry_id, None)
             self._remove_pending(entry_id)
@@ -205,6 +208,65 @@ class QueueProviderMemory:
     async def apush(self, entry_id: UUID) -> None:
         with self._lock:
             self._pending.put_nowait(entry_id)
+
+    async def aschedule(self, entry_id: UUID, available_at: ClockTime) -> None:
+        with self._lock:
+            self._scheduled[entry_id] = available_at
+
+    async def apromote_scheduled(self) -> None:
+        now = await self.clock.anow()
+        with self._lock:
+            entry_id = self._pop_next_due_scheduled(now)
+            if entry_id is not None:
+                self._pending.put_nowait(entry_id)
+
+    async def apromote_scheduled_priority(self) -> None:
+        now = await self.clock.anow()
+        with self._lock:
+            entry_id = self._pop_next_due_scheduled(now, priority=True)
+            if entry_id is not None:
+                entry = self._entries[entry_id]
+                self._pending_priority_sequence += 1
+                self._pending_priority.put_nowait(
+                    (-int(entry.priority), self._pending_priority_sequence, entry_id)
+                )
+
+    def _pop_next_due_scheduled(
+        self, now: ClockTime, *, priority: bool = False
+    ) -> UUID | None:
+        """Remove one valid entry from the earliest due availability group."""
+        while due_entries := [
+            (entry_id, available_at)
+            for entry_id, available_at in self._scheduled.items()
+            if available_at <= now
+        ]:
+            earliest_available_at = min(available_at for _, available_at in due_entries)
+            candidates = [
+                entry_id
+                for entry_id, available_at in due_entries
+                if available_at == earliest_available_at
+            ]
+            queued_candidates = [
+                entry_id
+                for entry_id in candidates
+                if (entry := self._entries.get(entry_id)) is not None
+                and entry.status is QueueEntryStatus.QUEUED
+            ]
+            for entry_id in candidates:
+                if entry_id not in queued_candidates:
+                    self._scheduled.pop(entry_id, None)
+            if not queued_candidates:
+                continue
+            if priority:
+                entry_id = max(
+                    queued_candidates,
+                    key=lambda candidate: self._entries[candidate].priority,
+                )
+            else:
+                entry_id = queued_candidates[0]
+            self._scheduled.pop(entry_id)
+            return entry_id
+        return None
 
     async def apop(self) -> QueueEntry:
         with self._lock:
@@ -219,6 +281,10 @@ class QueueProviderMemory:
     async def adiscard(self, entry_id: UUID) -> None:
         with self._lock:
             self._remove_pending(entry_id)
+
+    async def adiscard_scheduled(self, entry_id: UUID) -> None:
+        with self._lock:
+            self._scheduled.pop(entry_id, None)
 
     async def apush_priority(self, entry_id: UUID, priority: int) -> None:
         # A bare (-priority, entry_id) tuple ties equal priorities by
@@ -254,7 +320,11 @@ class QueueProviderMemory:
 
     async def ahas_pending(self) -> bool:
         with self._lock:
-            return not self._pending.empty() or not self._pending_priority.empty()
+            return (
+                not self._pending.empty()
+                or not self._pending_priority.empty()
+                or bool(self._scheduled)
+            )
 
     async def aclaim(
         self, worker_id: UUID, lease_seconds: float | None = None
@@ -305,6 +375,7 @@ class QueueProviderMemory:
         now = await self.clock.anow()
         if lease_seconds is not None:
             validate_budget(lease_seconds)
+        await self.apromote_scheduled()
         with self._lock:
             self._recover_expired_claims(now)
             for _ in range(self._pending.qsize()):

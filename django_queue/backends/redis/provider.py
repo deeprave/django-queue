@@ -74,6 +74,21 @@ def validate_redis_priority_magnitude(priority: int) -> int:
 _CLAIM_SCRIPT = b"""
     local now = redis.call("TIME")
     local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    local earliest = redis.call("ZRANGEBYSCORE", KEYS[7], "-inf", now_us, "WITHSCORES", "LIMIT", 0, 1)
+    if #earliest > 0 then
+        local scheduled = redis.call("ZRANGEBYSCORE", KEYS[7], earliest[2], earliest[2])
+        for index = 1, #scheduled do
+            local raw_entry = redis.call("GET", KEYS[5] .. scheduled[index])
+            local ok, entry = pcall(cjson.decode, raw_entry)
+            if ok and type(entry) == "table" and entry.status == "queued" then
+                if ARGV[3] == "1" then redis.call("LPUSH", KEYS[1], scheduled[index])
+                else redis.call("RPUSH", KEYS[1], scheduled[index]) end
+                redis.call("ZREM", KEYS[7], scheduled[index])
+                break
+            end
+            redis.call("ZREM", KEYS[7], scheduled[index])
+        end
+    end
     local delayed = redis.call("ZRANGEBYSCORE", KEYS[2], "-inf", now_us)
     for index = 1, #delayed do
         if ARGV[3] == "1" then
@@ -143,6 +158,29 @@ _CLAIM_SCRIPT = b"""
 _CLAIM_SCRIPT_WITH_PRIORITY = b"""
     local now = redis.call("TIME")
     local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    local earliest = redis.call("ZRANGEBYSCORE", KEYS[9], "-inf", now_us, "WITHSCORES", "LIMIT", 0, 1)
+    if #earliest > 0 then
+        local scheduled = redis.call("ZRANGEBYSCORE", KEYS[9], earliest[2], earliest[2])
+        local selected_id
+        local selected_priority
+        for index = 1, #scheduled do
+            local raw_entry = redis.call("GET", KEYS[5] .. scheduled[index])
+            local ok, entry = pcall(cjson.decode, raw_entry)
+            if ok and type(entry) == "table" and entry.status == "queued" then
+                local priority = tonumber(entry.priority) or 0
+                if not selected_id or priority > selected_priority then
+                    selected_id, selected_priority = scheduled[index], priority
+                end
+            else
+                redis.call("ZREM", KEYS[9], scheduled[index])
+            end
+        end
+        if selected_id then
+            local sequence = redis.call("INCR", KEYS[8])
+            redis.call("ZADD", KEYS[7], selected_priority * ARGV[5] - sequence, selected_id)
+            redis.call("ZREM", KEYS[9], selected_id)
+        end
+    end
     local delayed = redis.call("ZRANGEBYSCORE", KEYS[2], "-inf", now_us)
     for index = 1, #delayed do
         if ARGV[3] == "1" then
@@ -571,6 +609,77 @@ _STORE_AND_PUSH_PRIORITY_SCRIPT = b"""
     redis.call("ZADD", KEYS[2], score, ARGV[2])
 """
 
+_STORE_AVAILABLE_SCRIPT = b"""
+    local now = redis.call("TIME")
+    local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    redis.call("SET", KEYS[1], ARGV[1])
+    if tonumber(ARGV[3]) > now_us then
+        redis.call("ZADD", KEYS[3], ARGV[3], ARGV[2])
+    elseif ARGV[5] == "1" then
+        local sequence = redis.call("INCR", KEYS[5])
+        redis.call("ZADD", KEYS[4], tonumber(ARGV[4]) - sequence, ARGV[2])
+    elseif ARGV[6] == "1" then
+        redis.call("LPUSH", KEYS[2], ARGV[2])
+    else
+        redis.call("RPUSH", KEYS[2], ARGV[2])
+    end
+"""
+
+_PROMOTE_SCHEDULED_SCRIPT = b"""
+    local now = redis.call("TIME")
+    local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    local earliest = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", now_us, "WITHSCORES", "LIMIT", 0, 1)
+    if #earliest == 0 then return false end
+    local ids = redis.call("ZRANGEBYSCORE", KEYS[1], earliest[2], earliest[2])
+    for index = 1, #ids do
+        local raw_entry = redis.call("GET", KEYS[2] .. ids[index])
+        local ok, entry = pcall(cjson.decode, raw_entry)
+        if ok and type(entry) == "table" and entry.status == "queued" then
+            if ARGV[1] == "1" then redis.call("LPUSH", KEYS[3], ids[index])
+            else redis.call("RPUSH", KEYS[3], ids[index]) end
+            redis.call("ZREM", KEYS[1], ids[index])
+            return ids[index]
+        end
+        redis.call("ZREM", KEYS[1], ids[index])
+    end
+    return false
+"""
+
+_PROMOTE_SCHEDULED_PRIORITY_SCRIPT = b"""
+    local now = redis.call("TIME")
+    local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    local earliest = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", now_us, "WITHSCORES", "LIMIT", 0, 1)
+    if #earliest == 0 then return false end
+    local ids = redis.call("ZRANGEBYSCORE", KEYS[1], earliest[2], earliest[2])
+    local selected_id
+    local selected_priority
+    for index = 1, #ids do
+        local raw_entry = redis.call("GET", KEYS[2] .. ids[index])
+        local ok, entry = pcall(cjson.decode, raw_entry)
+        if ok and type(entry) == "table" and entry.status == "queued" then
+            local priority = tonumber(entry.priority) or 0
+            if not selected_id or priority > selected_priority then
+                selected_id, selected_priority = ids[index], priority
+            end
+        else
+            redis.call("ZREM", KEYS[1], ids[index])
+        end
+    end
+    if not selected_id then return false end
+    local sequence = redis.call("INCR", KEYS[4])
+    redis.call("ZADD", KEYS[3], selected_priority * tonumber(ARGV[1]) - sequence, selected_id)
+    redis.call("ZREM", KEYS[1], selected_id)
+    return selected_id
+"""
+
+_STORE_AND_DISCARD_SCRIPT = b"""
+    redis.call("SET", KEYS[1], ARGV[1])
+    redis.call("LREM", KEYS[2], 0, ARGV[2])
+    redis.call("ZREM", KEYS[3], ARGV[2])
+    redis.call("ZREM", KEYS[5], ARGV[2])
+    if redis.call("ZCARD", KEYS[3]) == 0 then redis.call("SET", KEYS[4], 0, "XX") end
+"""
+
 _STORE_EVENT_AND_PUSH_SCRIPT = b"""
     redis.call("SET", KEYS[1], ARGV[1])
     redis.call("ZADD", KEYS[2], ARGV[4], ARGV[3])
@@ -596,6 +705,7 @@ _DELETE_SCRIPT = b"""
     redis.call("ZREM", KEYS[5], ARGV[1])
     redis.call("DEL", KEYS[6])
     redis.call("ZREM", KEYS[7], ARGV[1])
+    redis.call("ZREM", KEYS[9], ARGV[1])
     if redis.call("ZCARD", KEYS[7]) == 0 then
         redis.call("SET", KEYS[8], 0, "XX")
     end
@@ -623,6 +733,10 @@ class _Scripts:
     discard_priority: Any
     store_and_push: Any
     store_and_push_priority: Any
+    store_scheduled: Any
+    promote_scheduled: Any
+    promote_scheduled_priority: Any
+    store_and_discard: Any
     store_event_and_push: Any
     delete: Any
 
@@ -725,6 +839,7 @@ class QueueProviderRedis:
             f"{self._queue_name}:entries:pending:priority:sequence"
         )
         self._entry_delayed_name = f"{self._queue_name}:entries:delayed"
+        self._entry_scheduled_name = f"{self._queue_name}:entries:scheduled"
         self._entry_claim_prefix = f"{self._queue_name}:entries:claims:"
         self._entry_claim_deadlines_name = f"{self._queue_name}:entries:claim-leases"
         self._entry_unclaimed_deadlines_name = (
@@ -916,6 +1031,12 @@ class QueueProviderRedis:
             store_and_push_priority=self._register_script(
                 client, _STORE_AND_PUSH_PRIORITY_SCRIPT
             ),
+            store_scheduled=self._register_script(client, _STORE_AVAILABLE_SCRIPT),
+            promote_scheduled=self._register_script(client, _PROMOTE_SCHEDULED_SCRIPT),
+            promote_scheduled_priority=self._register_script(
+                client, _PROMOTE_SCHEDULED_PRIORITY_SCRIPT
+            ),
+            store_and_discard=self._register_script(client, _STORE_AND_DISCARD_SCRIPT),
             store_event_and_push=self._register_script(
                 client, _STORE_EVENT_AND_PUSH_SCRIPT
             ),
@@ -1026,6 +1147,55 @@ class QueueProviderRedis:
             ),
         )
 
+    async def astore_available(
+        self, entry: QueueEntry, available_at, *, priority: bool
+    ) -> None:
+        """Atomically store an entry and choose scheduled or immediate membership."""
+        if entry.status is QueueEntryStatus.TERMINATED:
+            raise TypeError("Terminated queue entry snapshots cannot be stored")
+        if priority:
+            validate_redis_priority_magnitude(entry.priority)
+        self._async_redis()
+        await self._async_scripts_by_loop[asyncio.get_running_loop()].store_scheduled(
+            keys=(
+                self._entry_key(entry.id),
+                self._entry_pending_name,
+                self._entry_scheduled_name,
+                self._entry_pending_priority_name,
+                self._entry_pending_priority_sequence_name,
+            ),
+            args=(
+                self.encode(json.dumps(entry.to_dict()), "ascii"),
+                self.encode(str(entry.id), "ascii"),
+                self.encode(
+                    str(
+                        available_at.seconds * MICROSECONDS_PER_SECOND
+                        + available_at.microseconds
+                    ),
+                    "ascii",
+                ),
+                self.encode(str(entry.priority * _PRIORITY_SEQUENCE_SPACE), "ascii"),
+                b"1" if priority else b"0",
+                b"1" if self._stack else b"0",
+            ),
+        )
+
+    async def astore_and_discard(self, entry: QueueEntry) -> None:
+        self._async_redis()
+        await self._async_scripts_by_loop[asyncio.get_running_loop()].store_and_discard(
+            keys=(
+                self._entry_key(entry.id),
+                self._entry_pending_name,
+                self._entry_pending_priority_name,
+                self._entry_pending_priority_sequence_name,
+                self._entry_scheduled_name,
+            ),
+            args=(
+                self.encode(json.dumps(entry.to_dict()), "ascii"),
+                self.encode(str(entry.id), "ascii"),
+            ),
+        )
+
     async def astore_event_and_push(self, entry: QueueEntry) -> None:
         """Atomically store a new event, index its unclaimed deadline, and
         add it to the plain pending list -- the event-queue equivalent of
@@ -1089,6 +1259,7 @@ class QueueProviderRedis:
                 self._claim_key(entry_id),
                 self._entry_pending_priority_name,
                 self._entry_pending_priority_sequence_name,
+                self._entry_scheduled_name,
             ),
             args=(entry_id_value,),
         )
@@ -1143,6 +1314,33 @@ class QueueProviderRedis:
             self._entry_pending_name, self.encode(str(entry_id), "ascii")
         )
 
+    async def apromote_scheduled(self) -> None:
+        """Move due scheduled IDs into FIFO membership before direct dequeue."""
+        self._async_redis()
+        await self._async_scripts_by_loop[asyncio.get_running_loop()].promote_scheduled(
+            keys=(
+                self._entry_scheduled_name,
+                self.encode(f"{self._queue_name}:entries:", self._connection_encoding),
+                self._entry_pending_name,
+            ),
+            args=(b"1" if self._stack else b"0",),
+        )
+
+    async def apromote_scheduled_priority(self) -> None:
+        """Move due scheduled IDs into priority membership before direct dequeue."""
+        self._async_redis()
+        await self._async_scripts_by_loop[
+            asyncio.get_running_loop()
+        ].promote_scheduled_priority(
+            keys=(
+                self._entry_scheduled_name,
+                self.encode(f"{self._queue_name}:entries:", self._connection_encoding),
+                self._entry_pending_priority_name,
+                self._entry_pending_priority_sequence_name,
+            ),
+            args=(self.encode(str(_PRIORITY_SEQUENCE_SPACE), "ascii"),),
+        )
+
     async def apop(self) -> QueueEntry:
         raw_entry_id = (
             await self._async_redis().rpop(self._entry_pending_name)
@@ -1156,6 +1354,11 @@ class QueueProviderRedis:
     async def adiscard(self, entry_id: uuid.UUID) -> None:
         await self._async_redis().lrem(
             self._entry_pending_name, 0, self.encode(str(entry_id), "ascii")
+        )
+
+    async def adiscard_scheduled(self, entry_id: uuid.UUID) -> None:
+        await self._async_redis().zrem(
+            self._entry_scheduled_name, self.encode(str(entry_id), "ascii")
         )
 
     async def apush_priority(self, entry_id: uuid.UUID, priority: int) -> None:
@@ -1223,6 +1426,7 @@ class QueueProviderRedis:
         return bool(
             await client.llen(self._entry_pending_name)
             or await client.zcard(self._entry_delayed_name)
+            or await client.zcard(self._entry_scheduled_name)
             or await client.zcard(self._entry_pending_priority_name)
         )
 
@@ -1303,6 +1507,7 @@ class QueueProviderRedis:
                 self._entry_claim_deadlines_name,
                 self.encode(f"{self._queue_name}:entries:", self._connection_encoding),
                 self._entry_unclaimed_deadlines_name,
+                self._entry_scheduled_name,
             ),
             args=(
                 self.encode(str(worker_id), "ascii"),
@@ -1351,6 +1556,7 @@ class QueueProviderRedis:
                 self._entry_unclaimed_deadlines_name,
                 self._entry_pending_priority_name,
                 self._entry_pending_priority_sequence_name,
+                self._entry_scheduled_name,
             ),
             args=(
                 self.encode(str(worker_id), "ascii"),
@@ -1359,6 +1565,7 @@ class QueueProviderRedis:
                 ),
                 b"1" if self._stack else b"0",
                 b"1" if expire_unclaimed else b"0",
+                self.encode(str(_PRIORITY_SEQUENCE_SPACE), "ascii"),
             ),
             client=client,
         )

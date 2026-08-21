@@ -26,6 +26,9 @@ class MemoryAsyncQueue(AsyncQueue):
     async def apublish(self, entry: QueueEntry) -> None:
         publish(self, entry)
 
+    async def _apromote_scheduled(self) -> None:
+        await self._provider.apromote_scheduled()
+
 
 class MemoryAsyncStack(MemoryAsyncQueue):
     def __init__(self, _: str | None = None, options: dict | None = None, **kwargs):
